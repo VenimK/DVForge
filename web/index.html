@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RustDesk Local Builder</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app">
+
+  <!-- ── left rail: this machine ── -->
+  <aside class="rig">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true"></div>
+      <div>
+        <div class="brand-name">RustDesk</div>
+        <div class="brand-sub">Local Builder</div>
+      </div>
+    </div>
+
+    <section class="rig-card" id="machine">
+      <h2 class="rig-title">This machine</h2>
+      <div class="spec" id="spec"><div class="spec-loading">reading hardware…</div></div>
+    </section>
+
+    <section class="rig-card">
+      <h2 class="rig-title">Toolchain
+        <span class="rig-title-actions">
+          <button class="mini" id="install-missing" title="Download missing toolchains into a local folder" hidden>install missing</button>
+          <button class="mini" id="recheck" title="Re-scan toolchains">re-scan</button>
+        </span>
+      </h2>
+      <ul class="prereqs" id="prereqs"><li class="muted">checking…</li></ul>
+      <div class="local-foot" id="local-foot" hidden></div>
+      <div class="install-log" id="install-log" hidden>
+        <div class="install-log-head">
+          <span id="install-log-title">installing…</span>
+          <button class="mini" id="install-cancel">cancel</button>
+        </div>
+        <pre id="install-console"></pre>
+      </div>
+    </section>
+
+    <footer class="rig-foot">
+      No GitHub. Everything runs on this device.
+    </footer>
+  </aside>
+
+  <!-- ── main ── -->
+  <main class="main">
+    <nav class="tabs" role="tablist">
+      <button class="tab is-active" data-tab="targets" role="tab">Targets</button>
+      <button class="tab" data-tab="config" role="tab">Config</button>
+      <button class="tab" data-tab="console" role="tab">Build</button>
+    </nav>
+
+    <!-- TARGETS -->
+    <section class="panel is-active" id="tab-targets" role="tabpanel">
+      <header class="panel-head">
+        <h1>What can this machine build?</h1>
+        <p class="lede" id="matrix-lede">Lit cells are ready to build right now. Outlined cells
+          need a toolchain. Hatched cells need a different host OS.</p>
+      </header>
+
+      <div class="legend" aria-hidden="true">
+        <span class="lg lg-ready">◉ ready</span>
+        <span class="lg lg-need">⚠ needs a tool (installable)</span>
+        <span class="lg lg-blocked">▨ wrong host OS</span>
+      </div>
+
+      <div class="board" id="board"><div class="muted">building capability map…</div></div>
+
+      <div class="tray">
+        <div class="tray-info">
+          <span id="sel-count">0</span> selected
+          <span class="tray-hint" id="sel-hint"></span>
+        </div>
+        <div class="tray-actions">
+          <label class="dry">
+            <input type="checkbox" id="dry-run">
+            <span>Dry run (print commands only)</span>
+          </label>
+          <button class="btn ghost" id="btn-plan" disabled>Preview plan</button>
+          <button class="btn primary" id="btn-build" disabled>Start build</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- CONFIG -->
+    <section class="panel" id="tab-config" role="tabpanel">
+      <header class="panel-head">
+        <h1>Baked-in config</h1>
+        <p class="lede">These values are compiled into the client and written to
+          <code>custom_.txt</code>. The password and permissions live in the base64 payload.</p>
+      </header>
+
+      <div class="config-grid">
+        <div class="form">
+          <fieldset>
+            <legend>Server</legend>
+            <label>Server address<input data-key="serverIP" placeholder="host.example.com"></label>
+            <label>Public key<input data-key="key" spellcheck="false"></label>
+            <label>API server<input data-key="apiServer" placeholder="https://host.example.com/"></label>
+          </fieldset>
+
+          <fieldset>
+            <legend>Identity</legend>
+            <label>App name<input data-key="appname" placeholder="RustDesk = no rename"></label>
+            <label>File name<input data-key="exename" placeholder="RustDesk"></label>
+            <label>Company<input data-key="compname"></label>
+            <label>Slogan<input data-key="slogan" placeholder="blank = Powered by {appname}"></label>
+            <label>Android app id<input data-key="androidappid" placeholder="blank = default"></label>
+            <label>Theme color</label>
+            <div class="color-picker">
+              <input type="color" id="themeColorPicker" value="#0071FF">
+              <input type="range" id="themeColorHue" min="0" max="360" value="212" class="hue-slider">
+              <input data-key="themeColor" id="themeColorHex" placeholder="#0071FF" spellcheck="false">
+              <span class="color-swatch" id="themeColorSwatch"></span>
+            </div>
+          </fieldset>
+
+          <fieldset>
+            <legend>Links</legend>
+            <label>Custom URL for links (replaces https://rustdesk.com)<input data-key="urlLink" placeholder="https://rustdesk.com"></label>
+            <label>Custom URL for downloading updates (replaces https://rustdesk.com/download)<input data-key="downloadLink" placeholder="https://rustdesk.com/download"></label>
+          </fieldset>
+
+          <fieldset>
+            <legend>Branding</legend>
+            <div class="upload-row">
+              <div class="upload-item">
+                <label class="upload-label">App icon (PNG, 1024×1024 recommended)</label>
+                <input type="file" id="icon-file" accept="image/png,image/jpeg,image/svg+xml">
+                <div class="upload-preview" id="icon-preview"></div>
+                <button class="mini" id="icon-clear" hidden>remove</button>
+              </div>
+              <div class="upload-item">
+                <label class="upload-label">App logo (PNG or SVG, shown in About)</label>
+                <input type="file" id="logo-file" accept="image/png,image/jpeg,image/svg+xml">
+                <div class="upload-preview" id="logo-preview"></div>
+                <button class="mini" id="logo-clear" hidden>remove</button>
+              </div>
+            </div>
+            <input type="hidden" data-key="iconFile" id="icon-file-path">
+            <input type="hidden" data-key="logoFile" id="logo-file-path">
+          </fieldset>
+
+          <fieldset>
+            <legend>Access</legend>
+            <label>Permanent password<input data-key="permanentPassword" type="text" spellcheck="false"></label>
+            <label>Approval mode
+              <select data-key="passApproveMode">
+                <option value="password-click">password-click (password AND on-screen accept)</option>
+                <option value="password">password only</option>
+                <option value="click">click only</option>
+              </select>
+            </label>
+          </fieldset>
+
+          <fieldset>
+            <legend>Permissions</legend>
+            <div class="toggles" id="perm-toggles"></div>
+          </fieldset>
+
+          <fieldset>
+            <legend>Tweaks</legend>
+            <div class="toggles" id="flag-toggles"></div>
+          </fieldset>
+
+          <div class="form-actions">
+            <button class="btn primary" id="btn-save-config">Save config</button>
+            <span class="save-note" id="save-note"></span>
+          </div>
+        </div>
+
+        <aside class="preview">
+          <h3>custom_.txt preview</h3>
+          <p class="preview-note">Written next to the binary as <strong>base64</strong> — never raw JSON.
+            Decoded for readability here.</p>
+          <pre id="custom-preview" class="code">—</pre>
+          <h3>Compiled-in values</h3>
+          <pre id="env-preview" class="code">—</pre>
+        </aside>
+      </div>
+    </section>
+
+    <!-- CONSOLE -->
+    <section class="panel" id="tab-console" role="tabpanel">
+      <header class="panel-head">
+        <h1>Build</h1>
+        <p class="lede">Runs the same steps as the GitHub Actions workflow, on this machine.</p>
+      </header>
+
+      <div class="config-banner" id="config-banner" hidden></div>
+
+      <div class="build-bar">
+        <label class="ver">RustDesk version
+          <input id="version" value="1.4.9" size="10">
+        </label>
+        <span class="build-status" id="build-status">idle</span>
+        <span class="build-timer" id="build-timer"></span>
+        <button class="btn ghost" id="btn-copy-log" title="Copy the entire build log to the clipboard">Copy log</button>
+        <button class="btn ghost" id="btn-copy-errors" title="Copy only the error lines to the clipboard">Copy errors</button>
+        <button class="btn ghost" id="btn-open-folder" title="Open the build output folder in your file manager">Open folder</button>
+        <button class="btn danger" id="btn-cancel" disabled>Cancel</button>
+      </div>
+
+      <pre class="console" id="console"><span class="con-hint">Select targets, then Start build. Output streams here.</span></pre>
+
+      <div class="artifacts" id="artifacts"></div>
+    </section>
+  </main>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

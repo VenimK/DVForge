@@ -1,0 +1,48 @@
+# === Build outputs (huge, machine-specific) ===
+workspace/
+.toolchains/
+
+# === Python ===
+__pycache__/
+builder/__pycache__/
+*.pyc
+*.pyo
+
+# === Build artifacts (shouldn't be committed) ===
+*.exe
+*.msi
+*.dmg
+*.deb
+*.rpm
+*.AppImage
+*.apk
+*.zip
+*.tar.gz
+*.tgz
+
+# === Logs & screenshots ===
+*.log
+*.png
+*.jpg
+*.svg
+error*.txt
+buildingMSI.txt
+nugetmsi.txt
+
+# === OS / editor cruft ===
+.DS_Store
+.vscode/
+.idea/
+*.bak
+*.cache
+.env
+
+# === Keep these tracked (don't ignore) ===
+!clean.sh
+!clean.bat
+!run.sh
+!run.bat
+!README.md
+!HANDOFF.md
+!precheck.bat
+!precheck.sh
