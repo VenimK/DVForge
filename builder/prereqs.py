@@ -125,11 +125,65 @@ def check_flutter():
     return _status(True, ver, p, note=note)
 
 
+def _find_msvc_cl():
+    """Locate MSVC cl.exe via vswhere (Windows only)."""
+    if _system() != "Windows":
+        return None
+    pf = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+    vswhere = os.path.join(pf, "Microsoft Visual Studio", "Installer", "vswhere.exe")
+    if not os.path.isfile(vswhere):
+        return None
+    try:
+        out = subprocess.check_output(
+            [vswhere, "-latest", "-products", "*",
+             "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+             "-find", r"**\Hostx64\x64\cl.exe"],
+            encoding="utf-8", errors="replace", timeout=20).strip()
+        if out:
+            return out.splitlines()[0].strip()
+        # Fallback: installation path + walk for cl.exe
+        root = subprocess.check_output(
+            [vswhere, "-latest", "-products", "*",
+             "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+             "-property", "installationPath"],
+            encoding="utf-8", errors="replace", timeout=20).strip()
+        if root and os.path.isdir(root):
+            tools = os.path.join(root, "VC", "Tools", "MSVC")
+            if os.path.isdir(tools):
+                for ver in sorted(os.listdir(tools), reverse=True):
+                    cl = os.path.join(tools, ver, "bin", "Hostx64", "x64", "cl.exe")
+                    if os.path.isfile(cl):
+                        return cl
+    except Exception:
+        pass
+    return None
+
+
 def check_clang():
+    """Detect a host C/C++ compiler.
+
+    Linux/macOS: clang, gcc, or cc on PATH.
+    Windows: MSVC (cl.exe) is the real requirement for RustDesk builds —
+    clang/gcc are optional. Without this, the sidebar shows a false red
+    "C/C++ compiler (clang/gcc) not found" even when VS Build Tools are
+    installed (which is the normal Windows setup).
+    """
     for name in ("clang", "cc", "gcc"):
         p = _which(name)
         if p:
             return _status(True, _run_version([name, "--version"]) or name, p)
+    # Windows: accept MSVC toolset (what Rust's windows-msvc target uses).
+    if _system() == "Windows":
+        cl = _which("cl") or _find_msvc_cl()
+        if cl:
+            return _status(True, "MSVC (cl.exe)", cl,
+                           note="Visual C++ toolset — used by Rust windows-msvc.")
+        # Same signal as check_msbuild: VC++ component present even if cl path
+        # lookup failed (vswhere version differences).
+        msb = check_msbuild()
+        if msb.get("present"):
+            return _status(True, "MSVC (via VS Build Tools)", msb.get("path") or "",
+                           note="Visual C++ toolset available (link.exe/MSBuild).")
     return _status(False, hint=_install_hint("clang"))
 
 def _dir_has_libclang(d):
@@ -498,7 +552,7 @@ LABELS = {
     "rust": "Rust toolchain (rustc + cargo)",
     "rust_target": "Rust target (MSVC vs GNU)",
     "flutter": "Flutter SDK",
-    "clang": "C/C++ compiler (clang/gcc)",
+    "clang": "C/C++ compiler (MSVC / clang / gcc)",
     "llvm": "LLVM / libclang",
     "vcpkg": "vcpkg (native deps: ffmpeg, hwcodec)",
     "msbuild": "MSBuild (Visual Studio)",
@@ -551,7 +605,7 @@ def _install_hint(tool):
             "macOS": "Install Flutter 3.24.5: https://docs.flutter.dev/get-started/install/macos  (or: brew install --cask flutter)",
         },
         "clang": {
-            "Windows": "Comes with Visual Studio C++ workload.",
+            "Windows": "Install Build Tools for Visual Studio (C++ workload) — provides MSVC cl.exe/link.exe. Click install next to MSBuild if offered.",
             "Linux": "sudo apt install clang cmake ninja-build pkg-config libgtk-3-dev",
             "macOS": "xcode-select --install",
         },
