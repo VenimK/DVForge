@@ -9,7 +9,7 @@ The rules come straight from the GitHub Actions workflows in rustdesk-builder-v2
   - Windows desktop  = Flutter Windows engine, MSVC toolchain  -> Windows host only
   - macOS desktop    = Xcode / clang / create-dmg              -> macOS host only
   - Linux desktop    = gcc/clang + flutter-elinux for arm64     -> Linux host only
-  - Android (all archs) = Android NDK (cross-platform)          -> any host
+  - Android (all archs) = Android NDK (cross-platform)          -> Linux/Windows host
 """
 
 import os
@@ -188,19 +188,21 @@ TARGETS = [
      "label": "Linux arm64 — .deb", "ext": "deb", "host_os": ["Linux"],
      "note": "arm64 build. Native on an arm64 Linux host; needs flutter-elinux."},
 
-    # ---- Android (NDK, cross-platform: builds on any host) ----
+    # ---- Android (NDK, cross-platform: builds on Linux/Windows hosts) ----
+    # NOTE: Android builds on macOS are disabled — the NDK/Gradle toolchain is
+    # unreliable on macOS hosts. Use a Linux or Windows host for Android APKs.
     {"id": "android-arm64", "platform": "android", "arch": "aarch64",
-     "label": "Android arm64-v8a APK", "ext": "apk", "host_os": ["Linux", "macOS", "Windows"],
-     "note": "Most modern phones. Built via Android NDK on any host."},
+     "label": "Android arm64-v8a APK", "ext": "apk", "host_os": ["Linux", "Windows"],
+     "note": "Most modern phones. Built via Android NDK on Linux/Windows."},
     {"id": "android-armv7", "platform": "android", "arch": "armv7",
-     "label": "Android armeabi-v7a APK", "ext": "apk", "host_os": ["Linux", "macOS", "Windows"],
+     "label": "Android armeabi-v7a APK", "ext": "apk", "host_os": ["Linux", "Windows"],
      "note": "Older 32-bit phones."},
     {"id": "android-x86_64", "platform": "android", "arch": "x86_64",
-     "label": "Android x86_64 APK", "ext": "apk", "host_os": ["Linux", "macOS", "Windows"],
+     "label": "Android x86_64 APK", "ext": "apk", "host_os": ["Linux", "Windows"],
      "note": "Emulators / x86 tablets."},
     {"id": "android-universal", "platform": "android", "arch": "universal",
      "label": "Android universal APK (all ABIs)", "ext": "apk",
-     "host_os": ["Linux", "macOS", "Windows"],
+     "host_os": ["Linux", "Windows"],
      "note": "One APK for every device — recommended. Reuses the per-arch native libs."},
 
     # ---- macOS (Xcode) -> macOS host only ----

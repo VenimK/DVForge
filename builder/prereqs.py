@@ -321,11 +321,48 @@ def check_java():
     return _status(True, _run_version(["java", "-version"]) or "java", p)
 
 
+def _ndk_valid(path):
+    """True if path looks like a real NDK root (has toolchains/)."""
+    return os.path.isdir(os.path.join(path, "toolchains"))
+
+
+def _ndk_resolve(path):
+    """Resolve the real NDK root from a possibly-stale path.
+
+    macOS DMG: NDK is inside a .app bundle at Contents/NDK/.
+    Windows/Linux zip: NDK is nested under android-ndk-r28c/.
+    """
+    if _ndk_valid(path):
+        return path
+    # macOS: look inside .app bundles
+    if _system() == "macOS":
+        for child in sorted(os.listdir(path)):
+            if child.endswith(".app"):
+                inner = os.path.join(path, child, "Contents", "NDK")
+                if _ndk_valid(inner):
+                    return inner
+    # All platforms: search one level down for a nested NDK root
+    try:
+        for child in sorted(os.listdir(path)):
+            p = os.path.join(path, child)
+            if _ndk_valid(p):
+                return p
+    except OSError:
+        pass
+    return path
+
+
 def check_android_ndk():
+    # Android builds are not supported on macOS — the NDK/Gradle toolchain is
+    # unreliable there. Skip the check so the prereqs panel stays clean and no
+    # macOS target ever lists android_ndk as missing.
+    if _system() == "macOS":
+        return _status(False, note="Android builds are not supported on macOS.")
     # NDK is found via env or inside the Android SDK
     for var in ("ANDROID_NDK_HOME", "ANDROID_NDK_ROOT", "NDK_HOME"):
         v = os.environ.get(var)
         if v and os.path.isdir(v):
+            v = _ndk_resolve(v)
             return _status(True, os.path.basename(v.rstrip("/\\")), v)
     sdk = os.environ.get("ANDROID_SDK_ROOT") or os.environ.get("ANDROID_HOME")
     if sdk:

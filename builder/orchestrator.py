@@ -877,6 +877,90 @@ class Build:
                 f"MSI not found after build (expected {msi_src}). "
                 f"See msbuild output above.")
 
+    def _ensure_windows_short_src(self):
+        """Re-expose rustdesk-src via a short junction when paths exceed MAX_PATH.
+
+        Flutter's MSBuild step writes .tlog files under deep plugin dirs
+        (e.g. flutter_gpu_texture_renderer_plugin...). With a workspace under
+        C:\\Users\\...\\Downloads\\... those paths exceed the classic 260-char
+        limit and fail with MSB3491 — even when LongPathsEnabled is on, some
+        MSBuild tasks still choke. A junction at C:\\rdlb keeps the same files
+        but shortens every absolute path by ~50–70 chars.
+        """
+        if self.host["os"] != "Windows" or self.dry_run:
+            return
+        # Observed failing relative path (+ a little headroom for hash suffixes)
+        worst_rel = os.path.join(
+            "flutter", "build", "windows", "x64", "plugins",
+            "flutter_gpu_texture_renderer",
+            "flutter_gpu_texture_renderer_plugin.dir", "Release",
+            "flutter_.XXXXXXXX.tlog",
+            "flutter_gpu_texture_renderer_plugin.lastbuildstate",
+        )
+        projected = len(os.path.join(self.src_dir, worst_rel))
+        if projected < 250:
+            return
+
+        real = os.path.abspath(self.src_dir)
+        candidates = [r"C:\rdlb", r"C:\rdlb-src", r"C:\r"]
+        short = None
+        for cand in candidates:
+            try:
+                if os.path.isdir(cand):
+                    try:
+                        if os.path.samefile(cand, real):
+                            short = cand
+                            break
+                    except OSError:
+                        pass
+                    # Existing dir/junction pointing elsewhere — try to drop
+                    # it if it's a junction (rmdir removes the link only).
+                    try:
+                        os.rmdir(cand)
+                    except OSError:
+                        continue  # occupied; try next candidate
+                # Create directory junction (no admin required, same volume).
+                self.log(f"  · source path too long for MSBuild "
+                         f"(~{projected} chars projected; limit 260)")
+                self.log(f"  · creating junction {cand} -> {real}")
+                rc = subprocess.run(
+                    ["cmd", "/c", "mklink", "/J", cand, real],
+                    capture_output=True, text=True,
+                    encoding="utf-8", errors="replace",
+                )
+                if rc.returncode != 0:
+                    err = (rc.stderr or rc.stdout or "").strip()
+                    self.log(f"  ! mklink {cand} failed: {err}")
+                    continue
+                short = cand
+                break
+            except Exception as e:
+                self.log(f"  ! short-path candidate {cand} failed: {e}")
+                continue
+
+        if not short:
+            self.log("  ! could not create a short path junction. Options:")
+            self.log("      1) Move this project closer to C:\\ (e.g. C:\\rd)")
+            self.log("      2) Enable Win32 long paths (admin):")
+            self.log("         New-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet"
+                     "\\Control\\FileSystem' -Name LongPathsEnabled -Value 1 "
+                     "-PropertyType DWORD -Force")
+            return
+
+        if os.path.normcase(os.path.abspath(self.src_dir)) != os.path.normcase(short):
+            self.src_dir = short
+            self.log(f"  · build will use {short} to stay under MAX_PATH")
+
+        # Stale flutter/build/windows from a previous MAX_PATH failure leaves
+        # half-written .tlog dirs that can confuse the next MSBuild run.
+        flutter_win = os.path.join(self.src_dir, "flutter", "build", "windows")
+        if os.path.isdir(flutter_win) and not self.dry_run:
+            self.log("  · cleaning flutter/build/windows (MAX_PATH recovery)")
+            try:
+                _force_rmtree(flutter_win)
+            except Exception as e:
+                self.log(f"  ! could not clean flutter build dir: {e}")
+
     def build_windows(self):
         self.log("\n=== Build Windows x86_64 ===")
         # Always use the MSVC toolchain — the official CI pins
@@ -897,6 +981,8 @@ class Build:
 
             # LLVM was already set up before generate_bridge — just confirm.
             self._ensure_llvm()
+            # Must run before Flutter/MSBuild — deep plugin .tlog paths exceed 260.
+            self._ensure_windows_short_src()
 
         self.setup_vcpkg("x64-windows-static")
         self.customize_for("windows")
@@ -1221,6 +1307,104 @@ class Build:
         else:
             self.log("  ! AppImage not found after build")
 
+    def _accept_android_sdk_licenses(self, jdk17=None):
+        """Find the Android SDK and accept all licenses so Gradle doesn't fail."""
+        # 1) Detect SDK path from env, local.properties, or common locations
+        sdk = (os.environ.get("ANDROID_SDK_ROOT")
+               or os.environ.get("ANDROID_HOME")
+               or os.environ.get("ANDROID_SDK_HOME"))
+        if not sdk:
+            local_props = os.path.join(self.src_dir, "flutter", "android",
+                                       "local.properties")
+            if os.path.isfile(local_props):
+                with open(local_props) as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith("sdk.dir="):
+                            sdk = line[len("sdk.dir="):]
+                            break
+        if not sdk:
+            for cand in (
+                os.path.expanduser("~/Library/Android/sdk"),
+                "/opt/homebrew/share/android-commandlinetools",
+                "/opt/android-sdk",
+                os.path.expanduser("~/AppData/Local/Android/Sdk"),
+                "C:\\Android\\sdk",
+                os.path.join(os.environ.get("LOCALAPPDATA", ""),
+                             "Android", "Sdk"),
+            ):
+                if os.path.isdir(cand):
+                    sdk = cand
+                    break
+        if not sdk or not os.path.isdir(sdk):
+            self.log("  ! Android SDK not found — cannot accept licenses. "
+                     "Set ANDROID_SDK_ROOT or install Android SDK.")
+            return
+
+        # 2) Find sdkmanager (sdkmanager.bat on Windows)
+        sdkmanager = None
+        is_win = _platform.system() == "Windows"
+        exe = ".bat" if is_win else ""
+        for pattern in (
+            os.path.join(sdk, "cmdline-tools", "latest", "bin", "sdkmanager" + exe),
+            os.path.join(sdk, "cmdline-tools", "bin", "sdkmanager" + exe),
+            os.path.join(sdk, "tools", "bin", "sdkmanager" + exe),
+            # also check without extension (some installs differ)
+            os.path.join(sdk, "cmdline-tools", "latest", "bin", "sdkmanager"),
+            os.path.join(sdk, "cmdline-tools", "bin", "sdkmanager"),
+            os.path.join(sdk, "tools", "bin", "sdkmanager"),
+        ):
+            if os.path.isfile(pattern):
+                sdkmanager = pattern
+                break
+        if not sdkmanager:
+            # Try PATH
+            from shutil import which as _which
+            sdkmanager = _which("sdkmanager")
+        # 3) Write known license files (works even without sdkmanager)
+        licenses_dir = os.path.join(sdk, "licenses")
+        os.makedirs(licenses_dir, exist_ok=True)
+        # Write the known license hashes (Android SDK license acceptance)
+        known_licenses = {
+            "android-sdk-license": "\n8933bad161af4178b1185d1a37fbf41ea5269c55\n"
+                                   "\nd56f5187479451eabf01fb78af6dfcb131a6481e\n"
+                                   "24333f8a63b6825ea9c5514f83c2829b004d1fee\n",
+            "android-sdk-preview-license": "\n84831b9409646a918e30573bab4c9c91346d8abd\n",
+            "intel-android-extra-license": "\nd975f751698a77b662f1254ddbeed3901e976f5a\n",
+            "mips-android-sysimage-license": "\ne9acab5b5fbb560a72cfaecce8946896ff6aab9d\n",
+            "google-gdk-license": "\n33b6a2b64607f11b759f320ef9dff4ae5c47d97a\n",
+        }
+        for name, content in known_licenses.items():
+            lic_file = os.path.join(licenses_dir, name)
+            if not os.path.isfile(lic_file):
+                with open(lic_file, "w") as f:
+                    f.write(content)
+        self.log(f"  ✓ wrote SDK license files to {licenses_dir}")
+
+        # 4) If sdkmanager exists, also run --licenses to accept any new ones
+        if not sdkmanager:
+            self.log("  ! sdkmanager not found — license files written manually. "
+                     "Install cmdline-tools for full SDK management.")
+            return
+
+        env = dict(os.environ)
+        if jdk17:
+            env["JAVA_HOME"] = jdk17
+        self.log(f"  · running sdkmanager --licenses ({sdk})")
+        try:
+            proc = subprocess.run(
+                [sdkmanager, "--licenses"],
+                cwd=sdk, env=env, check=False,
+                input="y\n" * 20,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                encoding="utf-8", errors="replace", timeout=120,
+            )
+            for line in proc.stdout.splitlines():
+                self.log(line)
+        except Exception as exc:
+            self.log(f"  ! sdkmanager --licenses failed: {exc}")
+        self.log("  ✓ Android SDK licenses accepted")
+
     def build_android(self):
         self.log("\n=== Build Android ===")
         self.customize_for("android")
@@ -1265,6 +1449,9 @@ class Build:
             if os.path.isfile(init_gradle):
                 os.remove(init_gradle)
 
+        # Accept Android SDK licenses (Gradle fails if licenses aren't accepted)
+        self._accept_android_sdk_licenses(jdk17)
+
         # Gradle fixes from official CI: kill dead jcenter(), bump heap,
         # use debug signing so APK builds without a release keystore.
         build_gradle = os.path.join(self.src_dir, "flutter", "android",
@@ -1285,22 +1472,27 @@ class Build:
                       "s/signingConfigs.release/signingConfigs.debug/g",
                       app_build_gradle], check=False)
 
-        # Compute NDK sysroot for bindgen (hwcodec cross-compile fix).
-        # cargo-ndk sets CC/CXX but bindgen uses libclang directly and
-        # needs --sysroot to find Android headers instead of host headers.
+        # Compute NDK sysroot + toolchain bin for bindgen and autotools.
+        # cargo-ndk sets per-target CC_aarch64_linux_android etc. (for cc-rs),
+        # but autotools-based crates (libsodium-sys) need plain CC/CXX/AR/LD
+        # to cross-compile instead of using the host compiler.
         ndk_home = os.environ.get("ANDROID_NDK_HOME") or os.environ.get("ANDROID_NDK_ROOT", "")
         ndk_sysroot = ""
+        ndk_bin = ""
         if ndk_home:
-            prebuilt = os.path.join(ndk_home, "toolchains", "llvm",
-                                    "prebuilt", "linux-x86_64", "sysroot")
-            if os.path.isdir(prebuilt):
-                ndk_sysroot = prebuilt
-            else:
-                # macOS host
-                prebuilt = os.path.join(ndk_home, "toolchains", "llvm",
-                                        "prebuilt", "darwin-x86_64", "sysroot")
-                if os.path.isdir(prebuilt):
-                    ndk_sysroot = prebuilt
+            # Detect the prebuilt host tag dynamically
+            prebuilt_base = os.path.join(ndk_home, "toolchains", "llvm", "prebuilt")
+            host_tag = ""
+            if os.path.isdir(prebuilt_base):
+                for tag in os.listdir(prebuilt_base):
+                    if os.path.isdir(os.path.join(prebuilt_base, tag)):
+                        host_tag = tag
+                        break
+            if host_tag:
+                ndk_bin = os.path.join(prebuilt_base, host_tag, "bin")
+                ndk_sysroot = os.path.join(prebuilt_base, host_tag, "sysroot")
+                if not os.path.isdir(ndk_sysroot):
+                    ndk_sysroot = ""
 
         # Ensure vcpkg is at the pinned commit — build_android_deps.sh
         # calls vcpkg install but doesn't checkout the right version.
@@ -1312,10 +1504,11 @@ class Build:
             self.run(["git", "-C", vcpkg_root, "checkout", self.VCPKG_COMMIT],
                      check=False)
 
+        # (rust_target, flutter_target, abi, ndk_script, jni_arch, cc_prefix)
         archs = {
-            "android-arm64": ("aarch64-linux-android", "android-arm64", "arm64-v8a", "ndk_arm64.sh", "aarch64-linux-android"),
-            "android-armv7": ("armv7-linux-androideabi", "android-arm", "armeabi-v7a", "ndk_arm.sh", "arm-linux-androideabi"),
-            "android-x86_64": ("x86_64-linux-android", "android-x64", "x86_64", "ndk_x64.sh", "x86_64-linux-android"),
+            "android-arm64": ("aarch64-linux-android", "android-arm64", "arm64-v8a", "ndk_arm64.sh", "aarch64-linux-android", "aarch64-linux-android"),
+            "android-armv7": ("armv7-linux-androideabi", "android-arm", "armeabi-v7a", "ndk_arm.sh", "arm-linux-androideabi", "armv7a-linux-androideabi"),
+            "android-x86_64": ("x86_64-linux-android", "android-x64", "x86_64", "ndk_x64.sh", "x86_64-linux-android", "x86_64-linux-android"),
         }
         wanted = [a for a in self.target_ids if a in archs]
         universal = "android-universal" in self.target_ids
@@ -1323,7 +1516,7 @@ class Build:
             wanted = list(archs.keys())  # universal needs all three arch libs
 
         for tid in wanted:
-            target, ftarget, abi, ndk, jni_arch = archs[tid]
+            target, ftarget, abi, ndk, jni_arch, cc_prefix = archs[tid]
             self.log(f"\n-- Android {abi} --")
 
             # Install vcpkg deps (FFmpeg, etc.) for this ABI via RustDesk's
@@ -1333,6 +1526,12 @@ class Build:
                                        "build_android_deps.sh")
             if os.path.isfile(deps_script):
                 self.log("  · installing vcpkg Android deps")
+                # Fix hardcoded HOST_TAG — script assumes linux-x86_64 but
+                # macOS needs darwin-x86_64.
+                if self.host.get("os") == "macOS":
+                    self.run(["sed", "-i",
+                              's/HOST_TAG="linux-x86_64"/HOST_TAG="darwin-x86_64"/g',
+                              deps_script], check=False)
                 bash = self._bash()
                 if bash or self.dry_run:
                     self.run([bash or "bash", deps_script, abi],
@@ -1346,11 +1545,27 @@ class Build:
                      check=False)
             script = f"./flutter/{ndk}"
             bash = self._bash()
-            # Build env with NDK sysroot for bindgen
+            # Build env: ensure cargo-ndk sees the correct NDK and bindgen
+            # gets the Android sysroot.  Do NOT set plain CC/CXX/CFLAGS here —
+            # they leak into host builds (libsodium-sys is also built as a
+            # host build-dependency) and cause a cross-compiler mismatch.
+            # cargo-ndk sets per-target vars (CC_aarch64_linux_android etc.)
+            # automatically when ANDROID_NDK_HOME is correct.
             ndk_env = {}
+            if ndk_home:
+                ndk_env["ANDROID_NDK_HOME"] = ndk_home
+                ndk_env["ANDROID_NDK_ROOT"] = ndk_home
             if ndk_sysroot:
                 ndk_env["BINDGEN_EXTRA_CLANG_ARGS"] = f"--sysroot={ndk_sysroot}"
                 ndk_env[f"BINDGEN_EXTRA_CLANG_ARGS_{target.replace('-', '_')}"] = f"--sysroot={ndk_sysroot}"
+                # Per-target CFLAGS/LDFLAGS for autotools-based crates that
+                # read CFLAGS_<target> (libsodium-sys via cc crate).
+                target_underscored = target.replace('-', '_')
+                ndk_env[f"CFLAGS_{target_underscored}"] = f"--sysroot={ndk_sysroot}"
+                ndk_env[f"CXXFLAGS_{target_underscored}"] = f"--sysroot={ndk_sysroot}"
+                ndk_env[f"LDFLAGS_{target_underscored}"] = f"--sysroot={ndk_sysroot}"
+                self.log(f"  · NDK env: ANDROID_NDK_HOME={ndk_home}")
+                self.log(f"  · sysroot for {target}: {ndk_sysroot}")
             if bash or self.dry_run:
                 self.run([bash or "bash", script], cwd=self.src_dir, check=False,
                          env=ndk_env if ndk_env else None)

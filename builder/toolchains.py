@@ -294,7 +294,11 @@ def installable(host_os=None, host_arch=None):
     out = {}
     for tid, spec in TOOLS.items():
         ok, reason = True, ""
-        if spec["kind"] == "archive":
+        # Android builds are not supported on macOS — don't offer the NDK for
+        # install there (the build_android path is kept for Linux/Windows).
+        if tid == "android_ndk" and host_os == "macOS":
+            ok, reason = False, "Android builds are not supported on macOS"
+        elif spec["kind"] == "archive":
             if (host_os, host_arch) not in spec["urls"]:
                 ok, reason = False, f"no portable {spec['label']} for {host_os}/{host_arch}"
         elif spec["kind"] == "git":
@@ -750,7 +754,34 @@ def install_one(tid, root, log, cancelled=lambda: False):
         if os.path.isdir(home_target):
             shutil.rmtree(home_target, ignore_errors=True)
         _extract(fname, arch_kind, home_target, log)
-    home = _locate(home_target, spec["marker"], log)
+
+    # macOS NDK r28c ships as a .app bundle inside the DMG. The DMG root
+    # has a source.properties but the actual NDK (toolchains/, build/, etc.)
+    # lives at AndroidNDK*.app/Contents/NDK/. _locate finds the root-level
+    # source.properties first and returns the wrong directory.
+    if tid == "android_ndk" and _system() == "macOS":
+        home = None
+        for child in sorted(os.listdir(home_target)):
+            if child.endswith(".app"):
+                app_ndk = os.path.join(home_target, child, "Contents", "NDK")
+                if os.path.isdir(os.path.join(app_ndk, "toolchains")):
+                    home = app_ndk
+                    break
+        if home is None:
+            home = _locate(home_target, spec["marker"], log)
+        # Create symlinks from home_target → real NDK root so that stale
+        # references to .toolchains/android_ndk/toolchains/... still resolve.
+        if home != home_target and os.path.isdir(home):
+            for item in os.listdir(home):
+                link_path = os.path.join(home_target, item)
+                real_path = os.path.join(home, item)
+                if not os.path.exists(link_path):
+                    try:
+                        os.symlink(real_path, link_path)
+                    except OSError:
+                        pass
+    else:
+        home = _locate(home_target, spec["marker"], log)
     env = _env_for(tid, home)
     # sanity
     if not os.path.exists(os.path.join(home, spec["marker"])):
@@ -884,6 +915,42 @@ def apply_persisted_env(root):
                 else:
                     continue
                 break
+
+    # Self-heal ANDROID_NDK_HOME: the NDK root may be nested differently
+    # depending on platform — macOS DMG extracts a .app bundle with the real
+    # NDK at Contents/NDK/, while Windows/Linux zips nest under
+    # android-ndk-r28c/. If the current path lacks toolchains/, search.
+    ndk_home = vars_.get("ANDROID_NDK_HOME", "")
+    if ndk_home and os.path.isdir(ndk_home):
+        if not os.path.isdir(os.path.join(ndk_home, "toolchains")):
+            healed_ndk = None
+            # macOS: look inside .app bundles
+            for child in sorted(os.listdir(ndk_home)):
+                if child.endswith(".app"):
+                    inner = os.path.join(ndk_home, child, "Contents", "NDK")
+                    if os.path.isdir(os.path.join(inner, "toolchains")):
+                        healed_ndk = inner
+                        break
+            # All platforms: fall back to _locate (handles nested zip dirs)
+            if healed_ndk is None:
+                healed_ndk = _locate(ndk_home, "source.properties",
+                                     lambda m: None)
+                if not os.path.isdir(os.path.join(healed_ndk, "toolchains")):
+                    healed_ndk = None
+            if healed_ndk:
+                vars_["ANDROID_NDK_HOME"] = healed_ndk
+                vars_["ANDROID_NDK_ROOT"] = healed_ndk
+                # Create symlinks from the stale path → real NDK root
+                # so existing build references still resolve.
+                if healed_ndk != ndk_home and os.path.isdir(healed_ndk):
+                    for item in os.listdir(healed_ndk):
+                        link_path = os.path.join(ndk_home, item)
+                        real_path = os.path.join(healed_ndk, item)
+                        if not os.path.exists(link_path):
+                            try:
+                                os.symlink(real_path, link_path)
+                            except OSError:
+                                pass
 
     # Persist self-healed absolute paths so next launch is clean.
     healed = {"vars": vars_, "path": paths}
