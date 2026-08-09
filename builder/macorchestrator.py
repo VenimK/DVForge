@@ -51,33 +51,6 @@ def _force_rmtree(path):
     shutil.rmtree(path, onerror=_onerror)
 
 
-def _shell_rmtree(path):
-    """Best-effort shell delete for stubborn trees. Never raises if the tool is missing.
-
-    On Windows, Unix `rm -rf` is usually not on PATH — calling it raised WinError 2
-    and aborted the whole build during checkout cleanup. Use rmdir /s /q instead.
-    """
-    if not path or not os.path.exists(path):
-        return
-    try:
-        if _platform.system() == "Windows":
-            # Use list form so paths with spaces stay one argument.
-            subprocess.run(
-                ["cmd", "/c", "rmdir", "/s", "/q", path],
-                check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-        else:
-            subprocess.run(
-                ["rm", "-rf", path],
-                check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-    except FileNotFoundError:
-        # cmd/rm missing from PATH — ignore; caller may still clone to a temp dir.
-        pass
-    except OSError:
-        pass
-
-
 class BuildCancelled(Exception):
     pass
 
@@ -216,10 +189,16 @@ class Build:
                 # a leftover read-only .git on Windows can resist removal
                 if os.path.exists(self.src_dir):
                     _force_rmtree(self.src_dir)
-                # last resort: shell delete can clear files Python cannot
+                # last resort: shell rm -rf can clear files Python cannot
                 if os.path.exists(self.src_dir):
                     self.log(f"  force-removing leftover {self.src_dir}")
-                    _shell_rmtree(self.src_dir)
+                    if self.host["os"] == "Windows":
+                        subprocess.run(
+                            ["cmd", "/c", f'rmdir /s /q "{self.src_dir}"'],
+                            check=False)
+                    else:
+                        subprocess.run(["rm", "-rf", self.src_dir],
+                                       check=False)
                 # NFS volumes (e.g. /Volumes on macOS) create .nfs* "silly
                 # rename" files when a deleted file is still open.  These
                 # vanish once the process exits, so retry once after a brief
@@ -228,20 +207,18 @@ class Build:
                 if os.path.exists(self.src_dir):
                     import time
                     time.sleep(2)
-                    _shell_rmtree(self.src_dir)
+                    subprocess.run(["rm", "-rf", self.src_dir], check=False)
         os.makedirs(self.workspace, exist_ok=True)
         if os.path.exists(self.src_dir):
             # Could not remove the old tree (NFS stale handles, locked files).
             # Clone into a fresh temp name, then swap.
             tmp_dir = self.src_dir + ".checkout-tmp"
             if os.path.exists(tmp_dir):
-                _shell_rmtree(tmp_dir)
-                if os.path.exists(tmp_dir):
-                    _force_rmtree(tmp_dir)
+                subprocess.run(["rm", "-rf", tmp_dir], check=False)
             self.run(["git", "clone", "--depth", "1", "--branch", self.version,
                       "--recurse-submodules", RUSTDESK_REPO, tmp_dir])
             # Best-effort: try removing the old dir again, then rename.
-            _shell_rmtree(self.src_dir)
+            subprocess.run(["rm", "-rf", self.src_dir], check=False)
             if os.path.exists(self.src_dir):
                 # Still stuck — just use the temp dir as src_dir
                 self.src_dir = tmp_dir
