@@ -16,6 +16,52 @@ def _b(val):
     return "true" if val in (True, "on") else "false"
 
 
+def _project_root() -> str:
+    """Repo root (parent of builder/)."""
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def resolve_branding_path(path: str, kind: str = "icon") -> str:
+    """Resolve icon/logo path so branding survives moves and broken absolutes.
+
+    Tries, in order:
+      1. path as-is if it exists (absolute or cwd-relative)
+      2. path relative to the project root
+      3. basename under workspace/branding/ (upload location)
+      4. kind.png / kind.svg under workspace/branding/
+
+    Returns the first existing path, or the original string if nothing matches
+    (caller still logs 'not found').
+    """
+    if not path or not str(path).strip():
+        return ""
+    path = str(path).strip()
+    root = _project_root()
+    branding = os.path.join(root, "workspace", "branding")
+    candidates = []
+    if os.path.isabs(path):
+        candidates.append(path)
+        # Broken absolute paths (e.g. corrupted separators) still have a
+        # useful basename that matches the uploaded file under branding/.
+        candidates.append(os.path.join(branding, os.path.basename(path)))
+    else:
+        candidates.append(os.path.abspath(path))
+        candidates.append(os.path.join(root, path))
+        candidates.append(os.path.join(branding, os.path.basename(path)))
+    # Default upload names from app.py: icon.png / logo.png
+    for ext in (".png", ".svg", ".ico", ".jpg", ".jpeg"):
+        candidates.append(os.path.join(branding, f"{kind}{ext}"))
+
+    seen = set()
+    for c in candidates:
+        if not c or c in seen:
+            continue
+        seen.add(c)
+        if os.path.isfile(c):
+            return os.path.abspath(c)
+    return path
+
+
 def build_custom_env(cfg: dict) -> dict:
     """Return the full CUSTOM_* mapping (strings), mirroring load-config.py."""
     d = cfg
@@ -32,8 +78,8 @@ def build_custom_env(cfg: dict) -> dict:
     download_link = d.get("downloadLink", "") or "https://rustdesk.com/download"
     android_app_id = d.get("androidappid", "") or ""
     slogan = d.get("slogan", "") or ""
-    icon_file = d.get("iconFile", "") or ""
-    logo_file = d.get("logoFile", "") or ""
+    icon_file = resolve_branding_path(d.get("iconFile", "") or "", "icon")
+    logo_file = resolve_branding_path(d.get("logoFile", "") or "", "logo")
     theme_color = d.get("themeColor", "") or ""
 
     env = {

@@ -379,7 +379,10 @@ class Handler(BaseHTTPRequestHandler):
                     f.write(base64.b64decode(file_data))
             except Exception as e:
                 return self._send_json({"error": str(e)}, 500)
-            return self._send_json({"ok": True, "path": dst,
+            # Store project-relative path so configs stay portable across
+            # machines/moves (absolute Windows paths have bitten us before).
+            rel = os.path.relpath(dst, ROOT).replace("\\", "/")
+            return self._send_json({"ok": True, "path": rel,
                                     "filename": safe_name})
 
         return self._send_json({"error": "not found"}, 404)

@@ -50,6 +50,6 @@
   "removeWallpaper": "on",
   "slogan": "Hulp op afstand",
   "themeColor": "#A3DD92",
-  "iconFile": "/Volumes/downloads/MusicLover/RustDesk/Buildwithconfig/test/rustdesk-local-builder/workspace/branding/icon.png",
-  "logoFile": "/Volumes/downloads/MusicLover/RustDesk/Buildwithconfig/test/rustdesk-local-builder/workspace/branding/logo.png"
+  "iconFile": "workspace/branding/icon.jpg",
+  "logoFile": "workspace/branding/logo.jpg"
 }
