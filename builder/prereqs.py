@@ -353,11 +353,12 @@ def _ndk_resolve(path):
 
 
 def check_android_ndk():
-    # Android builds are not supported on macOS — the NDK/Gradle toolchain is
-    # unreliable there. Skip the check so the prereqs panel stays clean and no
-    # macOS target ever lists android_ndk as missing.
-    if _system() == "macOS":
-        return _status(False, note="Android builds are not supported on macOS.")
+    # Android builds are only supported on Linux — the NDK/Gradle/OpenSSL
+    # toolchain is unreliable on macOS (NDK/Gradle issues) and Windows
+    # (broken MSYS2 Perl breaks openssl-sys). Skip the check on those hosts
+    # so the prereqs panel stays clean.
+    if _system() in ("macOS", "Windows"):
+        return _status(False, note="Android builds are only supported on Linux.")
     # NDK is found via env or inside the Android SDK
     for var in ("ANDROID_NDK_HOME", "ANDROID_NDK_ROOT", "NDK_HOME"):
         v = os.environ.get(var)

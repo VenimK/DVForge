@@ -294,10 +294,10 @@ def installable(host_os=None, host_arch=None):
     out = {}
     for tid, spec in TOOLS.items():
         ok, reason = True, ""
-        # Android builds are not supported on macOS — don't offer the NDK for
-        # install there (the build_android path is kept for Linux/Windows).
-        if tid == "android_ndk" and host_os == "macOS":
-            ok, reason = False, "Android builds are not supported on macOS"
+        # Android builds are only supported on Linux — don't offer the NDK for
+        # install on macOS/Windows (the build_android path is kept for Linux).
+        if tid == "android_ndk" and host_os != "Linux":
+            ok, reason = False, "Android builds are only supported on Linux"
         elif spec["kind"] == "archive":
             if (host_os, host_arch) not in spec["urls"]:
                 ok, reason = False, f"no portable {spec['label']} for {host_os}/{host_arch}"
