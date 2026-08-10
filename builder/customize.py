@@ -381,17 +381,66 @@ def write_custom_txt(dest_dir, env, log=None, filename="custom_.txt"):
 # ---------------------------------------------------------------------------
 
 def _magick_resize(src_img, size, dst_img, log=None):
-    """Resize an image using ImageMagick (tries `magick` v7 then `convert` v6)."""
+    """Resize an image to an EXACT square using ImageMagick.
+
+    Uses `-resize {size}x{size}^ -gravity center -extent {size}x{size}` so the
+    output is always exactly size×size regardless of the input aspect ratio.
+    A plain `-resize {size}x{size}` preserves aspect ratio and produces
+    non-square output (e.g. 16x9 from a landscape photo), which iconutil
+    and .ico generators reject."""
     for cmd in ("magick", "convert"):
         try:
-            subprocess.run([cmd, src_img, "-resize", f"{size}x{size}", dst_img],
-                           check=True, capture_output=True, timeout=30)
+            subprocess.run(
+                [cmd, src_img, "-auto-orient",
+                 "-resize", f"{size}x{size}^",
+                 "-gravity", "center",
+                 "-extent", f"{size}x{size}",
+                 dst_img],
+                check=True, capture_output=True, timeout=30)
             return True
         except (FileNotFoundError, subprocess.CalledProcessError):
             continue
     if log:
         log(f"    ! ImageMagick not found — cannot resize to {size}x{size}")
     return False
+
+
+def _ensure_png(icon_abs, log=None):
+    """Convert an icon to a normalized square PNG with alpha.
+
+    Applies Exif orientation, converts to PNG with an alpha channel, and
+    center-crops to a square (1024x1024) so downstream resizes produce
+    exact dimensions. iconutil rejects non-square or non-alpha PNGs, and
+    a JPG with Exif rotation would come out sideways without -auto-orient.
+    Uses a temp file so the user's original is never overwritten.
+    Returns the normalized PNG path, or the original on conversion failure."""
+    # Use a temp file so we never overwrite the user's source image.
+    tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+    tmp.close()
+    png_path = tmp.name
+    for cmd in ("magick", "convert"):
+        try:
+            subprocess.run(
+                [cmd, icon_abs, "-auto-orient",
+                 "-resize", "1024x1024^",
+                 "-gravity", "center", "-extent", "1024x1024",
+                 "-background", "none", "-alpha", "on",
+                 png_path],
+                check=True, capture_output=True, timeout=30)
+            if log:
+                log(f"    · converted {os.path.basename(icon_abs)} -> "
+                    "1024x1024 PNG (auto-orient + alpha)")
+            return png_path
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            continue
+    if log:
+        log(f"    ! could not convert {os.path.basename(icon_abs)} to PNG — "
+            "ImageMagick not found; using original file as-is")
+    try:
+        os.unlink(png_path)
+    except OSError:
+        pass
+    return icon_abs
 
 
 def _make_ico(src_img, dst_ico, log=None):
@@ -420,27 +469,49 @@ def _make_icns(src_img, dst_icns, log=None):
     for sz, name in sizes:
         _magick_resize(src_img, sz, os.path.join(iconset, name), log)
     try:
-        subprocess.run(["iconutil", "-c", "icns", iconset, "-o", dst_icns],
-                       check=True, capture_output=True, timeout=30)
+        proc = subprocess.run(["iconutil", "-c", "icns", iconset, "-o", dst_icns],
+                              capture_output=True, timeout=30)
+        if proc.returncode != 0:
+            err = proc.stderr.decode("utf-8", errors="replace").strip()
+            if log:
+                log(f"    ! iconutil failed — cannot create .icns: {err}")
+            return False
         if log:
             log(f"    · created {os.path.basename(dst_icns)} via iconutil")
         return True
-    except Exception:
+    except Exception as exc:
         if log:
-            log("    ! iconutil failed — cannot create .icns")
+            log(f"    ! iconutil failed — cannot create .icns: {exc}")
         return False
     finally:
         shutil.rmtree(iconset, ignore_errors=True)
 
 
 def _patch_ui_rs_icon(src, icon_path, log):
-    """Replace the base64-encoded icon PNG in src/ui.rs with the user's icon."""
+    """Replace the base64-encoded icon in src/ui.rs with the user's icon.
+
+    Detects the actual image format and uses the correct MIME type so a JPG
+    icon isn't mislabelled as image/png (which causes some renderers to fail)."""
     with open(icon_path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode()
-    # The icon appears as "data:image/png;base64,XXXX..." in ui.rs
+    # Detect MIME type from file content (magic bytes), not extension.
+    with open(icon_path, "rb") as f:
+        header = f.read(12)
+    if header[:3] == b"\xff\xd8\xff":
+        mime = "image/jpeg"
+    elif header[:4] == b"\x89PNG":
+        mime = "image/png"
+    elif header[:4] == b"RIFF" and header[8:12] == b"WEBP":
+        mime = "image/webp"
+    elif header[:6] in (b"GIF87a", b"GIF89a"):
+        mime = "image/gif"
+    else:
+        mime = "image/png"  # fallback — the pattern in ui.rs uses png
+    # The icon appears as "data:image/<type>;base64,XXXX..." in ui.rs.
+    # Match the existing mime type in the file and replace the payload.
     ok = sed_regex(src, "src/ui.rs",
-                   r'(data:image/png;base64,)[^"]*',
-                   rf'\g<1>{b64}', log)
+                   r'(data:image/)(?:png|jpeg|jpg|webp|gif)(;base64,)[^"]*',
+                   rf'\g<1>{mime.split("/")[-1]}\g<2>{b64}', log)
     if not ok and log:
         log("    ! ui.rs icon base64 pattern not found — skipping")
     return ok
@@ -456,6 +527,13 @@ def _apply_icon(src, env, platform, log):
         log(f"  ! icon file not found: {icon_file}")
         return
     log(f"  App icon -> {os.path.basename(icon_file)}")
+
+    # Convert non-PNG icons (JPG, WEBP, etc.) to PNG with an alpha channel.
+    # iconutil (macOS .icns), .ico generators, and the base64 embed in ui.rs
+    # all expect PNG data. Without this, a JPG gets copied as "icon.png" with
+    # JPG bytes inside, and iconutil rejects the converted PNGs for missing
+    # alpha — silently breaking the macOS app icon.
+    icon_abs = _ensure_png(icon_abs, log)
 
     res_dir = os.path.join(src, "res")
     flutter_assets = os.path.join(src, "flutter", "assets")
@@ -620,17 +698,21 @@ def _apply_logo(src, env, platform, log):
 
     flutter_assets = os.path.join(src, "flutter", "assets")
 
-    # If the logo is a PNG, copy as icon.png (the in-app logo displayed in about)
-    # and try to generate an SVG via potrace (macOS/Linux only; on Windows
-    # potrace is often unavailable, so the PNG fallback in loadIcon() is used).
-    if logo_abs.lower().endswith(".png"):
-        shutil.copy2(logo_abs, os.path.join(flutter_assets, "icon.png"))
+    # If the logo is a raster image (PNG/JPG/WEBP/etc.), copy as icon.png
+    # (the in-app logo displayed in about) and try to generate an SVG via
+    # potrace (macOS/Linux only; on Windows potrace is often unavailable,
+    # so the PNG fallback in loadIcon() is used).
+    # Non-PNG rasters are converted to PNG first so the file content matches
+    # the .png extension — a JPG copied as "icon.png" has wrong magic bytes.
+    if logo_abs.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")):
+        logo_png = _ensure_png(logo_abs, log)
+        shutil.copy2(logo_png, os.path.join(flutter_assets, "icon.png"))
         log("    · flutter/assets/icon.png (logo)")
         if platform in ("macos", "linux"):
             try:
                 pbm = tempfile.NamedTemporaryFile(suffix=".pbm", delete=False)
                 pbm.close()
-                subprocess.run(["magick", logo_abs, "-flatten", pbm.name],
+                subprocess.run(["magick", logo_png, "-flatten", pbm.name],
                                check=True, capture_output=True, timeout=30)
                 svg_path = os.path.join(flutter_assets, "icon.svg")
                 subprocess.run(["potrace", "--svg", "-o", svg_path, pbm.name],
@@ -647,9 +729,10 @@ def _apply_logo(src, env, platform, log):
         shutil.copy2(logo_abs, os.path.join(flutter_assets, "icon.svg"))
         log("    · flutter/assets/icon.svg")
     else:
-        # copy as-is
-        shutil.copy2(logo_abs, os.path.join(flutter_assets, "icon.svg"))
-        log(f"    · flutter/assets/icon.svg (from {os.path.basename(logo_abs)})")
+        # Unknown type — copy as-is but use the original extension, not .svg
+        dst = os.path.join(flutter_assets, os.path.basename(logo_abs))
+        shutil.copy2(logo_abs, dst)
+        log(f"    · flutter/assets/{os.path.basename(logo_abs)} (from logo)")
 
     # Also copy to rustdesk/data/flutter_assets/assets/ if it exists
     fa2 = os.path.join(src, "rustdesk", "data", "flutter_assets", "assets")
