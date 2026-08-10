@@ -35,7 +35,7 @@ def _is_in_toolchains(path):
 def main():
     results = prereqs.summary()
     print("=" * 72)
-    print("RustDesk Local Builder — system toolchain precheck")
+    print("DVForge — system toolchain precheck")
     print("=" * 72)
 
     installed_system = []

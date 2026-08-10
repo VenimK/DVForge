@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# RustDesk Local Builder — uninstaller / clean-slate reset
+# DVForge — uninstaller / clean-slate reset
 #
 # Removes all generated build artifacts so the next run starts from scratch:
 #   - workspace/rustdesk-src   (cloned source tree, can be huge)
@@ -86,7 +86,7 @@ rm_with_log() {
   fi
 }
 
-bold "RustDesk Local Builder — Clean Reset"
+bold "DVForge — Clean Reset"
 echo ""
 
 # --- workspace/rustdesk-src (the big one) ---

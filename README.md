@@ -1,6 +1,6 @@
 [![PayPal](https://img.shields.io/badge/Donate-PayPal-blue.svg)](https://paypal.me/VenimK)
 
-# RustDesk Local Builder
+# DVForge
 
 A local desktop app that does what your `rustdesk-builder-v2` GitHub Actions
 workflows do — build a custom RustDesk client with your server, key, password
@@ -141,7 +141,7 @@ inspecting it on a machine that doesn't have the toolchains yet.
 ## Layout
 
 ```
-rustdesk-local-builder/
+dvforge/
 ├── app.py                 # stdlib HTTP server: API + SSE log stream + static files
 ├── run.sh / run.bat       # launchers
 ├── builder/

@@ -355,7 +355,7 @@ def _human(n):
 def _download(url, dest, log):
     log(f"  ↓ {url}")
     ctx = ssl.create_default_context()
-    req = urllib.request.Request(url, headers={"User-Agent": "rustdesk-local-builder"})
+    req = urllib.request.Request(url, headers={"User-Agent": "dvforge"})
     with urllib.request.urlopen(req, context=ctx, timeout=60) as r, open(dest, "wb") as f:
         total = int(r.headers.get("Content-Length", 0))
         got = 0

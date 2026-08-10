@@ -1,4 +1,4 @@
-# HANDOFF — RustDesk Local Builder
+# HANDOFF — DVForge
 
 A pick-up-where-we-left-off doc. If you're a fresh session (human or AI), read
 this top to bottom and you'll know what this is, what works, what doesn't yet,
@@ -209,7 +209,7 @@ Endpoints live: `GET /api/host /api/prereqs /api/matrix /api/config
 ## 6. Where things are
 
 ```
-rustdesk-local-builder/
+dvforge/
 ├── app.py                    # server + SSE + static
 ├── run.sh / run.bat          # launchers
 ├── HANDOFF.md                # this file

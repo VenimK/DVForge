@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-RustDesk Local Builder — backend server.
+DVForge — backend server.
 
 A zero-dependency (Python standard library only) local web app. Run:
 
@@ -461,7 +461,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     if sys.version_info < (3, 8):
-        print("RustDesk Local Builder needs Python 3.8 or newer.")
+        print("DVForge needs Python 3.8 or newer.")
         print(f"You're running {platform.python_version()} at {sys.executable}.")
         print("Install a recent Python 3 from https://www.python.org/downloads/ "
               "and run again.")
@@ -470,7 +470,7 @@ def main():
     httpd = ThreadingHTTPServer((HOST, PORT), Handler)
     url = f"http://{HOST}:{PORT}"
     print("=" * 60)
-    print("  RustDesk Local Builder")
+    print("  DVForge")
     print("=" * 60)
     print(f"  Serving at {url}")
     print(f"  Workspace: {WORKSPACE}")
