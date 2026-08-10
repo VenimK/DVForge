@@ -64,8 +64,8 @@ no cross-OS desktop builds):
 | Linux `.deb`/`.rpm`/`.AppImage`| Linux only        |
 | **Android APKs** (all ABIs)    | **any host** (NDK is cross-platform) |
 
-So: a Windows PC builds Windows + Android; a Linux box builds Linux + Android;
-a Mac builds macOS + Android. The capability board shows this automatically —
+So: a Windows PC builds Windows (+ Android); a Linux box builds Linux + Android;
+a Mac builds macOS (+ Android). The capability board shows this automatically —
 lit (amber) cells are ready, outlined (steel) cells need a toolchain, hatched
 cells need a different host OS.
 
