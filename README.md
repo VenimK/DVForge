@@ -1,3 +1,5 @@
+[![PayPal](https://img.shields.io/badge/Donate-PayPal-blue.svg)](https://paypal.me/VenimK)
+
 # RustDesk Local Builder
 
 A local desktop app that does what your `rustdesk-builder-v2` GitHub Actions
