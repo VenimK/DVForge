@@ -868,6 +868,27 @@ def apply_persisted_env(root):
     vars_ = {k: _abspath(v) for k, v in d.get("vars", {}).items()}
     paths = [_abspath(p) for p in d.get("path", [])]
 
+    # Self-heal stale absolute paths left over from a project directory rename.
+    # If a path contains a .toolchains/ segment but doesn't live under the
+    # current root, rewrite the prefix so it points into our .toolchains/.
+    tc_marker = os.sep + ".toolchains" + os.sep
+    tc_root = os.path.join(root, ".toolchains")
+
+    def _heal_renamed(p):
+        if not p or not os.path.isabs(p):
+            return p
+        norm = os.path.normpath(p)
+        if norm.startswith(root):
+            return norm
+        idx = norm.find(tc_marker)
+        if idx < 0:
+            return norm
+        suffix = norm[idx + len(tc_marker):]
+        return os.path.normpath(os.path.join(tc_root, suffix))
+
+    vars_ = {k: _heal_renamed(v) for k, v in vars_.items()}
+    paths = [_heal_renamed(p) for p in paths]
+
     libclang = vars_.get("LIBCLANG_PATH")
     if libclang:
         names = ("libclang.dylib", "libclang.so", "libclang.dll",

@@ -50,6 +50,6 @@
   "removeWallpaper": "on",
   "slogan": "Hulp op afstand",
   "themeColor": "#A3DD92",
-  "iconFile": "workspace/branding/icon.jpg",
-  "logoFile": "workspace/branding/logo.jpg"
+  "iconFile": "workspace/branding/icon.png",
+  "logoFile": "workspace/branding/logo.png"
 }

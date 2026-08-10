@@ -46,3 +46,4 @@ nugetmsi.txt
 !HANDOFF.md
 !precheck.bat
 !precheck.sh
+configs/RustDesk.json
