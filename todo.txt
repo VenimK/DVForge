@@ -1,0 +1,48 @@
+powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\admin\Downloads\Setup-WSL2-Android.ps1"
+
+LINUX BUILDS ON WSL
+
+RPM
+=== DONE in 8m 29s ===
+Artifacts (2):
+  /home/venimk/DVForge/workspace/output/v1.4.9/WSLDEBIANTEST-1.4.9.rpm
+  /home/venimk/DVForge/workspace/output/v1.4.9/WSLDEBIANTEST-1.4.9-suse.rpm
+
+
+DEB
+=== DONE in 8m 13s ===
+Artifacts (1):
+  /home/venimk/DVForge/workspace/output/v1.4.9/WSLDEBIANTEST-1.4.9.deb
+
+DEB ARM
+=== DONE in 7m 52s ===
+Artifacts (1):
+  /home/venimk/DVForge/workspace/output/v1.4.9/WSLDEBIANTEST-1.4.9.deb
+/home/venimk/DVForge/workspace/output/v1.4.9/WSLDEBIANTEST-1.4.9.deb
+
+
+
+
+ANDROID BUILDS ON WSL
+Android universal APK (all ABIs)
+Done in 63:48 minutes
+Yes — the build succeeded. The ~64 minutes is normal for a first android-universal run on this machine.
+
+
+Android arm64-v8a APK
+=== DONE in 14m 56s ===
+Artifacts (1):
+  /home/venimk/DVForge/workspace/output/v1.4.9/WSLDEBIANTEST-arm64-v8a-release.apk
+
+
+
+Android armeabi-v7a
+=== DONE in 18m 36s ===
+Artifacts (1):
+  /home/venimk/DVForge/workspace/output/v1.4.9/WSLDEBIANTEST-armeabi-v7a-release.apk
+
+
+Android x86_64
+=== DONE in 14m 43s ===
+Artifacts (1):
+  /home/venimk/DVForge/workspace/output/v1.4.9/WSLDEBIANTEST-x86_64-release.apk

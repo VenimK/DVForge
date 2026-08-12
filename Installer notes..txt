@@ -1,0 +1,8 @@
+• Installer notes now point at Uninstall-DVForge-WSL2.ps1
+• Uninstaller examples / “to reinstall” line use Setup-DVForge-WSL2.ps1
+
+# Install
+powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\admin\Downloads\Setup-DVForge-WSL2.ps1"
+
+# Uninstall
+powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\admin\Downloads\Uninstall-DVForge-WSL2.ps1"
