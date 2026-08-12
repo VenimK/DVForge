@@ -1,0 +1,41 @@
+DVForge installers
+==================
+
+Windows desktop builds (.exe / .msi)
+------------------------------------
+# Install (default → C:\DVForge, short path)
+powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\admin\Downloads\temped\DVForge\Setup-DVForge-Windows.ps1"
+
+# Install into the folder you already have open
+powershell -NoProfile -ExecutionPolicy Bypass -File ".\Setup-DVForge-Windows.ps1" -InPlace
+
+# Uninstall toolchains only (keeps project + VS)
+powershell -NoProfile -ExecutionPolicy Bypass -File ".\Uninstall-DVForge-Windows.ps1"
+
+# Uninstall and delete C:\DVForge entirely
+powershell -NoProfile -ExecutionPolicy Bypass -File ".\Uninstall-DVForge-Windows.ps1" -InstallRoot C:\DVForge -RemoveProject -Force
+
+
+Linux + Android (WSL2 Debian)
+-----------------------------
+# Install
+powershell -NoProfile -ExecutionPolicy Bypass -File ".\Setup-DVForge-WSL2.ps1"
+
+# Uninstall
+powershell -NoProfile -ExecutionPolicy Bypass -File ".\Uninstall-DVForge-WSL2.ps1"
+
+# Full wipe including Debian distro
+powershell -NoProfile -ExecutionPolicy Bypass -File ".\Uninstall-DVForge-WSL2.ps1" -RemoveDebian -RemoveWslConfig -Force
+
+
+What each installer sets up
+---------------------------
+Windows:  Git, Python, Rust 1.75 MSVC, Flutter 3.24.5, libclang 15, vcpkg,
+          VS Build Tools (C++), .NET 8, NuGet, sccache, ImageMagick,
+          LongPathsEnabled, portable .toolchains\env.json under InstallRoot.
+
+WSL2:     WSL + Debian, Flutter / Android SDK+NDK / vcpkg / Rust / JDK / LLVM
+          under the Linux distro (~/DVForge), for APK + .deb/.rpm/AppImage.
+
+You can run BOTH installers on the same PC: Windows script for .exe/.msi,
+WSL script for Android + Linux packages.

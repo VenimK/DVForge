@@ -1,0 +1,54 @@
+• Installer notes now point at Uninstall-DVForge-WSL2.ps1
+• Uninstaller examples / “to reinstall” line use Setup-DVForge-WSL2.ps1
+
+# Install
+powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\admin\Downloads\Setup-DVForge-WSL2.ps1"
+
+
+Last LOG
+
+=== Configuring environment variables in ~/.bashrc ===
+  [OK] Environment variables written to ~/.bashrc
+
+=== Writing .toolchains/env.json for DVForge ===
+/home/venimk/DVForge/.toolchains/env.json
+  [OK] .toolchains/env.json written
+
+=== Setup complete! ===
+
+  DVForge is at: ~/DVForge
+  Flutter:          /opt/flutter
+  Android SDK:      /home/venimk/Android/Sdk
+  NDK r28c:         /home/venimk/Android/Sdk/ndk/r28c
+  Temurin JDK 17:   /home/venimk/DVForge/.toolchains/java/jdk-17.0.20+8
+  vcpkg:            /opt/vcpkg
+  Rust 1.75:        ~/.cargo
+  LLVM 15.0.6:      /home/venimk/DVForge/.toolchains/llvm/clang+llvm-15.0.6-x86_64-linux-gnu-ubuntu-18.04
+  sccache 0.11.0:   /home/venimk/.cargo/bin/sccache
+  ImageMagick:      /usr/bin/magick
+  rpmbuild:         /usr/bin/rpmbuild
+  appimage-builder: /usr/local/bin/appimage-builder
+
+  To start building:
+    cd ~/DVForge
+    python3 app.py --no-browser
+
+  Then open http://127.0.0.1:8765 in your Windows browser.
+  The capability board should show Android + Linux packaging tools as ready.
+
+
+=== All done! ===
+
+  Next steps:
+  1. Open a WSL terminal:  wsl -d Debian
+  2. Start DVForge:        cd ~/DVForge && python3 app.py --no-browser
+  3. Open in browser:      http://127.0.0.1:8765
+
+  The capability board should show Android targets as buildable.
+
+
+
+
+
+# Uninstall
+powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\admin\Downloads\Uninstall-DVForge-WSL2.ps1"
