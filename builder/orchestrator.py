@@ -900,15 +900,33 @@ class Build:
                 f"MSI not found after build (expected {msi_src}). "
                 f"See msbuild output above.")
 
+    def _windows_long_paths_enabled(self):
+        """Best-effort read of HKLM\\...\\LongPathsEnabled (0 if unknown)."""
+        try:
+            import winreg
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"SYSTEM\CurrentControlSet\Control\FileSystem",
+            ) as key:
+                val, _ = winreg.QueryValueEx(key, "LongPathsEnabled")
+                return int(val) == 1
+        except Exception:
+            return False
+
     def _ensure_windows_short_src(self):
-        """Re-expose rustdesk-src via a short junction when paths exceed MAX_PATH.
+        """Re-expose rustdesk-src via a short junction when paths risk MAX_PATH.
 
         Flutter's MSBuild step writes .tlog files under deep plugin dirs
         (e.g. flutter_gpu_texture_renderer_plugin...). With a workspace under
         C:\\Users\\...\\Downloads\\... those paths exceed the classic 260-char
         limit and fail with MSB3491 — even when LongPathsEnabled is on, some
-        MSBuild tasks still choke. A junction at C:\\rdlb keeps the same files
-        but shortens every absolute path by ~50–70 chars.
+        MSBuild tasks still choke.
+
+        Junctions must be on the *same volume* as the real source (mklink /J
+        cannot cross drives). We therefore pick ``<drive>:\\rdlb`` based on
+        where the project actually lives, not hard-coded C:\\ — so installs on
+        D:\\, E:\\, etc. get a stable short path of the same shape on every box:
+        ``X:\\rdlb\\...``.
         """
         if self.host["os"] != "Windows" or self.dry_run:
             return
@@ -921,14 +939,47 @@ class Build:
             "flutter_gpu_texture_renderer_plugin.lastbuildstate",
         )
         projected = len(os.path.join(self.src_dir, worst_rel))
-        if projected < 250:
+        # When Win32 long paths are off, be more aggressive — MSBuild/linkers
+        # fail well below the theoretical 260 once you add intermediate names.
+        long_ok = self._windows_long_paths_enabled()
+        threshold = 250 if long_ok else 220
+        if projected < threshold:
             return
 
         real = os.path.abspath(self.src_dir)
-        candidates = [r"C:\rdlb", r"C:\rdlb-src", r"C:\r"]
+        drive, _ = os.path.splitdrive(real)
+        # Same-volume only. Prefer a fixed short name so every machine that
+        # installs DVForge on that drive sees the same build path prefix.
+        if not drive:
+            drive = "C:"
+        candidates = [
+            os.path.join(drive + os.sep, "rdlb"),
+            os.path.join(drive + os.sep, "rdlb-src"),
+            os.path.join(drive + os.sep, "r"),
+            # Last resort on system drive if project is elsewhere (rare; will
+            # only work if somehow same volume — kept for back-compat).
+            r"C:\rdlb",
+            r"C:\rdlb-src",
+        ]
+        # De-dupe while preserving order
+        seen = set()
+        uniq = []
+        for c in candidates:
+            key = os.path.normcase(os.path.normpath(c))
+            if key not in seen:
+                seen.add(key)
+                uniq.append(os.path.normpath(c))
+        candidates = uniq
+
         short = None
         for cand in candidates:
             try:
+                # Junctions cannot cross volumes — skip candidates on another drive.
+                cand_drive = os.path.splitdrive(os.path.abspath(cand))[0]
+                real_drive = os.path.splitdrive(real)[0]
+                if cand_drive and real_drive and (
+                        os.path.normcase(cand_drive) != os.path.normcase(real_drive)):
+                    continue
                 if os.path.isdir(cand):
                     try:
                         if os.path.samefile(cand, real):
@@ -944,7 +995,8 @@ class Build:
                         continue  # occupied; try next candidate
                 # Create directory junction (no admin required, same volume).
                 self.log(f"  · source path too long for MSBuild "
-                         f"(~{projected} chars projected; limit 260)")
+                         f"(~{projected} chars projected; limit 260"
+                         f"{'' if long_ok else '; LongPathsEnabled=0'})")
                 self.log(f"  · creating junction {cand} -> {real}")
                 rc = subprocess.run(
                     ["cmd", "/c", "mklink", "/J", cand, real],
@@ -963,8 +1015,9 @@ class Build:
 
         if not short:
             self.log("  ! could not create a short path junction. Options:")
-            self.log("      1) Move this project closer to C:\\ (e.g. C:\\rd)")
-            self.log("      2) Enable Win32 long paths (admin):")
+            self.log(f"      1) Install/move DVForge near the drive root "
+                     f"(e.g. {drive}\\DVForge) so build paths stay short")
+            self.log("      2) Enable Win32 long paths (admin, reboot may be needed):")
             self.log("         New-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet"
                      "\\Control\\FileSystem' -Name LongPathsEnabled -Value 1 "
                      "-PropertyType DWORD -Force")
@@ -1089,9 +1142,18 @@ class Build:
         # Pack + collect the portable exe if requested
         if wants_exe:
             self._pack_windows_portable(release, version)
-            portable_exe = os.path.join(self.src_dir, f"rustdesk-{version}-install.exe")
-            if os.path.isfile(portable_exe):
-                dest = os.path.join(self.out_dir, f"{basename}-{version}-install.exe")
+            # Packer writes next to src (may be a short junction like C:\rdlb).
+            # Also probe the real workspace tree in case paths diverged.
+            candidates = [
+                os.path.join(self.src_dir, f"rustdesk-{version}-install.exe"),
+                os.path.join(self.workspace, "rustdesk-src",
+                             f"rustdesk-{version}-install.exe"),
+            ]
+            portable_exe = next((p for p in candidates if os.path.isfile(p)), None)
+            if portable_exe:
+                os.makedirs(self.out_dir, exist_ok=True)
+                dest = os.path.join(
+                    self.out_dir, f"{basename}-{version}-install.exe")
                 shutil.copy2(portable_exe, dest)
                 self.artifacts.append(dest)
                 self.log(f"  ✓ artifact: {dest}")
@@ -1915,6 +1977,7 @@ class Build:
                         out_name = basename + f[len("rustdesk"):]
                     elif f.lower().startswith("app-") and f.lower().endswith(".apk"):
                         out_name = basename + f[3:]  # replace "app-" prefix
+                os.makedirs(self.out_dir, exist_ok=True)
                 dest = os.path.join(self.out_dir, out_name)
                 shutil.copy2(src, dest)
                 self.artifacts.append(dest)

@@ -94,6 +94,36 @@ def main():
     print(f"Summary: {len(installed_system)} system, {len(installed_toolchains)} toolchains, {len(missing)} missing")
     print("=" * 72)
 
+    # Windows path-length tip — deep Flutter/MSBuild paths fail under long
+    # install locations (e.g. C:\Users\…\Downloads\…). Toolchains env.json is
+    # portable (relative), but the build tree still benefits from a short root.
+    if sys.platform == "win32":
+        root_len = len(ROOT_DIR)
+        long_paths = False
+        try:
+            import winreg
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"SYSTEM\CurrentControlSet\Control\FileSystem",
+            ) as key:
+                val, _ = winreg.QueryValueEx(key, "LongPathsEnabled")
+                long_paths = int(val) == 1
+        except Exception:
+            pass
+        print("\n[Windows path portability]")
+        print(f"  install root: {ROOT_DIR}  ({root_len} chars)")
+        print(f"  LongPathsEnabled: {'yes' if long_paths else 'no'}")
+        if root_len > 40 or not long_paths:
+            drive = os.path.splitdrive(ROOT_DIR)[0] or "C:"
+            print("  tip: for reliable Windows builds on every machine, install at a")
+            print(f"       short fixed path such as {drive}\\DVForge (same layout everywhere).")
+            print("       .toolchains/env.json stores project-relative paths, so the")
+            print("       folder can move; deep MSBuild paths still prefer a short root.")
+            if not long_paths:
+                print("  tip: enable Win32 long paths (admin) if you must use a deep path:")
+                print("       New-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\FileSystem'")
+                print("         -Name LongPathsEnabled -Value 1 -PropertyType DWORD -Force")
+
     # Optional JSON output for scripts/CI
     if "--json" in sys.argv:
         print(json.dumps({

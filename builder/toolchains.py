@@ -16,6 +16,11 @@ or a package-manager install:
 NOTE: the download URLs are the official ones but versions/paths do drift —
 if a download 404s, update the registry below. Everything writes under
 `.toolchains/`; delete that folder to start clean.
+
+Paths recorded in `.toolchains/env.json` that live under the project root are
+stored **relative** (e.g. `.toolchains/flutter/flutter/bin`) so the same
+DVForge folder works after a move or when installed at different absolute
+paths on different machines. External system paths stay absolute.
 """
 
 import json
@@ -230,6 +235,72 @@ def tools_dir(root):
     return os.path.join(root, ".toolchains")
 
 
+def _is_windows_admin():
+    """True when this process already has an elevated token (Windows only)."""
+    if not WIN:
+        return False
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def _detect_vs_msvc(log=None):
+    """Return a short description if MSVC toolset + MSBuild are installed.
+
+    Uses vswhere (ships with any VS / Build Tools install). Returns None when
+    the C++ workload is missing so the bootstrapper can still run.
+    """
+    if not WIN:
+        return None
+    pf = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+    vswhere = os.path.join(pf, "Microsoft Visual Studio", "Installer",
+                           "vswhere.exe")
+    if not os.path.isfile(vswhere):
+        return None
+    try:
+        # Prefer an install that has the VC tools component.
+        out = subprocess.check_output(
+            [vswhere, "-latest", "-products", "*",
+             "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+             "-property", "installationPath"],
+            encoding="utf-8", errors="replace", timeout=30,
+        ).strip()
+        if not out:
+            # Any MSBuild is better than nothing — still report present.
+            out = subprocess.check_output(
+                [vswhere, "-latest", "-products", "*",
+                 "-requires", "Microsoft.Component.MSBuild",
+                 "-property", "installationPath"],
+                encoding="utf-8", errors="replace", timeout=30,
+            ).strip()
+        if not out:
+            return None
+        root = out.splitlines()[0].strip()
+        # Confirm link.exe exists under that install.
+        link = None
+        tools = os.path.join(root, "VC", "Tools", "MSVC")
+        if os.path.isdir(tools):
+            for ver in sorted(os.listdir(tools), reverse=True):
+                cand = os.path.join(tools, ver, "bin", "Hostx64", "x64",
+                                    "link.exe")
+                if os.path.isfile(cand):
+                    link = cand
+                    break
+        if link:
+            return f"{root} (link.exe)"
+        # MSBuild-only install (rare) — still useful for MSI.
+        msbuild = os.path.join(root, "MSBuild", "Current", "Bin", "MSBuild.exe")
+        if os.path.isfile(msbuild):
+            return f"{root} (MSBuild, no link.exe yet)"
+        return root
+    except Exception as e:
+        if log:
+            log(f"  · vswhere probe failed: {e}")
+        return None
+
+
 def dir_size(path):
     """Total bytes under a directory (best-effort)."""
     total = 0
@@ -269,7 +340,9 @@ def installed_info(root):
 
 def remove_tool(tid, root, log=lambda m: None):
     """Delete a locally-installed toolchain and drop its env entries."""
+    root = os.path.abspath(root)
     home = os.path.join(tools_dir(root), tid)
+    home_norm = os.path.normcase(os.path.normpath(home))
     freed = 0
     if os.path.isdir(home):
         freed = dir_size(home)
@@ -277,13 +350,19 @@ def remove_tool(tid, root, log=lambda m: None):
         log(f"removed {tid} ({human_size(freed)})")
     else:
         log(f"{tid} was not installed locally")
+
+    def _points_at_home(p):
+        if not p:
+            return False
+        resolved = _resolve_portable(p, root)
+        rn = os.path.normcase(os.path.normpath(resolved))
+        return rn == home_norm or rn.startswith(home_norm + os.sep) or home_norm in rn
+
     # rewrite env.json without paths/vars pointing at the removed home
     d = _load_env(root)
-    d["path"] = [p for p in d.get("path", []) if home not in p]
-    d["vars"] = {k: v for k, v in d.get("vars", {}).items() if home not in str(v)}
-    os.makedirs(tools_dir(root), exist_ok=True)
-    with open(env_path(root), "w") as f:
-        json.dump(d, f, indent=2)
+    d["path"] = [p for p in d.get("path", []) if not _points_at_home(p)]
+    d["vars"] = {k: v for k, v in d.get("vars", {}).items() if not _points_at_home(v)}
+    _save_env(root, d)
     return {"removed": tid, "freed": freed, "freed_human": human_size(freed)}
 
 
@@ -588,8 +667,50 @@ def install_one(tid, root, log, cancelled=lambda: False):
         return {"tool": tid, "home": "", "env": {"vars": {}, "path": []}}
 
     if spec["kind"] == "rust":
-        # Download rustup-init and install 1.75 per-user (~/.cargo, ~/.rustup).
-        # No admin needed. --no-modify-path: we manage PATH via env.json instead.
+        # Install / ensure Rust 1.75 per-user (~/.cargo, ~/.rustup).
+        # On Windows the official RustDesk CI uses the MSVC host triple
+        # (x86_64-pc-windows-msvc). Machines that already have a GNU default
+        # (or Chocolatey rustc on PATH) must still get the MSVC toolchain.
+        cargo_bin = os.path.join(os.path.expanduser("~"), ".cargo", "bin")
+        rustup = shutil.which("rustup") or os.path.join(
+            cargo_bin, "rustup" + (".exe" if WIN else ""))
+        pin = PINNED["rust"]
+        win_msvc = f"{pin}-x86_64-pc-windows-msvc"
+
+        def _run_rustup(args, check=True):
+            env = os.environ.copy()
+            # Ignore Chocolatey / other system Rust on PATH during install.
+            env["RUSTUP_INIT_SKIP_PATH_CHECK"] = "yes"
+            path_parts = [cargo_bin] + env.get("PATH", "").split(os.pathsep)
+            env["PATH"] = os.pathsep.join(p for p in path_parts if p)
+            exe = rustup if os.path.isfile(rustup) else shutil.which("rustup")
+            if not exe:
+                return 1
+            return subprocess.call([exe] + args, env=env)
+
+        if os.path.isfile(rustup) or shutil.which("rustup"):
+            log(f"  rustup already present — ensuring {pin}"
+                + (" MSVC" if WIN else ""))
+            if WIN:
+                # Prefer MSVC as the default host for future installs.
+                subprocess.call(
+                    [rustup if os.path.isfile(rustup) else "rustup",
+                     "set", "default-host", "x86_64-pc-windows-msvc"],
+                    env={**os.environ, "RUSTUP_INIT_SKIP_PATH_CHECK": "yes"},
+                )
+                _run_rustup(["toolchain", "install", win_msvc], check=False)
+                _run_rustup(["target", "add", "x86_64-pc-windows-msvc",
+                             "--toolchain", win_msvc], check=False)
+                _run_rustup(["default", win_msvc], check=False)
+                _run_rustup(["component", "add", "rustfmt",
+                             "--toolchain", win_msvc], check=False)
+            else:
+                _run_rustup(["toolchain", "install", pin, "--profile", "minimal"],
+                            check=False)
+                _run_rustup(["default", pin], check=False)
+            log(f"  ✓ Rust ready; cargo bin: {cargo_bin}")
+            return {"tool": tid, "home": "", "env": {"vars": {}, "path": [cargo_bin]}}
+
         url, _label = spec["urls"][(host_os, host_arch)]
         with tempfile.TemporaryDirectory() as tmp:
             init = os.path.join(tmp, "rustup-init" + (".exe" if WIN else ""))
@@ -597,48 +718,98 @@ def install_one(tid, root, log, cancelled=lambda: False):
             if not WIN:
                 os.chmod(init, 0o755)
             log("  installing Rust 1.75 (rustup-init -y, minimal profile)")
-            # (no --no-modify-path: let rustup add ~/.cargo/bin to PATH for the
-            #  user, so cargo works in any new terminal too. We also wire it into
-            #  our own env.json for this app.)
-            rc = subprocess.call([init, "-y", "--default-toolchain", PINNED["rust"],
-                                  "--profile", "minimal"])
+            # Force MSVC host on Windows so we never land on gnu-by-default
+            # (common when MinGW/Chocolatey rust is already on PATH).
+            env = os.environ.copy()
+            env["RUSTUP_INIT_SKIP_PATH_CHECK"] = "yes"
+            cmd = [init, "-y", "--default-toolchain",
+                   win_msvc if WIN else pin, "--profile", "minimal"]
+            if WIN:
+                cmd += ["--default-host", "x86_64-pc-windows-msvc"]
+            rc = subprocess.call(cmd, env=env)
             if rc != 0:
                 raise RuntimeError("rustup-init failed")
-        cargo_bin = os.path.join(os.path.expanduser("~"), ".cargo", "bin")
+        rustup = os.path.join(cargo_bin, "rustup" + (".exe" if WIN else ""))
+        if WIN and os.path.isfile(rustup):
+            subprocess.call([rustup, "default", win_msvc])
         log(f"  ✓ Rust installed; cargo bin: {cargo_bin}")
-        # home stays "" (rust lives in ~/.cargo, not .toolchains) but we DO wire PATH
         return {"tool": tid, "home": "", "env": {"vars": {}, "path": [cargo_bin]}}
 
     if spec["kind"] == "vs":
-        # Build Tools for Visual Studio (C++). Bootstrapper self-elevates; we run
-        # it elevated and wait. Installs the MSVC toolset (link.exe) + Windows SDK
-        # + MSBuild to Program Files. cargo/rustc then find link.exe via vswhere,
-        # no PATH wiring needed. Large download handled by the installer itself.
+        # Build Tools for Visual Studio (C++). Provides MSVC link.exe + MSBuild.
+        # Skip when already present (re-running the quiet bootstrapper while
+        # elevated often returns exit 1 even though the toolset is fine).
+        already = _detect_vs_msvc(log)
+        if already:
+            log(f"  ✓ VS C++ toolset already present ({already})")
+            return {"tool": tid, "home": "", "env": {"vars": {}, "path": []}}
+
         url, _ = spec["urls"][(host_os, host_arch)]
         with tempfile.TemporaryDirectory() as tmp:
             boot = os.path.join(tmp, "vs_BuildTools.exe")
+            log_dir = os.path.join(tmp, "vs-logs")
+            os.makedirs(log_dir, exist_ok=True)
             _download(url, boot, log)
             if cancelled():
                 raise RuntimeError("cancelled")
             log("  launching the Visual Studio Build Tools installer.")
-            log("  → Accept the UAC prompt. This installs the C++ MSVC toolset")
-            log("    (link.exe) + Windows SDK + MSBuild — a few GB, several minutes.")
-            args = ("--quiet --wait --norestart --nocache "
-                    "--add Microsoft.VisualStudio.Workload.VCTools "
-                    "--includeRecommended")
-            ps = (f"$p = Start-Process -FilePath '{boot}' -ArgumentList "
-                  f"'{args}' -Verb RunAs -Wait -PassThru; exit $p.ExitCode")
-            rc = subprocess.call(["powershell", "-NoProfile", "-ExecutionPolicy",
-                                  "Bypass", "-Command", ps])
-            # VS bootstrapper returns 3010 for "success, reboot recommended"
+            log("  → This installs the C++ MSVC toolset (link.exe) + Windows SDK")
+            log("    + MSBuild — a few GB, several minutes.")
+            # Channel product id for Build Tools 2022; quiet + wait.
+            arg_list = [
+                "--quiet", "--wait", "--norestart", "--nocache",
+                "--installPath",
+                os.path.join(os.environ.get("ProgramFiles(x86)",
+                                            r"C:\Program Files (x86)"),
+                             "Microsoft Visual Studio", "2022", "BuildTools"),
+                "--add", "Microsoft.VisualStudio.Workload.VCTools",
+                "--includeRecommended",
+                "--add", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+                "--add", "Microsoft.VisualStudio.Component.Windows11SDK.22621",
+            ]
+            # If we are already elevated (setup script / admin shell), run the
+            # bootstrapper directly. Nested Start-Process -Verb RunAs often
+            # fails with exit 1 when UAC is already elevated.
+            elevated = _is_windows_admin()
+            if elevated:
+                log("  · already elevated — running bootstrapper without nested UAC")
+                rc = subprocess.call([boot] + arg_list)
+            else:
+                log("  · requesting one UAC elevation for the installer")
+                # Quote-safe PowerShell invoke
+                boot_ps = boot.replace("'", "''")
+                args_ps = " ".join("'{0}'".format(a.replace("'", "''"))
+                                   for a in arg_list)
+                ps = (
+                    f"$p = Start-Process -FilePath '{boot_ps}' "
+                    f"-ArgumentList @({args_ps}) -Verb RunAs -Wait -PassThru; "
+                    f"exit $p.ExitCode"
+                )
+                rc = subprocess.call(
+                    ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                     "-Command", ps])
+            # 0 = ok, 3010 = success reboot recommended
             if rc not in (0, 3010):
-                raise RuntimeError(
-                    f"VS Build Tools installer exited with code {rc}. If UAC was "
-                    "declined, try again; otherwise install 'Desktop development "
-                    "with C++' from https://aka.ms/vs/17/release/vs_BuildTools.exe")
-        log("  ✓ VS Build Tools install finished. Click re-scan; cargo will now "
-            "find link.exe.")
-        # lives in Program Files, not .toolchains — no env wiring here.
+                # Installer is flaky when a partial install exists — re-probe.
+                again = _detect_vs_msvc(log)
+                if again:
+                    log(f"  · installer exit {rc}, but MSVC toolset is usable "
+                        f"({again}) — treating as success")
+                else:
+                    raise RuntimeError(
+                        f"VS Build Tools installer exited with code {rc}. "
+                        "If UAC was declined, re-run elevated. Otherwise install "
+                        "'Desktop development with C++' from "
+                        "https://aka.ms/vs/17/release/vs_BuildTools.exe")
+            else:
+                log("  ✓ VS Build Tools install finished.")
+        # Final probe
+        final = _detect_vs_msvc(log)
+        if final:
+            log(f"  ✓ MSVC ready ({final})")
+        else:
+            log("  ! installer finished but vswhere cannot see VC.Tools yet — "
+                "reboot or open a new shell, then re-scan.")
         return {"tool": tid, "home": "", "env": {"vars": {}, "path": []}}
 
     if spec["kind"] == "git":
@@ -814,28 +985,179 @@ def install_many(ids, root, log, cancelled=lambda: False):
 # ---------------------------------------------------------------------------
 # persisted env — written after install, applied at app startup
 # ---------------------------------------------------------------------------
+#
+# Portability rules (so DVForge can live at different absolute paths on every
+# machine, while toolchain wiring stays identical):
+#
+#   * Paths *under the project root* are stored RELATIVE in env.json
+#     (forward slashes), e.g. ".toolchains/flutter/flutter/bin".
+#   * Paths outside the project (system VS, /opt/vcpkg, ~/.cargo, …) stay
+#     absolute — they are machine-local by nature.
+#   * On load we resolve relatives against the current root and rewrite any
+#     stale absolute ".toolchains/…" paths left by an older install/move.
+#   * After healing we re-save env.json in portable form so the next machine
+#     (or a copy of the folder) just works.
 
 def env_path(root):
     return os.path.join(tools_dir(root), "env.json")
 
 
+def _norm_seps(p):
+    """Normalize mixed / and \\ separators to os.sep for comparisons."""
+    if not p:
+        return p
+    return p.replace("/", os.sep).replace("\\", os.sep)
+
+
+def _under_root(path, root):
+    """True if path is the root or a descendant (case-insensitive on Windows)."""
+    if not path:
+        return False
+    try:
+        ap = os.path.normcase(os.path.abspath(_norm_seps(path)))
+        ar = os.path.normcase(os.path.abspath(root))
+        return ap == ar or ap.startswith(ar + os.sep)
+    except (OSError, ValueError):
+        return False
+
+
+def _to_portable(path, root):
+    """Store path relative to project root when possible (portable env.json).
+
+    Uses forward slashes so the same env.json works if the tree is later
+    opened on Linux/WSL. External (non-project) paths stay absolute.
+    """
+    if not path:
+        return path
+    # Non-path values (e.g. RUSTC_WRAPPER=sccache bare name) pass through.
+    if path in ("sccache",) or (not os.path.isabs(path)
+                                  and ".toolchains" not in _norm_seps(path)
+                                  and not path.startswith(".")):
+        # Keep simple tokens; still try relative for known relative forms.
+        if os.sep not in path and "/" not in path and "\\" not in path:
+            return path
+    path = _norm_seps(path)
+    root = os.path.abspath(root)
+    if os.path.isabs(path) and _under_root(path, root):
+        rel = os.path.relpath(os.path.abspath(path), root)
+        return rel.replace("\\", "/")
+    if not os.path.isabs(path):
+        # Already relative — normalize separators only.
+        p2 = path[2:] if path.startswith("./") or path.startswith(".\\") else path
+        return p2.replace("\\", "/")
+    return os.path.normpath(path)
+
+
+def _extract_toolchains_suffix(path):
+    """If path contains a .toolchains segment, return the suffix after it.
+
+    Handles both separators and mixed-case drive letters on Windows.
+    """
+    if not path:
+        return None
+    norm = _norm_seps(path)
+    # Find ".../.toolchains/..." or leading ".toolchains/..."
+    marker = os.sep + ".toolchains" + os.sep
+    lower = norm.lower() if WIN else norm
+    m = marker.lower() if WIN else marker
+    idx = lower.find(m)
+    if idx >= 0:
+        return norm[idx + len(marker):]
+    # path is exactly ".../.toolchains" or ".toolchains"
+    if lower.endswith(os.sep + ".toolchains") or lower == ".toolchains":
+        return ""
+    if lower.startswith(".toolchains" + os.sep):
+        return norm[len(".toolchains" + os.sep):]
+    return None
+
+
+def _resolve_portable(path, root):
+    """Turn a stored env.json path into an absolute path for this machine."""
+    if not path:
+        return path
+    root = os.path.abspath(root)
+    # Bare tool names (RUSTC_WRAPPER=sccache) — leave alone.
+    if os.sep not in path and "/" not in path and "\\" not in path:
+        if not path.startswith("."):
+            return path
+
+    path_norm = _norm_seps(path)
+
+    # Relative → join root.
+    if not os.path.isabs(path_norm):
+        p2 = path_norm[2:] if path_norm.startswith("." + os.sep) else path_norm
+        return os.path.normpath(os.path.join(root, p2))
+
+    abs_p = os.path.normpath(path_norm)
+
+    # Already under current root — good.
+    if _under_root(abs_p, root):
+        return abs_p
+
+    # Stale absolute from another machine / moved folder: rewrite any path
+    # that mentions .toolchains into <current-root>/.toolchains/<suffix>.
+    suffix = _extract_toolchains_suffix(abs_p)
+    if suffix is not None:
+        return os.path.normpath(os.path.join(root, ".toolchains", suffix))
+
+    # External absolute path (VS, /opt/vcpkg, user SDK, …) — keep as-is.
+    return abs_p
+
+
+def _save_env(root, data):
+    """Write env.json with project-local paths stored relative to root."""
+    root = os.path.abspath(root)
+    portable = {
+        "vars": {k: _to_portable(v, root) for k, v in data.get("vars", {}).items()},
+        "path": [_to_portable(p, root) for p in data.get("path", []) if p],
+    }
+    # De-dupe PATH entries (after portable conversion)
+    seen = set()
+    uniq = []
+    for p in portable["path"]:
+        key = p.replace("\\", "/").lower() if WIN else p.replace("\\", "/")
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append(p)
+    portable["path"] = uniq
+    os.makedirs(tools_dir(root), exist_ok=True)
+    with open(env_path(root), "w", encoding="utf-8") as f:
+        json.dump(portable, f, indent=2)
+        f.write("\n")
+    return portable
+
+
 def merge_env(root, results, log):
+    """Merge install results into env.json using portable (relative) paths."""
+    root = os.path.abspath(root)
     data = _load_env(root)
+    # Resolve existing entries first so we can compare apples-to-apples,
+    # then re-serialize everything as portable at the end.
+    resolved_vars = {k: _resolve_portable(v, root)
+                     for k, v in data.get("vars", {}).items()}
+    resolved_path = [_resolve_portable(p, root) for p in data.get("path", [])]
+
     for r in results:
         for k, v in r["env"]["vars"].items():
-            data["vars"][k] = v
+            resolved_vars[k] = v  # install always produces absolute homes
         for p in r["env"]["path"]:
-            if p and p not in data["path"]:
-                data["path"].insert(0, p)
-    os.makedirs(tools_dir(root), exist_ok=True)
-    with open(env_path(root), "w") as f:
-        json.dump(data, f, indent=2)
-    log(f"  wrote {env_path(root)}")
+            if not p:
+                continue
+            ap = os.path.normpath(p)
+            # Avoid duplicate absolute / already-resolved entries.
+            if ap not in resolved_path and os.path.normcase(ap) not in {
+                    os.path.normcase(x) for x in resolved_path}:
+                resolved_path.insert(0, ap)
+
+    portable = _save_env(root, {"vars": resolved_vars, "path": resolved_path})
+    log(f"  wrote {env_path(root)} (portable paths relative to project root)")
+    return portable
 
 
 def _load_env(root):
     try:
-        with open(env_path(root)) as f:
+        with open(env_path(root), encoding="utf-8") as f:
             d = json.load(f)
             d.setdefault("vars", {})
             d.setdefault("path", [])
@@ -848,46 +1170,17 @@ def apply_persisted_env(root):
     """Call at startup: set vars + prepend PATH so detection sees local tools.
 
     Self-heals:
-      - relative paths in env.json (resolve against app root) so subprocesses
-        with a different cwd still find .toolchains tools
-      - stale LIBCLANG_PATH pointing at LLVM bin/ instead of lib/
-      - prefers absolute paths under .toolchains/
+      - relative paths in env.json (resolve against app root)
+      - stale absolute paths from a moved/copied install (rewrite .toolchains/)
+      - LIBCLANG_PATH pointing at the wrong sibling dir
+      - prefers portable LLVM under .toolchains/ when present
+      - re-saves env.json in portable form so the tree stays movable
     """
     root = os.path.abspath(root)
 
-    def _abspath(p):
-        if not p:
-            return p
-        if os.path.isabs(p):
-            return os.path.normpath(p)
-        # strip leading ./
-        p2 = p[2:] if p.startswith("./") or p.startswith(".\\") else p
-        return os.path.normpath(os.path.join(root, p2))
-
     d = _load_env(root)
-    vars_ = {k: _abspath(v) for k, v in d.get("vars", {}).items()}
-    paths = [_abspath(p) for p in d.get("path", [])]
-
-    # Self-heal stale absolute paths left over from a project directory rename.
-    # If a path contains a .toolchains/ segment but doesn't live under the
-    # current root, rewrite the prefix so it points into our .toolchains/.
-    tc_marker = os.sep + ".toolchains" + os.sep
-    tc_root = os.path.join(root, ".toolchains")
-
-    def _heal_renamed(p):
-        if not p or not os.path.isabs(p):
-            return p
-        norm = os.path.normpath(p)
-        if norm.startswith(root):
-            return norm
-        idx = norm.find(tc_marker)
-        if idx < 0:
-            return norm
-        suffix = norm[idx + len(tc_marker):]
-        return os.path.normpath(os.path.join(tc_root, suffix))
-
-    vars_ = {k: _heal_renamed(v) for k, v in vars_.items()}
-    paths = [_heal_renamed(p) for p in paths]
+    vars_ = {k: _resolve_portable(v, root) for k, v in d.get("vars", {}).items()}
+    paths = [_resolve_portable(p, root) for p in d.get("path", [])]
 
     libclang = vars_.get("LIBCLANG_PATH")
     if libclang:
@@ -956,7 +1249,8 @@ def apply_persisted_env(root):
             if healed_ndk is None:
                 healed_ndk = _locate(ndk_home, "source.properties",
                                      lambda m: None)
-                if not os.path.isdir(os.path.join(healed_ndk, "toolchains")):
+                if not healed_ndk or not os.path.isdir(
+                        os.path.join(healed_ndk, "toolchains")):
                     healed_ndk = None
             if healed_ndk:
                 vars_["ANDROID_NDK_HOME"] = healed_ndk
@@ -973,16 +1267,12 @@ def apply_persisted_env(root):
                             except OSError:
                                 pass
 
-    # Persist self-healed absolute paths so next launch is clean.
-    healed = {"vars": vars_, "path": paths}
-    if healed != {"vars": d.get("vars", {}), "path": d.get("path", [])}:
-        try:
-            os.makedirs(tools_dir(root), exist_ok=True)
-            with open(env_path(root), "w") as f:
-                json.dump(healed, f, indent=2)
-                f.write("\n")
-        except Exception:
-            pass
+    # Always re-save in portable form so a moved/copied tree keeps working
+    # on the next machine without anyone hand-editing env.json.
+    try:
+        _save_env(root, {"vars": vars_, "path": paths})
+    except Exception:
+        pass
 
     for k, v in vars_.items():
         if v:
@@ -993,7 +1283,8 @@ def apply_persisted_env(root):
         prepend = sep.join(p for p in paths if os.path.isdir(p))
         if prepend:
             os.environ["PATH"] = prepend + sep + existing
-    return healed
+    # Return resolved (absolute) view for callers that need real paths.
+    return {"vars": vars_, "path": paths}
 
 
 if __name__ == "__main__":
