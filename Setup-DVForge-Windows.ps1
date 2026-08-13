@@ -7,14 +7,15 @@
 
   Installs / verifies (idempotent -- safe to re-run):
     - Git, Python 3 (winget if missing)
-    - Chocolatey (only if NuGet / ImageMagick installers need it)
+    - Chocolatey (only if the NuGet CLI installer needs it)
     - LongPathsEnabled (HKLM) so Flutter/MSBuild deep paths are less fragile
     - DVForge at a short fixed root (default C:\DVForge) -- copy from this tree
       or git-clone when running standalone
     - Via builder/toolchains.py (same pins as the GUI):
         Rust 1.75 (MSVC), Flutter 3.24.5, LLVM/libclang 15, vcpkg (pinned),
         VS Build Tools 2022 (C++ / link.exe + MSBuild), .NET 8 SDK, NuGet,
-        sccache 0.11.0, ImageMagick, (optional) JDK 17
+        sccache 0.11.0, ImageMagick (official installer → .toolchains\imagemagick),
+        (optional) JDK 17
     - Pins rustup default to 1.75-x86_64-pc-windows-msvc
     - Writes portable .toolchains/env.json (project-relative paths)
 
@@ -158,7 +159,7 @@ function Ensure-Chocolatey {
         Write-Skip 'Chocolatey already installed'
         return $true
     }
-    Write-Host '  Installing Chocolatey (needed for NuGet CLI / ImageMagick) ...'
+    Write-Host '  Installing Chocolatey (needed for NuGet CLI) ...'
     try {
         Set-ExecutionPolicy Bypass -Scope Process -Force
         [System.Net.ServicePointManager]::SecurityProtocol =
@@ -309,7 +310,9 @@ try {
 
 Write-Ok "Using Python launcher: $py"
 
-# Chocolatey (for nuget + imagemagick via toolchains)
+# Chocolatey is only for NuGet CLI. ImageMagick is no longer a choco package —
+# toolchains.py drops the official Inno installer into .toolchains\imagemagick
+# and wires PATH via env.json (choco used to record "installed" with no magick.exe).
 Ensure-Chocolatey | Out-Null
 
 # ---------------------------------------------------------------------------
@@ -395,6 +398,7 @@ if (-not $SkipVsBuildTools) { [void]$toolIds.Add('vs_buildtools') }
 [void]$toolIds.Add('nuget')
 if (-not $SkipOptional) {
     [void]$toolIds.Add('sccache')
+    # Official ImageMagick Inno installer → .toolchains\imagemagick (not choco)
     [void]$toolIds.Add('imagemagick')
 }
 if ($WithJava) { [void]$toolIds.Add('java') }

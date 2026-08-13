@@ -199,7 +199,9 @@ TOOLS = {
         "version": "0.11.0",
     },
     # ImageMagick — needed for icon/logo resizing and ICO/ICNS generation.
-    # Installed via the system package manager (brew/apt/choco).
+    # Linux/macOS: system package manager. Windows: Inno installer into
+    # .toolchains/imagemagick (choco often records the package without
+    # leaving magick.exe on PATH — we never treat that as success).
     "imagemagick": {
         "label": "ImageMagick (icon/logo branding)",
         "kind": "package",
@@ -208,6 +210,13 @@ TOOLS = {
             "macOS":   ("brew", ["install", "imagemagick"]),
             "Linux":   ("sudo", ["apt", "install", "-y", "imagemagick"]),
             "Windows": ("choco", ["install", "-y", "imagemagick"]),
+        },
+        "urls": {
+            ("Windows", "x86_64"): (
+                "https://github.com/ImageMagick/ImageMagick/releases/"
+                "download/7.1.2-29/ImageMagick-7.1.2-29-Q16-x64-dll.exe",
+                "inno",
+            ),
         },
     },
     # potrace — converts PNG logos to SVG. Optional but useful.
@@ -413,7 +422,11 @@ def installable(host_os=None, host_arch=None):
                 ok, reason = False, f"no package install for {host_os}"
             elif host_os in pkgs:
                 mgr = pkgs[host_os][0]
-                if not shutil.which(mgr):
+                # Windows ImageMagick has a direct Inno installer — choco is
+                # optional, not required.
+                has_direct = (tid == "imagemagick"
+                              and (host_os, host_arch) in spec.get("urls", {}))
+                if not shutil.which(mgr) and not has_direct:
                     ok, reason = False, f"{mgr} not found — install {spec['label']} manually"
         out[tid] = {"label": spec["label"], "ok": ok, "reason": reason}
     return out
@@ -541,7 +554,64 @@ def _env_for(tid, home):
         return {"vars": {"VCPKG_ROOT": home}, "path": [home]}
     if tid == "sccache":
         return {"vars": {"RUSTC_WRAPPER": "sccache"}, "path": []}
+    if tid == "imagemagick":
+        # magick.exe sits at the Inno /DIR root, or in bin/ for some layouts.
+        path = []
+        if os.path.isfile(os.path.join(home, "magick" + EXE)):
+            path = [home]
+        elif os.path.isdir(os.path.join(home, "bin")):
+            path = [os.path.join(home, "bin")]
+        elif home:
+            path = [home]
+        return {"vars": {}, "path": path}
     return {"vars": {}, "path": []}
+
+
+def _install_imagemagick_inno(home_target, url, log, cancelled=lambda: False):
+    """Silent-install official ImageMagick into .toolchains/imagemagick.
+
+    Chocolatey's imagemagick package is an Inno Setup wrapper that often
+    records 'installed' without leaving magick.exe (UAC skipped, PATH never
+    refreshed, or the installer cleaned itself up). Dropping the official
+    exe into a project-local folder lets env.json wire PATH reliably.
+    Returns the magick.exe path, or None.
+    """
+    magick = os.path.join(home_target, "magick.exe")
+    if os.path.isfile(magick):
+        return magick
+    os.makedirs(home_target, exist_ok=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        exe = os.path.join(tmp, "imagemagick-setup.exe")
+        _download(url, exe, log)
+        if cancelled():
+            raise RuntimeError("cancelled")
+        # Inno Setup: /DIR= must be last. User-writable /DIR usually works
+        # without admin; fall back to one UAC prompt if it didn't land.
+        silent = [
+            "/VERYSILENT", "/NORESTART", "/SUPPRESSMSGBOXES", "/NOICONS",
+            "/MERGETASKS=!desktop_icon,!install_FFmpeg",
+            f"/DIR={home_target}",
+        ]
+        log("  installing ImageMagick into .toolchains (PATH wired via env.json)")
+        rc = subprocess.call([exe] + silent)
+        if os.path.isfile(magick):
+            log(f"  ✓ ImageMagick at {magick}")
+            return magick
+        log("  installer needs admin — a UAC prompt will appear")
+        bat = os.path.join(tmp, "install_imagemagick.bat")
+        with open(bat, "w", encoding="ascii") as f:
+            f.write("@echo off\r\n")
+            f.write(f'"{exe}" {" ".join(silent)}\r\n')
+        ps = (f"$p = Start-Process -FilePath '{bat}' -Verb RunAs -Wait -PassThru; "
+              f"exit $p.ExitCode")
+        rc = subprocess.call(["powershell", "-NoProfile", "-ExecutionPolicy",
+                              "Bypass", "-Command", ps])
+        if os.path.isfile(magick):
+            log(f"  ✓ ImageMagick at {magick}")
+            return magick
+        log(f"  ! ImageMagick installer finished (exit {rc}) but "
+            f"magick.exe not under {home_target}")
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -596,9 +666,23 @@ def install_one(tid, root, log, cancelled=lambda: False):
                 if os.path.isfile(cand):
                     already = cand
                     break
-        if already:
+        # ImageMagick: never trust a bare `convert` (Windows system32) or a
+        # Chocolatey package that left no magick.exe. Probe real binaries.
+        just_installed = False
+        if tid == "imagemagick":
+            from . import prereqs as _prereqs
+            already = _prereqs.find_imagemagick()
+            if not already and WIN:
+                url_entry = spec.get("urls", {}).get((host_os, _arch()))
+                if url_entry:
+                    installed = _install_imagemagick_inno(
+                        home_target, url_entry[0], log, cancelled)
+                    if installed:
+                        already = installed
+                        just_installed = True
+        if already and not just_installed:
             log(f"  ✓ {tid} already installed ({already})")
-        else:
+        elif not already:
             log(f"  running: {mgr} {' '.join(args)}")
             rc = subprocess.call([mgr] + args)
             # winget returns 0 on success; -1978335189 (0x8A15000B) means
@@ -621,20 +705,27 @@ def install_one(tid, root, log, cancelled=lambda: False):
                 "dotnet", "dotnet.exe")
             if os.path.isfile(cand):
                 found = cand
+        if tid == "imagemagick":
+            from . import prereqs as _prereqs
+            found = _prereqs.find_imagemagick()
         if found:
             log(f"  ✓ {tid} installed via {mgr}" if not already
                 else f"  ✓ {tid} ready")
         else:
             log(f"  ! {tid} install finished but binary not found on PATH — "
                 f"re-open the app or start a new terminal")
-        # Wire Program Files\dotnet into session PATH when we installed it
+        # Wire Program Files\dotnet / ImageMagick dir into session PATH
         env_path = []
         if tid == "dotnet" and WIN:
             pf_dotnet = os.path.join(
                 os.environ.get("ProgramFiles", r"C:\Program Files"), "dotnet")
             if os.path.isdir(pf_dotnet):
                 env_path = [pf_dotnet]
-        return {"tool": tid, "home": "", "env": {"vars": {}, "path": env_path}}
+        if tid == "imagemagick" and found:
+            env_path = [os.path.dirname(os.path.abspath(found))]
+            os.environ["PATH"] = env_path[0] + os.pathsep + os.environ.get("PATH", "")
+        return {"tool": tid, "home": os.path.dirname(found) if (tid == "imagemagick" and found) else "",
+                "env": {"vars": {}, "path": env_path}}
 
     if spec["kind"] == "nuget":
         # Install NuGet CLI (if needed) and always ensure nuget.org is registered.
@@ -1266,6 +1357,22 @@ def apply_persisted_env(root):
                                 os.symlink(real_path, link_path)
                             except OSError:
                                 pass
+
+    # ImageMagick: choco/NSIS often land off PATH (or choco marks the
+    # package installed without leaving magick.exe). Discover a real
+    # magick and persist its directory so customize.py can find it.
+    try:
+        from . import prereqs as _prereqs
+        magick = _prereqs.find_imagemagick()
+        if magick:
+            mdir = os.path.dirname(os.path.abspath(magick))
+            already = any(
+                os.path.normcase(os.path.abspath(p)) == os.path.normcase(mdir)
+                for p in paths if p)
+            if mdir and os.path.isdir(mdir) and not already:
+                paths.insert(0, mdir)
+    except Exception:
+        pass
 
     # Always re-save in portable form so a moved/copied tree keeps working
     # on the next machine without anyone hand-editing env.json.

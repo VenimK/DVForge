@@ -380,6 +380,31 @@ def write_custom_txt(dest_dir, env, log=None, filename="custom_.txt"):
 # icon / logo branding (all platforms)
 # ---------------------------------------------------------------------------
 
+def _magick_bin():
+    """Absolute path to a real ImageMagick ``magick``, or None.
+
+    Uses the same locator as prereqs/toolchains (PATH, .toolchains,
+    Program Files). Never falls back to Windows system32\\convert.exe.
+    """
+    try:
+        from .prereqs import find_imagemagick
+        return find_imagemagick()
+    except Exception:
+        return shutil.which("magick")
+
+
+def _run_magick(args, timeout=30):
+    magick = _magick_bin()
+    if not magick:
+        return False
+    try:
+        subprocess.run([magick] + list(args), check=True,
+                       capture_output=True, timeout=timeout)
+        return True
+    except (FileNotFoundError, subprocess.CalledProcessError, OSError):
+        return False
+
+
 def _magick_resize(src_img, size, dst_img, log=None):
     """Resize an image to an EXACT square using ImageMagick.
 
@@ -388,20 +413,17 @@ def _magick_resize(src_img, size, dst_img, log=None):
     A plain `-resize {size}x{size}` preserves aspect ratio and produces
     non-square output (e.g. 16x9 from a landscape photo), which iconutil
     and .ico generators reject."""
-    for cmd in ("magick", "convert"):
-        try:
-            subprocess.run(
-                [cmd, src_img, "-auto-orient",
-                 "-resize", f"{size}x{size}^",
-                 "-gravity", "center",
-                 "-extent", f"{size}x{size}",
-                 dst_img],
-                check=True, capture_output=True, timeout=30)
-            return True
-        except (FileNotFoundError, subprocess.CalledProcessError):
-            continue
+    if _run_magick([src_img, "-auto-orient",
+                    "-resize", f"{size}x{size}^",
+                    "-gravity", "center",
+                    "-extent", f"{size}x{size}",
+                    dst_img]):
+        return True
     if log:
-        log(f"    ! ImageMagick not found — cannot resize to {size}x{size}")
+        if _magick_bin():
+            log(f"    ! ImageMagick failed to resize to {size}x{size}")
+        else:
+            log(f"    ! ImageMagick not found — cannot resize to {size}x{size}")
     return False
 
 
@@ -418,24 +440,20 @@ def _ensure_png(icon_abs, log=None):
     tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
     tmp.close()
     png_path = tmp.name
-    for cmd in ("magick", "convert"):
-        try:
-            subprocess.run(
-                [cmd, icon_abs, "-auto-orient",
-                 "-resize", "1024x1024^",
-                 "-gravity", "center", "-extent", "1024x1024",
-                 "-background", "none", "-alpha", "on",
-                 png_path],
-                check=True, capture_output=True, timeout=30)
-            if log:
-                log(f"    · converted {os.path.basename(icon_abs)} -> "
-                    "1024x1024 PNG (auto-orient + alpha)")
-            return png_path
-        except (FileNotFoundError, subprocess.CalledProcessError):
-            continue
+    if _run_magick([icon_abs, "-auto-orient",
+                    "-resize", "1024x1024^",
+                    "-gravity", "center", "-extent", "1024x1024",
+                    "-background", "none", "-alpha", "on",
+                    png_path]):
+        if log:
+            log(f"    · converted {os.path.basename(icon_abs)} -> "
+                "1024x1024 PNG (auto-orient + alpha)")
+        return png_path
     if log:
+        why = ("ImageMagick failed" if _magick_bin()
+               else "ImageMagick not found")
         log(f"    ! could not convert {os.path.basename(icon_abs)} to PNG — "
-            "ImageMagick not found; using original file as-is")
+            f"{why}; using original file as-is")
     try:
         os.unlink(png_path)
     except OSError:
@@ -445,16 +463,14 @@ def _ensure_png(icon_abs, log=None):
 
 def _make_ico(src_img, dst_ico, log=None):
     """Create a multi-resolution ICO (256,64,48,32,16) from a PNG via ImageMagick."""
-    for cmd in ("magick", "convert"):
-        try:
-            subprocess.run([cmd, src_img, "-define",
-                            "icon:auto-resize=256,64,48,32,16", dst_ico],
-                           check=True, capture_output=True, timeout=30)
-            return True
-        except (FileNotFoundError, subprocess.CalledProcessError):
-            continue
+    if _run_magick([src_img, "-define",
+                    "icon:auto-resize=256,64,48,32,16", dst_ico]):
+        return True
     if log:
-        log("    ! ImageMagick not found — cannot create .ico")
+        if _magick_bin():
+            log("    ! ImageMagick failed to create .ico")
+        else:
+            log("    ! ImageMagick not found — cannot create .ico")
     return False
 
 
@@ -576,14 +592,16 @@ def _apply_icon_windows(src, icon, res_dir, log):
     """Windows: .ico, tray icon, Runner.rc resource, flutter_assets icon.ico."""
     # res/icon.ico
     ico_path = os.path.join(res_dir, "icon.ico")
-    _make_ico(icon, ico_path, log)
+    if not _make_ico(icon, ico_path, log):
+        # Do not copy the stock RustDesk .ico over the custom branding.
+        return
     # res/tray-icon.ico
     shutil.copy2(ico_path, os.path.join(res_dir, "tray-icon.ico"))
     log("    · res/tray-icon.ico")
     # flutter/windows/runner/resources/app_icon.ico (compiled into exe)
     runner_ico = os.path.join(src, "flutter", "windows", "runner",
                               "resources", "app_icon.ico")
-    if os.path.exists(runner_ico):
+    if os.path.exists(os.path.dirname(runner_ico)):
         shutil.copy2(ico_path, runner_ico)
         log("    · flutter/windows/runner/resources/app_icon.ico")
     # flutter/assets/icon.ico — loaded at runtime by win32_window.cpp
@@ -633,22 +651,18 @@ def _apply_icon_macos(src, icon, res_dir, log):
     # tray icons (dark + light, 22x22)
     for variant in ("dark", "light"):
         tray = os.path.join(res_dir, f"mac-tray-{variant}-x2.png")
-        try:
-            if variant == "dark":
-                subprocess.run(["magick", icon, "-resize", "22x22",
-                                "-colorspace", "gray", "-alpha", "set",
-                                "-background", "none", "-channel", "A",
-                                "-evaluate", "set", "100%", tray],
-                               check=True, capture_output=True, timeout=30)
-            else:
-                subprocess.run(["magick", icon, "-resize", "22x22",
-                                "-negate", "-colorspace", "gray", "-alpha", "set",
-                                "-background", "none", "-channel", "A",
-                                "-evaluate", "set", "100%", tray],
-                               check=True, capture_output=True, timeout=30)
+        if variant == "dark":
+            ok = _run_magick([icon, "-resize", "22x22",
+                              "-colorspace", "gray", "-alpha", "set",
+                              "-background", "none", "-channel", "A",
+                              "-evaluate", "set", "100%", tray])
+        else:
+            ok = _run_magick([icon, "-resize", "22x22",
+                              "-negate", "-colorspace", "gray", "-alpha", "set",
+                              "-background", "none", "-channel", "A",
+                              "-evaluate", "set", "100%", tray])
+        if ok:
             log(f"    · res/mac-tray-{variant}-x2.png")
-        except Exception:
-            pass
 
 
 def _apply_icon_android(src, icon, res_dir, log):
@@ -709,15 +723,14 @@ def _apply_logo(src, env, platform, log):
         shutil.copy2(logo_png, os.path.join(flutter_assets, "icon.png"))
         log("    · flutter/assets/icon.png (logo)")
         if platform in ("macos", "linux"):
+            pbm = tempfile.NamedTemporaryFile(suffix=".pbm", delete=False)
+            pbm.close()
             try:
-                pbm = tempfile.NamedTemporaryFile(suffix=".pbm", delete=False)
-                pbm.close()
-                subprocess.run(["magick", logo_png, "-flatten", pbm.name],
-                               check=True, capture_output=True, timeout=30)
-                svg_path = os.path.join(flutter_assets, "icon.svg")
-                subprocess.run(["potrace", "--svg", "-o", svg_path, pbm.name],
-                               check=True, capture_output=True, timeout=30)
-                log("    · flutter/assets/icon.svg (via potrace)")
+                if _run_magick([logo_png, "-flatten", pbm.name]):
+                    svg_path = os.path.join(flutter_assets, "icon.svg")
+                    subprocess.run(["potrace", "--svg", "-o", svg_path, pbm.name],
+                                   check=True, capture_output=True, timeout=30)
+                    log("    · flutter/assets/icon.svg (via potrace)")
             except Exception:
                 pass
             finally:

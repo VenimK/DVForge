@@ -31,7 +31,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ".\Uninstall-DVForge-WSL2.ps
 What each installer sets up
 ---------------------------
 Windows:  Git, Python, Rust 1.75 MSVC, Flutter 3.24.5, libclang 15, vcpkg,
-          VS Build Tools (C++), .NET 8, NuGet, sccache, ImageMagick,
+          VS Build Tools (C++), .NET 8, NuGet, sccache,
+          ImageMagick (official installer → .toolchains\imagemagick, not choco),
           LongPathsEnabled, portable .toolchains\env.json under InstallRoot.
 
 WSL2:     WSL + Debian, Flutter / Android SDK+NDK / vcpkg / Rust / JDK / LLVM

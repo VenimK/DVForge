@@ -530,15 +530,113 @@ def check_dotnet():
                    note="Needed for WiX Toolset SDK 4.x (Windows MSI).")
 
 
+def _is_windows_system_convert(path):
+    """True for C:\\Windows\\System32\\convert.exe (NTFS tool, not ImageMagick)."""
+    if not path:
+        return False
+    if os.path.basename(path).lower() not in ("convert", "convert.exe"):
+        return False
+    windir = os.path.normcase(os.environ.get("WINDIR", r"C:\Windows"))
+    return os.path.normcase(os.path.abspath(path)).startswith(windir + os.sep)
+
+
+def imagemagick_version(path):
+    """Return the version line if *path* is a real ImageMagick binary, else None.
+
+    Windows ``convert.exe`` is a disk utility; never treat it as ImageMagick.
+    """
+    if not path or not os.path.isfile(path):
+        return None
+    if _is_windows_system_convert(path):
+        return None
+    try:
+        out = subprocess.check_output(
+            [path, "-version"], stderr=subprocess.STDOUT, timeout=15,
+            encoding="utf-8", errors="replace",
+        )
+    except Exception:
+        return None
+    if "ImageMagick" not in out:
+        return None
+    line = out.strip().splitlines()[0] if out.strip() else "ImageMagick"
+    return line
+
+
+def find_imagemagick():
+    """Absolute path to ImageMagick ``magick`` (or Unix ``convert``), or None.
+
+    Search order:
+      1. ``magick`` on PATH (must actually be ImageMagick)
+      2. ``.toolchains/imagemagick`` (portable / Inno per-user install)
+      3. ``C:\\Program Files\\ImageMagick*\\magick.exe``
+      4. Chocolatey shim (``C:\\ProgramData\\chocolatey\\bin\\magick.exe``)
+      5. Unix-only: ``convert`` on PATH, if it is ImageMagick
+    """
+    exe = "magick.exe" if _system() == "Windows" else "magick"
+    candidates = []
+
+    on_path = _which("magick")
+    if on_path:
+        candidates.append(on_path)
+
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    tc = os.path.join(root, ".toolchains", "imagemagick")
+    if os.path.isdir(tc):
+        candidates.extend((
+            os.path.join(tc, exe),
+            os.path.join(tc, "bin", exe),
+        ))
+        try:
+            for child in os.listdir(tc):
+                d = os.path.join(tc, child)
+                if os.path.isdir(d):
+                    candidates.append(os.path.join(d, exe))
+                    candidates.append(os.path.join(d, "bin", exe))
+        except OSError:
+            pass
+
+    if _system() == "Windows":
+        for env_key, fallback in (
+            ("ProgramFiles", r"C:\Program Files"),
+            ("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+        ):
+            base = os.environ.get(env_key) or fallback
+            if not os.path.isdir(base):
+                continue
+            try:
+                for name in os.listdir(base):
+                    if name.lower().startswith("imagemagick"):
+                        candidates.append(os.path.join(base, name, "magick.exe"))
+            except OSError:
+                pass
+        candidates.append(
+            os.path.join(r"C:\ProgramData", "chocolatey", "bin", "magick.exe"))
+    else:
+        conv = _which("convert")
+        if conv:
+            candidates.append(conv)
+
+    seen = set()
+    for cand in candidates:
+        if not cand:
+            continue
+        key = os.path.normcase(os.path.abspath(cand))
+        if key in seen:
+            continue
+        seen.add(key)
+        if imagemagick_version(cand):
+            return os.path.abspath(cand)
+    return None
+
+
 def check_imagemagick():
     """ImageMagick — needed for icon/logo resizing and ICO/ICNS generation."""
-    for name in ("magick", "convert"):
-        p = _which(name)
-        if p:
-            ver = _run_version([name, "--version"]) or name
-            return _status(True, ver, p,
-                           note="Required for custom icon/logo branding.")
-    return _status(False, hint=_install_hint("imagemagick"))
+    p = find_imagemagick()
+    if not p:
+        return _status(False, hint=_install_hint("imagemagick"))
+    ver = imagemagick_version(p) or "ImageMagick"
+    return _status(True, ver, p,
+                   note="Required for custom icon/logo branding.")
 
 
 def check_iconutil():
@@ -687,7 +785,7 @@ def _install_hint(tool):
             "macOS": "cargo install sccache",
         },
         "imagemagick": {
-            "Windows": "Download from https://imagemagick.org/script/download.php#windows  or: choco install imagemagick",
+            "Windows": "Install from the Toolchain panel (drops magick.exe into .toolchains/imagemagick). Or: choco install imagemagick",
             "Linux": "sudo apt install imagemagick",
             "macOS": "brew install imagemagick",
         },

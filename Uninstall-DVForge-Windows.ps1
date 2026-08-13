@@ -7,7 +7,7 @@
   Default (recommended): removes DVForge-local toolchains and optional short
   junctions, but keeps Git, Python, Visual Studio, and user Rust installs:
 
-    - <InstallRoot>\.toolchains  (Flutter, LLVM, vcpkg, JDK, env.json, ...)
+    - <InstallRoot>\.toolchains  (Flutter, LLVM, vcpkg, ImageMagick, JDK, env.json, ...)
     - <InstallRoot>\workspace\rustdesk-src  (source + cargo/flutter build junk)
     - <InstallRoot>\workspace\output        (built artifacts)
     - Drive-root junctions used for MAX_PATH: X:\rdlb, X:\rdlb-src, X:\r
@@ -17,7 +17,9 @@
     -RemoveProject     Delete the entire InstallRoot folder
     -RemoveRust        Remove user rustup/cargo (~/.cargo, ~/.rustup)
     -RemoveSccache     Remove sccache cache (~/.cache/sccache)
-    -RemoveChocoPkgs   choco uninstall nuget.commandline imagemagick (if choco)
+    -RemoveChocoPkgs   choco uninstall nuget.commandline + leftover
+                       imagemagick / imagemagick.app (older setups used choco;
+                       current ImageMagick lives in .toolchains and goes in Phase 1)
 
   Does NOT uninstall:
     - Visual Studio / Build Tools (use Apps & Features or VS Installer)
@@ -43,7 +45,10 @@
   Delete sccache disk cache.
 
 .PARAMETER RemoveChocoPkgs
-  Attempt choco uninstall of nuget.commandline and imagemagick.
+  Attempt choco uninstall of nuget.commandline and any leftover
+  imagemagick / imagemagick.app packages from older DVForge setups.
+  The current ImageMagick install is .toolchains\imagemagick and is
+  already removed in Phase 1 with the rest of the local toolchains.
 
 .EXAMPLE
   # Clean toolchains only; keep project source and VS
@@ -279,9 +284,12 @@ if ($RemoveSccache) {
 # Phase 4 - optional choco packages
 # ---------------------------------------------------------------------------
 if ($RemoveChocoPkgs) {
-    Write-Step 'Phase 4: Chocolatey packages (nuget / imagemagick)'
+    Write-Step 'Phase 4: Chocolatey packages (nuget + leftover ImageMagick)'
     if (Get-Command choco -ErrorAction SilentlyContinue) {
-        foreach ($pkg in @('nuget.commandline', 'imagemagick')) {
+        # imagemagick.app is the real choco payload; imagemagick is the
+        # virtual meta-package. Older DVForge setups left these installed
+        # even when magick.exe was never on PATH.
+        foreach ($pkg in @('nuget.commandline', 'imagemagick', 'imagemagick.app')) {
             Write-Host "  choco uninstall $pkg -y ..."
             & choco uninstall $pkg -y --limit-output 2>$null
             if ($LASTEXITCODE -eq 0) {
@@ -293,9 +301,11 @@ if ($RemoveChocoPkgs) {
     } else {
         Write-Skip 'choco not on PATH'
     }
+    # Empty leftover from the old per-user / choco ImageMagick attempt.
+    Remove-PathSafe (Join-Path $env:LOCALAPPDATA 'ImageMagick') '%LOCALAPPDATA%\ImageMagick'
 } else {
     Write-Step 'Phase 4: Chocolatey packages'
-    Write-Skip 'kept (pass -RemoveChocoPkgs to uninstall nuget/imagemagick)'
+    Write-Skip 'kept (pass -RemoveChocoPkgs to uninstall nuget + leftover choco ImageMagick)'
 }
 
 # ---------------------------------------------------------------------------
