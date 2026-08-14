@@ -28,6 +28,7 @@ import os
 import platform
 import shutil
 import ssl
+import stat
 import subprocess
 import tarfile
 import tempfile
@@ -473,13 +474,39 @@ def _extract(archive, kind, dest, log):
     log(f"  extracting → {dest}")
     os.makedirs(dest, exist_ok=True)
     if kind == "zip":
-        with zipfile.ZipFile(archive) as z:
-            z.extractall(dest)
+        _extract_zip(archive, dest, log)
     elif kind == "dmg":
         _extract_dmg(archive, dest, log)
     else:  # tar.* (xz/gz auto-detected by mode 'r:*')
         with tarfile.open(archive, "r:*") as t:
             t.extractall(dest)
+
+
+def _extract_zip(archive, dest, log):
+    """Extract a zip, restoring Unix symlinks (ZipFile.extractall writes them
+    as tiny text files — that flattens FlutterMacOS.framework and then
+    `#import <FlutterMacOS/FlutterMacOS.h>` fails)."""
+    with zipfile.ZipFile(archive) as z:
+        for info in z.infolist():
+            mode = (info.external_attr >> 16) & 0xFFFF
+            target = os.path.join(dest, info.filename)
+            if stat.S_ISLNK(mode):
+                link = z.read(info).decode("utf-8", errors="replace").rstrip("\0")
+                parent = os.path.dirname(target)
+                if parent:
+                    os.makedirs(parent, exist_ok=True)
+                if os.path.lexists(target):
+                    if os.path.isdir(target) and not os.path.islink(target):
+                        shutil.rmtree(target, ignore_errors=True)
+                    else:
+                        os.remove(target)
+                try:
+                    os.symlink(link, target)
+                except OSError as e:
+                    log(f"  ! symlink {info.filename} -> {link}: {e}")
+                    z.extract(info, dest)
+            else:
+                z.extract(info, dest)
 
 
 def _extract_dmg(dmg, dest, log):
@@ -518,6 +545,201 @@ def _locate(base, marker, log):
     return base
 
 
+def find_flutter_home(root):
+    """Return the Flutter SDK root under .toolchains, or None.
+
+    Official zip extracts as `.toolchains/flutter/flutter/` (the inner
+    folder is the SDK). A flat layout (marker directly under
+    `.toolchains/flutter/`) is accepted too.
+    """
+    marker = os.path.join("bin", "flutter.bat" if WIN else "flutter")
+    for cand in (
+        os.path.join(root, ".toolchains", "flutter", "flutter"),
+        os.path.join(root, ".toolchains", "flutter"),
+    ):
+        if os.path.isfile(os.path.join(cand, marker)):
+            return cand
+    return None
+
+
+_FLUTTER_EXEC_NAMES = {
+    "flutter", "dart", "dartaotruntime", "gen_snapshot", "gradlew",
+    "idevicesyslog", "idevicescreenshot", "iproxy",
+}
+_FLUTTER_SKIP_EXT = {
+    ".ttf", ".otf", ".woff", ".woff2", ".jar", ".zip", ".md", ".txt",
+    ".stamp", ".json", ".xml", ".plist", ".png", ".jpg", ".ico",
+    ".html", ".css", ".map", ".dill", ".kernel", ".inc",
+}
+
+
+def _flutter_should_be_executable(path):
+    """True for Flutter/Dart launchers, shell scripts, and native binaries."""
+    name = os.path.basename(path)
+    ext = os.path.splitext(name)[1].lower()
+    if ext in _FLUTTER_SKIP_EXT:
+        return False
+    if name in _FLUTTER_EXEC_NAMES or ext in (".sh", ".py"):
+        return True
+    try:
+        with open(path, "rb") as f:
+            head = f.read(4)
+        if head.startswith(b"#!"):
+            return True
+        # ELF / Mach-O 64 / Mach-O 32 / fat Mach-O
+        if head.startswith(b"\x7fELF") or head in (
+                b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe",
+                b"\xfe\xed\xfa\xcf", b"\xfe\xed\xfa\xce",
+                b"\xca\xfe\xba\xbe", b"\xca\xfe\xba\xbf"):
+            return True
+    except OSError:
+        return False
+    return False
+
+
+def repair_flutter_permissions(home, log=None, deep=False):
+    """Restore +x on Flutter/Dart binaries and helper scripts.
+
+    Zip extract onto FAT/exFAT/NAS volumes (or a copy from Windows) often
+    drops execute bits. `shutil.which` then skips the pinned SDK and the
+    build falls through to an older Homebrew/system Flutter — which is
+    exactly what makes `extended_text 14.0.0` fail (it needs Dart >= 3.5).
+
+    `deep=True` also walks `bin/cache` (engine snapshots). Use that at
+    install / build time, not on every UI rescan.
+    """
+    if WIN or not home or not os.path.isdir(home):
+        return 0
+    roots = [
+        os.path.join(home, "bin"),
+        os.path.join(home, "bin", "internal"),
+        os.path.join(home, "bin", "cache", "dart-sdk", "bin"),
+        # Xcode Run Script phases exec these directly (macos_assemble.sh,
+        # xcode_backend.sh). Missing +x → PhaseScriptExecution exit 1.
+        os.path.join(home, "packages", "flutter_tools", "bin"),
+    ]
+    if deep:
+        roots.append(os.path.join(home, "bin", "cache"))
+    seen = set()
+    repaired = 0
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
+        walker = os.walk(root)
+        # bin/ itself: only the top-level launchers, not the whole cache
+        # via the first root. `bin/internal` and dart-sdk/bin are walked.
+        if os.path.basename(root) == "bin" and os.path.dirname(root) == home:
+            for fn in ("flutter", "dart"):
+                p = os.path.join(root, fn)
+                if os.path.isfile(p) and not os.path.islink(p):
+                    seen.add(p)
+                    try:
+                        mode = os.stat(p).st_mode
+                        if not (mode & 0o111):
+                            os.chmod(p, mode | 0o755)
+                            repaired += 1
+                    except OSError:
+                        pass
+            continue
+        for dp, _dirs, files in walker:
+            for fn in files:
+                p = os.path.join(dp, fn)
+                if p in seen or os.path.islink(p):
+                    continue
+                seen.add(p)
+                if not _flutter_should_be_executable(p):
+                    continue
+                try:
+                    mode = os.stat(p).st_mode
+                    if mode & 0o111:
+                        continue
+                    os.chmod(p, mode | 0o755)
+                    repaired += 1
+                except OSError:
+                    pass
+    if repaired and log:
+        log(f"  · restored execute bits on {repaired} Flutter/Dart binaries")
+    if not WIN:
+        repaired += repair_macos_framework_symlinks(home, log)
+    return repaired
+
+
+def _symlink_stub_target(path):
+    """If `path` is a flattened symlink (tiny text file), return its target."""
+    if os.path.islink(path) or os.path.isdir(path) or not os.path.isfile(path):
+        return None
+    try:
+        sz = os.path.getsize(path)
+    except OSError:
+        return None
+    if sz == 0 or sz > 200:
+        return None
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError:
+        return None
+    if b"\0" in data:
+        return None
+    try:
+        text = data.decode("ascii").strip()
+    except UnicodeDecodeError:
+        return None
+    if not text or "\n" in text or " " in text:
+        return None
+    return text
+
+
+def _restore_symlink(path, target, log=None):
+    if os.path.islink(path):
+        return 0
+    try:
+        if os.path.isdir(path) and not os.path.islink(path):
+            return 0
+        if os.path.lexists(path):
+            os.remove(path)
+        os.symlink(target, path)
+        return 1
+    except OSError as e:
+        if log:
+            log(f"  ! could not restore symlink {path} -> {target}: {e}")
+        return 0
+
+
+def repair_macos_framework_symlinks(home, log=None):
+    """Recreate .framework symlinks flattened by zip extract on NAS/exFAT.
+
+    FlutterMacOS.framework/Headers becomes a 24-byte text file
+    (`Versions/Current/Headers`) instead of a symlink. Clang then cannot
+    resolve `#import <FlutterMacOS/FlutterMacOS.h>` and the macOS build
+    produces an empty .app / 13 KB dmg.
+    """
+    engine = os.path.join(home, "bin", "cache", "artifacts", "engine")
+    if not os.path.isdir(engine):
+        return 0
+    repaired = 0
+    for dp, _dirs, _files in os.walk(engine):
+        if not dp.endswith(".framework"):
+            continue
+        versions_a = os.path.join(dp, "Versions", "A")
+        current = os.path.join(dp, "Versions", "Current")
+        if os.path.isdir(versions_a):
+            stub = _symlink_stub_target(current)
+            if stub == "A" or (os.path.isfile(current) and not os.path.islink(current)
+                               and os.path.getsize(current) <= 8):
+                repaired += _restore_symlink(current, "A", log)
+        for name in os.listdir(dp):
+            if name == "Versions":
+                continue
+            p = os.path.join(dp, name)
+            stub = _symlink_stub_target(p)
+            if stub:
+                repaired += _restore_symlink(p, stub, log)
+    if repaired and log:
+        log(f"  · restored {repaired} macOS framework symlinks")
+    return repaired
+
+
 def _libclang_dir(home):
     """Return the directory that contains libclang.{dylib,so,dll}."""
     names = ("libclang.dylib", "libclang.so", "libclang.dll")
@@ -553,7 +775,12 @@ def _env_for(tid, home):
     if tid == "vcpkg":
         return {"vars": {"VCPKG_ROOT": home}, "path": [home]}
     if tid == "sccache":
-        return {"vars": {"RUSTC_WRAPPER": "sccache"}, "path": []}
+        # Absolute path — cargo must not depend on PATH lookup, and a bare
+        # "sccache" token used to be rewritten to <root>/sccache.
+        cargo_bin = os.path.join(os.path.expanduser("~"), ".cargo", "bin")
+        exe = (shutil.which("sccache")
+               or os.path.join(cargo_bin, "sccache" + EXE))
+        return {"vars": {"RUSTC_WRAPPER": exe}, "path": []}
     if tid == "imagemagick":
         # magick.exe sits at the Inno /DIR root, or in bin/ for some layouts.
         path = []
@@ -1044,6 +1271,8 @@ def install_one(tid, root, log, cancelled=lambda: False):
                         pass
     else:
         home = _locate(home_target, spec["marker"], log)
+    if tid == "flutter":
+        repair_flutter_permissions(home, log, deep=True)
     env = _env_for(tid, home)
     # sanity
     if not os.path.exists(os.path.join(home, spec["marker"])):
@@ -1357,6 +1586,25 @@ def apply_persisted_env(root):
                                 os.symlink(real_path, link_path)
                             except OSError:
                                 pass
+
+    # Pinned Flutter must beat Homebrew/Chocolatey on PATH. A later brew
+    # install of imagemagick/potrace prepends /opt/homebrew/bin, which
+    # otherwise shadows .toolchains/flutter and picks an older Dart —
+    # then `flutter pub get` dies on extended_text 14.0.0 (Dart >= 3.5).
+    flutter_home = find_flutter_home(root)
+    if flutter_home:
+        repair_flutter_permissions(flutter_home)
+        fbin = os.path.join(flutter_home, "bin")
+        rest = []
+        for p in paths:
+            try:
+                if os.path.normcase(os.path.abspath(p)) == os.path.normcase(
+                        os.path.abspath(fbin)):
+                    continue
+            except (OSError, ValueError):
+                pass
+            rest.append(p)
+        paths = [fbin] + rest
 
     # ImageMagick: choco/NSIS often land off PATH (or choco marks the
     # package installed without leaving magick.exe). Discover a real

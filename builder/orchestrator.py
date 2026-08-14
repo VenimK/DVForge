@@ -16,6 +16,7 @@ useful to preview a build, or to inspect it on a machine without the toolchains.
 
 import glob as _glob
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -24,7 +25,7 @@ import time
 import zipfile
 import platform as _platform
 
-from . import customize, detect, prereqs
+from . import customize, detect, prereqs, toolchains
 
 RUSTDESK_REPO = "https://github.com/rustdesk/rustdesk.git"
 
@@ -101,6 +102,7 @@ class Build:
         self.artifacts = []
         self._llvm_home = None
         self._ffigen_cpath = ""
+        self._flutter_bindir = None
 
     # -- logging / cancel ---------------------------------------------------
     def log(self, msg=""):
@@ -115,11 +117,33 @@ class Build:
 
     # -- subprocess with streaming -----------------------------------------
     def _effective_path(self):
-        """PATH the build should see: cargo's bin dir + whatever we inherited
-        (which already includes any locally-installed .toolchains via env.json)."""
-        parts = [p for p in (_cargo_bin(),) if os.path.isdir(p)]
+        """PATH the build should see: chosen Flutter, cargo's bin dir, then
+        whatever we inherited (env.json / system). Flutter goes first so a
+        Homebrew or Chocolatey copy cannot shadow Dart 3.5.4.
+        """
+        parts = []
+        flutter_bin = getattr(self, "_flutter_bindir", None)
+        if not flutter_bin:
+            flutter_home = toolchains.find_flutter_home(self._project_root())
+            if flutter_home:
+                cand = os.path.join(flutter_home, "bin")
+                if os.path.isdir(cand):
+                    flutter_bin = cand
+        if flutter_bin:
+            parts.append(flutter_bin)
+        cargo = _cargo_bin()
+        if os.path.isdir(cargo):
+            parts.append(cargo)
         parts.append(os.environ.get("PATH", ""))
         return os.pathsep.join(parts)
+
+    def _sed_i(self, expression, path, cwd=None, check=False):
+        """In-place sed. BSD sed on macOS needs `sed -i '' expr file`."""
+        if self._is_macos_host():
+            cmd = ["sed", "-i", "", expression, path]
+        else:
+            cmd = ["sed", "-i", expression, path]
+        return self.run(cmd, cwd=cwd, check=check)
 
     def run(self, cmd, cwd=None, env=None, shell=False, check=True):
         pretty = cmd if isinstance(cmd, str) else " ".join(cmd)
@@ -320,9 +344,21 @@ class Build:
         Dart's bool and tanks the Flutter build.
         """
         parts = []
+        # macOS: Apple SDK headers first. Putting LLVM 15's clang resource
+        # dir ahead of them makes #include <stdint.h> resolve to LLVM's
+        # copy, which does not satisfy MacOSX.sdk's sys/resource.h
+        # (unknown type name 'uint8_t').
+        if self._is_macos_host():
+            sdk = os.environ.get("SDKROOT", "")
+            if sdk:
+                for sub in ("usr/include", "usr/local/include"):
+                    cand = os.path.join(sdk, sub)
+                    if os.path.isdir(cand):
+                        parts.append(cand)
         # clang resource dir inside the toolchains LLVM (stddef.h, etc.)
+        # On macOS this is a last resort — Xcode libclang has its own.
         lib_clang = os.path.join(llvm_home, "lib", "clang")
-        if os.path.isdir(lib_clang):
+        if os.path.isdir(lib_clang) and not self._is_macos_host():
             for ver in sorted(os.listdir(lib_clang), reverse=True):
                 cand = os.path.join(lib_clang, ver, "include")
                 if os.path.isdir(cand):
@@ -388,7 +424,7 @@ class Build:
         # and would leak Clang-specific headers into GCC compilations (zstd-sys,
         # ring, etc.) causing "missing binary operator" errors in xmmintrin.h.
         self._ffigen_cpath = os.pathsep.join(uniq)
-        self.log(f"  · ffigen CPATH prepared for toolchains LLVM ({len(uniq)} dirs)")
+        self.log(f"  · ffigen CPATH prepared ({len(uniq)} dirs)")
 
     def _host_rust_triple(self):
         """Rustup host triple for this machine (the runnable toolchain)."""
@@ -461,13 +497,24 @@ class Build:
                 sdk = ""
         if sdk and os.path.isdir(sdk):
             os.environ["SDKROOT"] = sdk
-            # bindgen (libclang) does not always honour SDKROOT alone
-            extra = f"--sysroot={sdk}"
+            # bindgen/ffigen (libclang) do not honour SDKROOT alone.
+            # Newer MacOSX.sdk's sys/resource.h only #include <stdint.h>
+            # when __DARWIN_C_LEVEL >= __DARWIN_C_FULL; LLVM 15's default
+            # feature-test macros skip that and then fail with
+            # "unknown type name 'uint8_t'". Force Darwin-full + sysroot.
+            needed = [
+                f"--sysroot={sdk}",
+                "-D_DARWIN_C_SOURCE",
+                "-D__DARWIN_C_LEVEL=__DARWIN_C_FULL",
+            ]
             existing = os.environ.get("BINDGEN_EXTRA_CLANG_ARGS", "")
-            if "--sysroot=" not in existing:
-                os.environ["BINDGEN_EXTRA_CLANG_ARGS"] = (
-                    f"{existing} {extra}".strip() if existing else extra
-                )
+            parts = existing.split() if existing else []
+            for flag in needed:
+                if flag not in parts and not any(
+                        p.startswith(flag.split("=")[0] + "=") for p in parts
+                        if "=" in flag):
+                    parts.append(flag)
+            os.environ["BINDGEN_EXTRA_CLANG_ARGS"] = " ".join(parts)
             self.log(f"  · SDKROOT = {sdk}")
             self.log(f"  · BINDGEN_EXTRA_CLANG_ARGS = "
                      f"{os.environ['BINDGEN_EXTRA_CLANG_ARGS']}")
@@ -475,29 +522,149 @@ class Build:
             self.log("  ! could not resolve macOS SDK path via xcrun "
                      "(bindgen may fail to find system headers)")
 
-    def _ensure_sccache(self):
-        """If sccache is installed, set RUSTC_WRAPPER so cargo uses it.
+    def _is_macos_host(self):
+        return (self.host.get("os_raw") == "Darwin"
+                or self.host.get("os") == "macOS")
 
-        sccache caches Rust compilation artifacts across builds, dramatically
-        reducing rebuild times. It's optional — if not installed, builds
-        proceed normally without caching."""
+    def _macos_xcode_llvm_home(self):
+        """Xcode's toolchain usr/ — ships a libclang that matches MacOSX.sdk."""
+        stock = ("/Applications/Xcode.app/Contents/Developer/Toolchains/"
+                 "XcodeDefault.xctoolchain/usr")
+        if os.path.isfile(os.path.join(stock, "lib", "libclang.dylib")):
+            return stock
+        try:
+            clang = subprocess.check_output(
+                ["xcrun", "-f", "clang"], text=True,
+                stderr=subprocess.DEVNULL, timeout=15,
+            ).strip()
+            usr = os.path.dirname(os.path.dirname(clang))
+            if os.path.isfile(os.path.join(usr, "lib", "libclang.dylib")):
+                return usr
+        except Exception:
+            pass
+        return None
+
+    def _macos_llvm_compiler_opts(self):
+        """Flags ffigen/libclang need to parse current MacOSX.sdk headers."""
+        sdk = os.environ.get("SDKROOT", "")
+        if not sdk or not os.path.isdir(sdk):
+            return ""
+        # Use --sysroot= (not "-isysroot PATH"). clap treats a following
+        # token that starts with -i as the short flag -i
+        # ("unexpected argument '-i' found") and skips codegen entirely.
+        return (f"--sysroot={sdk} -D_DARWIN_C_SOURCE "
+                f"-D__DARWIN_C_LEVEL=__DARWIN_C_FULL")
+
+    def _strip_llvm_bin_from_path(self):
+        """Keep portable LLVM's clang off PATH on macOS.
+
+        The 15.0.6 tarball's clang shadows Apple clang and then compiles
+        MacOSX.sdk headers with the wrong feature-test macros (uint8_t
+        unknown in sys/resource.h). LIBCLANG_PATH is enough for bindgen.
+        """
+        # Only the portable tarball — never Xcode's usr/bin.
+        llvm_home = self._toolchains_llvm_home()
+        if not llvm_home:
+            return
+        bindir = os.path.join(llvm_home, "bin")
+        path = os.environ.get("PATH", "")
+        keep = [p for p in path.split(os.pathsep)
+                if p and os.path.normcase(os.path.abspath(p))
+                != os.path.normcase(os.path.abspath(bindir))]
+        if len(keep) != len([p for p in path.split(os.pathsep) if p]):
+            os.environ["PATH"] = os.pathsep.join(keep)
+            self.log(f"  · removed portable LLVM bin from PATH ({bindir})")
+
+    @staticmethod
+    def _is_sccache_wrapper(value):
+        return bool(value) and "sccache" in os.path.basename(value).lower()
+
+    def _clear_sccache_wrapper(self):
+        if self._is_sccache_wrapper(os.environ.get("RUSTC_WRAPPER", "")):
+            del os.environ["RUSTC_WRAPPER"]
+
+    def _ensure_sccache(self):
+        """If sccache is installed and its server works, wrap rustc with it.
+
+        A dead or hung sccache server makes every `cargo` invocation fail with
+        "Failed to send data to or receive data from server". That must never
+        abort a build — fall back to uncached rustc instead.
+        """
         sccache = shutil.which("sccache", path=self._effective_path())
-        if sccache:
-            os.environ["RUSTC_WRAPPER"] = "sccache"
-            self.log(f"  · sccache enabled ({sccache})")
-        else:
-            # Don't override an explicit user choice, but clear stale wrapper
-            if os.environ.get("RUSTC_WRAPPER") == "sccache":
-                del os.environ["RUSTC_WRAPPER"]
+        if not sccache:
+            self._clear_sccache_wrapper()
             self.log("  · sccache not found — builds will run without cache. "
                      "Install it via the Toolchain tab or: cargo install sccache")
+            return
+
+        # Absolute path so cargo does not depend on PATH lookup. Bare
+        # "sccache" is also easy to lose on Windows.
+        rustc = shutil.which("rustc", path=self._effective_path())
+        probe_env = {
+            **os.environ,
+            "PATH": self._effective_path(),
+            "RUSTC_WRAPPER": sccache,
+            # Don't let the server idle-exit during flutter pub get / vcpkg.
+            "SCCACHE_IDLE_TIMEOUT": os.environ.get("SCCACHE_IDLE_TIMEOUT") or "0",
+        }
+
+        def _start_server():
+            try:
+                subprocess.run(
+                    [sccache, "--start-server"],
+                    capture_output=True, text=True, timeout=20,
+                    env=probe_env,
+                )
+            except Exception:
+                pass
+
+        def _stop_server():
+            try:
+                subprocess.run(
+                    [sccache, "--stop-server"],
+                    capture_output=True, text=True, timeout=15,
+                    env=probe_env,
+                )
+            except Exception:
+                pass
+
+        def _server_ok():
+            if rustc:
+                cmd = [sccache, rustc, "--print", "sysroot"]
+            else:
+                cmd = [sccache, "--show-stats"]
+            try:
+                r = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=30,
+                    env=probe_env,
+                )
+                return r.returncode == 0
+            except Exception:
+                return False
+
+        _start_server()
+        if not _server_ok():
+            self.log("  ! sccache server not responding — restarting it")
+            _stop_server()
+            _start_server()
+
+        if _server_ok():
+            os.environ["RUSTC_WRAPPER"] = sccache
+            os.environ["SCCACHE_IDLE_TIMEOUT"] = probe_env["SCCACHE_IDLE_TIMEOUT"]
+            self.log(f"  · sccache enabled ({sccache})")
+            return
+
+        # Don't let a broken cache take the whole Windows build down.
+        self._clear_sccache_wrapper()
+        self.log("  ! sccache server failed to start — continuing without "
+                 "the compile cache (RUSTC_WRAPPER unset)")
 
     def _log_sccache_stats(self):
         """Print sccache cache statistics after all builds complete."""
         sccache = shutil.which("sccache", path=self._effective_path())
         if not sccache:
             return
-        if os.environ.get("RUSTC_WRAPPER") != "sccache":
+        if not self._is_sccache_wrapper(os.environ.get("RUSTC_WRAPPER", "")):
             return
         self.log("\n=== sccache statistics ===")
         for args in (["--show-stats"], ["--show-adv-stats"]):
@@ -530,20 +697,44 @@ class Build:
         self._ensure_macos_sdk()
         self._llvm_home = None
 
-        # 1) Prefer the portable toolchains LLVM — always, when present.
+        # 1) macOS: prefer Xcode's libclang. It matches the installed
+        # MacOSX.sdk. Portable LLVM 15.0.6 + Xcode 16/26 headers is what
+        # produces ffigen's "unknown type name 'uint8_t'" in resource.h.
+        if self._is_macos_host():
+            xcode_llvm = self._macos_xcode_llvm_home()
+            if xcode_llvm:
+                libdir = self._libclang_dir(xcode_llvm)
+                if self._has_libclang(libdir):
+                    prev = os.environ.get("LIBCLANG_PATH", "")
+                    os.environ["LIBCLANG_PATH"] = libdir
+                    self._llvm_home = xcode_llvm
+                    self._strip_llvm_bin_from_path()
+                    self._wire_llvm_ffigen_includes(xcode_llvm)
+                    if prev and os.path.abspath(prev) != os.path.abspath(libdir):
+                        self.log(f"  · overriding LIBCLANG_PATH ({prev}) "
+                                 "with Xcode libclang")
+                    self.log(f"  · Xcode LLVM: {xcode_llvm}")
+                    self.log(f"  · LIBCLANG_PATH = {libdir}")
+                    return
+
+        # 2) Prefer the portable toolchains LLVM when present (Win/Linux,
+        #    or macOS without Xcode libclang).
         llvm_home = self._toolchains_llvm_home()
         if llvm_home:
             libdir = self._libclang_dir(llvm_home)
             bindir = os.path.join(llvm_home, "bin")
             prev = os.environ.get("LIBCLANG_PATH", "")
             os.environ["LIBCLANG_PATH"] = libdir
-            # Prepend toolchains clang so PATH resolves to 15.0.6, not system 19+.
-            if os.path.isdir(bindir):
+            # On macOS the tarball's clang shadows Apple clang and breaks
+            # MacOSX.sdk parses. Windows/Linux still want it on PATH.
+            if os.path.isdir(bindir) and not self._is_macos_host():
                 path_parts = [
                     p for p in os.environ.get("PATH", "").split(os.pathsep)
                     if p and p != bindir
                 ]
                 os.environ["PATH"] = os.pathsep.join([bindir] + path_parts)
+            elif self._is_macos_host():
+                self._strip_llvm_bin_from_path()
             self._llvm_home = llvm_home
             self._wire_llvm_ffigen_includes(llvm_home)
             if prev and os.path.abspath(prev) != os.path.abspath(libdir):
@@ -552,7 +743,7 @@ class Build:
             self.log(f"  · LIBCLANG_PATH = {libdir}")
             return
 
-        # 2) Fall back to whatever is already on the environment.
+        # 3) Fall back to whatever is already on the environment.
         libclang = os.environ.get("LIBCLANG_PATH", "")
         if libclang and self._has_libclang(libclang):
             self._llvm_home = os.path.dirname(libclang.rstrip(os.sep))
@@ -562,7 +753,7 @@ class Build:
         if libclang and os.path.isdir(libclang):
             self.log(f"  ! LIBCLANG_PATH={libclang} does not contain libclang")
 
-        # 3) System clang only as a last resort (and warn if not 15.0.6).
+        # 4) System clang only as a last resort (and warn if not 15.0.6).
         clang = shutil.which("clang", path=self._effective_path())
         if clang:
             try:
@@ -580,6 +771,116 @@ class Build:
             self.log("  ! clang not found — install LLVM 15.0.6 via the "
                      "Toolchain tab (.toolchains/llvm).")
 
+    def _parse_flutter_version(self, text):
+        """Return (major, minor, patch) from `flutter --version` output, or None."""
+        m = re.search(r"Flutter\s+(\d+)\.(\d+)\.(\d+)", text or "")
+        if not m:
+            return None
+        return tuple(int(x) for x in m.groups())
+
+    def _parse_dart_version(self, text):
+        """Return (major, minor, patch) for the Dart SDK Flutter ships."""
+        m = re.search(r"Dart\s+(\d+)\.(\d+)\.(\d+)", text or "")
+        if not m:
+            return None
+        return tuple(int(x) for x in m.groups())
+
+    def _flutter_version_output(self, exe):
+        """Return (ok, stdout) for `flutter --version`."""
+        try:
+            r = subprocess.run(
+                [exe, "--version"],
+                timeout=90, capture_output=True,
+                encoding="utf-8", errors="replace",
+                env={**os.environ, "PATH": self._effective_path()},
+            )
+            out = (r.stdout or "") + ("\n" + r.stderr if r.stderr else "")
+            return r.returncode == 0, out
+        except Exception as e:
+            return False, str(e)
+
+    def _ensure_flutter(self):
+        """Use Flutter 3.24.5+ (Dart >= 3.5.0) before any `flutter pub get`.
+
+        flutter_hbb depends on extended_text 14.0.0, which requires
+        SDK >=3.5.0 <4.0.0. An older Homebrew/system Flutter on PATH is
+        the usual cause of "version solving failed". Prefer the portable
+        .toolchains copy, but accept any runnable 3.24+ Flutter.
+        """
+        self.log("\n=== Flutter SDK ===")
+        root = self._project_root()
+        exe_name = "flutter.bat" if _platform.system() == "Windows" else "flutter"
+        candidates = []
+        home = toolchains.find_flutter_home(root)
+        if home:
+            toolchains.repair_flutter_permissions(home, self.log)
+            pinned = os.path.join(home, "bin", exe_name)
+            if os.path.isfile(pinned):
+                candidates.append(pinned)
+                self.log(f"  · toolchains Flutter: {home}")
+        else:
+            self.log("  · no .toolchains/flutter — using whatever flutter is on PATH")
+        seen = {os.path.normcase(os.path.abspath(c)) for c in candidates}
+        for extra in (
+            shutil.which("flutter", path=self._effective_path()),
+            shutil.which("flutter"),
+        ):
+            if not extra:
+                continue
+            key = os.path.normcase(os.path.abspath(extra))
+            if key not in seen:
+                seen.add(key)
+                candidates.append(extra)
+
+        chosen, out = None, ""
+        for exe in candidates:
+            ok, text = self._flutter_version_output(exe)
+            if not ok:
+                self.log(f"  ! not runnable: {exe}")
+                if text:
+                    self.log(f"    {text.strip().splitlines()[0]}")
+                continue
+            dart_ver = self._parse_dart_version(text)
+            flutter_ver = self._parse_flutter_version(text)
+            too_old = ((dart_ver is not None and dart_ver < (3, 5, 0))
+                       or (dart_ver is None and flutter_ver is not None
+                           and flutter_ver < (3, 24, 0)))
+            if too_old:
+                shown = ("Dart " + ".".join(str(x) for x in dart_ver)
+                         if dart_ver else text.strip().splitlines()[0])
+                self.log(f"  ! too old ({shown}): {exe}")
+                continue
+            chosen, out = exe, text
+            break
+
+        if not chosen:
+            raise RuntimeError(
+                "No Flutter with Dart >= 3.5.0 found. flutter_hbb depends on "
+                f"extended_text 14.0.0, which needs that SDK. Install Flutter "
+                f"{FLUTTER_VERSION} from the Toolchain tab and rebuild.")
+
+        bindir = os.path.dirname(os.path.abspath(chosen))
+        self._flutter_bindir = bindir
+        rest = [p for p in os.environ.get("PATH", "").split(os.pathsep)
+                if p and os.path.normcase(p) != os.path.normcase(bindir)]
+        os.environ["PATH"] = os.pathsep.join([bindir] + rest)
+        flutter_root = os.path.dirname(bindir)
+        if os.path.isdir(flutter_root):
+            os.environ["FLUTTER_ROOT"] = flutter_root
+
+        first = next((ln.strip() for ln in out.splitlines() if ln.strip()), "")
+        if first:
+            self.log(f"  · {first}")
+        dart_line = next((ln.strip() for ln in out.splitlines()
+                          if "Dart" in ln), "")
+        if dart_line and dart_line != first:
+            self.log(f"  · {dart_line}")
+        self.log(f"  · flutter = {chosen}")
+        flutter_ver = self._parse_flutter_version(out)
+        if flutter_ver and flutter_ver[:2] != (3, 24):
+            self.log(f"  ! warning: official CI pins Flutter {FLUTTER_VERSION}; "
+                     "other 3.x versions may hit widget/engine mismatches")
+
     def generate_bridge(self):
         self.log("\n=== 2. Generate flutter_rust_bridge ===")
         # Re-assert toolchains LLVM right before codegen so a later step
@@ -590,6 +891,10 @@ class Build:
         self.run(["cargo", "install", "flutter_rust_bridge_codegen",
                   "--version", "1.80.1", "--features", "uuid", "--locked"],
                  check=False)
+        # Official CI also installs cargo-expand; codegen uses it to expand
+        # macros in flutter_ffi.rs before emitting bridge_generated.rs.
+        self.run(["cargo", "install", "cargo-expand",
+                  "--version", "1.0.95", "--locked"], check=False)
         # ffigen (invoked by the codegen) needs .dart_tool/package_config.json,
         # which only exists after `flutter pub get`. Without it the codegen
         # emits dummy code with an unresolvable Dart_Handle type and the build
@@ -598,36 +903,62 @@ class Build:
         self.run(["flutter", "pub", "get"], cwd=flutter_dir, check=True)
         pkg_config = os.path.join(flutter_dir, ".dart_tool", "package_config.json")
         if not os.path.isfile(pkg_config):
-            self.log("  ! flutter pub get did not create .dart_tool/package_config.json")
-            self.log("  ! bridge codegen will produce dummy code — aborting")
-            return
+            raise RuntimeError(
+                "flutter pub get did not create .dart_tool/package_config.json; "
+                "bridge codegen would emit dummy bindings")
         codegen = shutil.which("flutter_rust_bridge_codegen", path=self._effective_path())
         if not codegen and not self.dry_run:
-            self.log("  ! flutter_rust_bridge_codegen not found after cargo install; "
-                     "skipping bridge regen (may already be generated in the source).")
-            return
+            raise RuntimeError(
+                "flutter_rust_bridge_codegen not found after cargo install")
         cmd = [codegen or "flutter_rust_bridge_codegen",
                "--rust-input", "./src/flutter_ffi.rs",
                "--dart-output", "./flutter/lib/generated_bridge.dart",
                "--c-output", "./flutter/macos/Runner/bridge_generated.h"]
         # ffigen does NOT honour LIBCLANG_PATH — it searches --llvm-path.
-        # Always point it at the toolchains (or resolved) LLVM home.
         llvm_home = getattr(self, "_llvm_home", None) or self._toolchains_llvm_home()
         if llvm_home and os.path.isdir(llvm_home):
             cmd += ["--llvm-path", llvm_home]
             self.log(f"  · passing --llvm-path {llvm_home} to codegen")
         else:
-            self.log("  ! no toolchains LLVM home for --llvm-path; ffigen may "
+            self.log("  ! no LLVM home for --llvm-path; ffigen may "
                      "produce broken bindings (typedef bool poison / dummy code)")
+        opts = self._macos_llvm_compiler_opts() if self._is_macos_host() else ""
+        if opts:
+            # Equals-form so clap cannot parse "-isysroot"/"--sysroot=..." as
+            # a new flag (that was "unexpected argument '-i' found").
+            cmd += [f"--llvm-compiler-opts={opts}"]
+            self.log(f"  · --llvm-compiler-opts={opts}")
         # Pass CPATH/C_INCLUDE_PATH only to the codegen subprocess so ffigen
         # can find stdbool.h etc.  These must NOT leak into the global env —
         # Clang-specific headers break GCC compilations of zstd-sys / ring.
+        # On macOS we rely on --sysroot instead: a CPATH that lists LLVM 15's
+        # resource dir first is exactly what triggers uint8_t-in-resource.h.
         codegen_env = {}
         ffigen_cpath = getattr(self, "_ffigen_cpath", "")
-        if ffigen_cpath:
+        if ffigen_cpath and not self._is_macos_host():
             codegen_env["CPATH"] = ffigen_cpath
             codegen_env["C_INCLUDE_PATH"] = ffigen_cpath
-        self.run(cmd, cwd=self.src_dir, check=False, env=codegen_env)
+        self.run(cmd, cwd=self.src_dir, check=True, env=codegen_env)
+        rust_bridge = os.path.join(self.src_dir, "src", "bridge_generated.rs")
+        dart_bridge = os.path.join(self.src_dir, "flutter", "lib",
+                                   "generated_bridge.dart")
+        if not self.dry_run:
+            if not os.path.isfile(rust_bridge):
+                raise RuntimeError(
+                    "codegen did not write src/bridge_generated.rs — "
+                    "cargo would fail with E0583 (module `bridge_generated`) "
+                    "and EventToUI: IntoIntoDart")
+            if not os.path.isfile(dart_bridge):
+                raise RuntimeError(
+                    "codegen did not write flutter/lib/generated_bridge.dart")
+            ios_h = os.path.join(self.src_dir, "flutter", "ios", "Runner",
+                                 "bridge_generated.h")
+            mac_h = os.path.join(self.src_dir, "flutter", "macos", "Runner",
+                                 "bridge_generated.h")
+            if os.path.isfile(mac_h):
+                os.makedirs(os.path.dirname(ios_h), exist_ok=True)
+                shutil.copy2(mac_h, ios_h)
+            self.log(f"  ✓ {os.path.relpath(rust_bridge, self.src_dir)}")
 
     def customize_for(self, platform):
         if self.dry_run:
@@ -1145,7 +1476,10 @@ class Build:
             # Packer writes next to src (may be a short junction like C:\rdlb).
             # Also probe the real workspace tree in case paths diverged.
             candidates = [
+                os.path.join(self.src_dir, f"{basename}-{version}-install.exe"),
                 os.path.join(self.src_dir, f"rustdesk-{version}-install.exe"),
+                os.path.join(self.workspace, "rustdesk-src",
+                             f"{basename}-{version}-install.exe"),
                 os.path.join(self.workspace, "rustdesk-src",
                              f"rustdesk-{version}-install.exe"),
             ]
@@ -1168,13 +1502,20 @@ class Build:
         custom_.txt written into it — so the packed exe bakes in branding,
         password, and permissions correctly."""
         self.log("\n=== Pack Windows portable (single .exe) ===")
-        exe_name = os.path.join(release, "rustdesk.exe")
-        if not os.path.isfile(exe_name):
-            # rename may already have happened in some flows
+        basename = self._output_basename()
+        branded = os.path.join(release, f"{basename}.exe")
+        rustdesk = os.path.join(release, "rustdesk.exe")
+        if os.path.isfile(branded):
+            exe_name = branded
+        elif os.path.isfile(rustdesk):
+            exe_name = rustdesk
+        else:
+            exe_name = rustdesk
             for cand in os.listdir(release) if os.path.isdir(release) else []:
                 if cand.lower().endswith(".exe"):
                     exe_name = os.path.join(release, cand)
                     break
+        self.log(f"  · portable startup exe: {exe_name}")
         portable_dir = os.path.join(self.src_dir, "libs", "portable")
         self.run([self._py(), "-m", "pip", "install", "-r", "requirements.txt"],
                  cwd=portable_dir, check=False)
@@ -1182,7 +1523,7 @@ class Build:
                   "-e", exe_name], cwd=portable_dir)
         packer_exe = os.path.join(self.src_dir, "target", "release",
                                   "rustdesk-portable-packer.exe")
-        dest = os.path.join(self.src_dir, f"rustdesk-{version}-install.exe")
+        dest = os.path.join(self.src_dir, f"{basename}-{version}-install.exe")
         if os.path.isfile(packer_exe):
             shutil.move(packer_exe, dest)
             self.log(f"  ✓ packed portable exe -> {dest}")
@@ -1307,12 +1648,12 @@ class Build:
                 self.log(f"  ! res/{spec_name} not found — skipping {suffix or 'fedora'} .rpm")
                 continue
             # Update version in the spec
-            self.run(["sed", "-i", f"s/Version:    .*/Version:    {version}/g", spec],
-                     cwd=self.src_dir, check=False)
+            self._sed_i(f"s/Version:    .*/Version:    {version}/g", spec,
+                        cwd=self.src_dir, check=False)
             # For aarch64, patch the hardcoded x64 bundle path
             if arch_seg != "x64":
-                self.run(["sed", "-i", f"s/linux\/x64/linux\/{arch_seg}/g", spec],
-                         cwd=self.src_dir, check=False)
+                self._sed_i(f"s|linux/x64|linux/{arch_seg}|g", spec,
+                            cwd=self.src_dir, check=False)
             # Build binary RPM only (-bb), matching CI
             self.run([rpm_tool, "-bb", spec],
                      cwd=self.src_dir, check=False,
@@ -1542,20 +1883,18 @@ class Build:
         build_gradle = os.path.join(self.src_dir, "flutter", "android",
                                     "build.gradle")
         if os.path.isfile(build_gradle):
-            self.run(["sed", "-i", "s/jcenter()/mavenCentral()/g", build_gradle],
-                     check=False)
+            self._sed_i("s/jcenter()/mavenCentral()/g", build_gradle, check=False)
         gradle_properties = os.path.join(self.src_dir, "flutter", "android",
                                          "gradle.properties")
         if os.path.isfile(gradle_properties):
-            self.run(["sed", "-i",
-                      "s/org.gradle.jvmargs=-Xmx1024M/org.gradle.jvmargs=-Xmx2g/g",
-                      gradle_properties], check=False)
+            self._sed_i(
+                "s/org.gradle.jvmargs=-Xmx1024M/org.gradle.jvmargs=-Xmx2g/g",
+                gradle_properties, check=False)
         app_build_gradle = os.path.join(self.src_dir, "flutter", "android",
                                         "app", "build.gradle")
         if os.path.isfile(app_build_gradle):
-            self.run(["sed", "-i",
-                      "s/signingConfigs.release/signingConfigs.debug/g",
-                      app_build_gradle], check=False)
+            self._sed_i("s/signingConfigs.release/signingConfigs.debug/g",
+                        app_build_gradle, check=False)
 
         # Compute NDK sysroot + toolchain bin for bindgen and autotools.
         # cargo-ndk sets per-target CC_aarch64_linux_android etc. (for cc-rs),
@@ -1614,9 +1953,9 @@ class Build:
                 # Fix hardcoded HOST_TAG — script assumes linux-x86_64 but
                 # macOS needs darwin-x86_64.
                 if self.host.get("os") == "macOS":
-                    self.run(["sed", "-i",
-                              's/HOST_TAG="linux-x86_64"/HOST_TAG="darwin-x86_64"/g',
-                              deps_script], check=False)
+                    self._sed_i(
+                        's/HOST_TAG="linux-x86_64"/HOST_TAG="darwin-x86_64"/g',
+                        deps_script, check=False)
                 bash = self._bash()
                 if bash or self.dry_run:
                     self.run([bash or "bash", deps_script, abi],
@@ -1700,6 +2039,12 @@ class Build:
 
     def build_macos(self):
         self.log("\n=== Build macOS ===")
+        # rustdesk-local-builder's macos path is: customize → vcpkg → rust
+        # → Podfile (explicit modules off + @import FMDB) → build.py.
+        # Extra FRAMEWORK_SEARCH_PATHS / CPATH / Flutter SDK rewrites here
+        # are what broke sqflite (`module 'FMDB' not found`). Only repair
+        # NAS-flattened Flutter framework symlinks + macos_assemble.sh +x.
+        self._repair_flutter_xcode_scripts()
         self.customize_for("macos")
         # Install native vcpkg deps (opus, libyuv, libvpx, ffmpeg) for macOS
         # before cargo runs, otherwise magnum-opus/scrap/hwcodec fail on
@@ -1721,13 +2066,17 @@ class Build:
         self._patch_macos_podfile()
         self._patch_macos_build_py()
         self._patch_macos_generated_bridge()
-        self.run([self._py(), "build.py", "--flutter", "--hwcodec"],
-                 cwd=self.src_dir, check=False)
-        env = self._env()
+        rc = self.run([self._py(), "build.py", "--flutter", "--hwcodec"],
+                      cwd=self.src_dir, check=False)
         app_name = self.config.get("appname", "RustDesk") or "RustDesk"
         app_dir = os.path.join(self.src_dir, "flutter", "build", "macos",
                                "Build", "Products", "Release")
         app_bundle = os.path.join(app_dir, f"{app_name}.app")
+        if not self._macos_app_complete(app_bundle):
+            raise RuntimeError(
+                f"macOS Flutter build did not produce a complete {app_name}.app "
+                f"(flutter/build.py exit {rc}). Not packaging a stub DMG.")
+        env = self._env()
         if os.path.isdir(app_dir):
             # Write custom_.txt next to the .app (Category B — runtime pickup)
             customize.write_custom_txt(app_dir, env, log=self.log)
@@ -1739,6 +2088,75 @@ class Build:
             customize.write_custom_txt(resources_dir, env, log=self.log)
         self._create_macos_dmg()
         self._collect(self.src_dir, (".dmg",), "macos")
+
+    def _flutter_sdk_roots(self):
+        """Flutter SDK homes that Xcode / dart might actually exec."""
+        roots, seen = [], set()
+        for cand in (
+            os.environ.get("FLUTTER_ROOT"),
+            toolchains.find_flutter_home(self._project_root()),
+        ):
+            if not cand:
+                continue
+            key = os.path.normcase(os.path.abspath(cand))
+            if key in seen or not os.path.isdir(cand):
+                continue
+            seen.add(key)
+            roots.append(cand)
+        which = shutil.which("flutter", path=self._effective_path())
+        if which:
+            home = os.path.dirname(os.path.dirname(os.path.abspath(which)))
+            key = os.path.normcase(home)
+            if key not in seen and os.path.isdir(home):
+                roots.append(home)
+        return roots
+
+    def _repair_flutter_xcode_scripts(self):
+        """Ensure macos_assemble.sh is executable.
+
+        Xcode's Run Script phase invokes
+        `$FLUTTER_ROOT/packages/flutter_tools/bin/macos_assemble.sh`
+        as a program. On NAS/exFAT copies the +x bit is gone, and the
+        only xcodebuild line you get is:
+          Command PhaseScriptExecution failed with a nonzero exit code
+        """
+        if self.dry_run:
+            return
+        for home in self._flutter_sdk_roots():
+            toolchains.repair_flutter_permissions(home, self.log)
+            assemble = os.path.join(
+                home, "packages", "flutter_tools", "bin", "macos_assemble.sh")
+            if os.path.isfile(assemble) and os.access(assemble, os.X_OK):
+                self.log(f"  · macos_assemble.sh is executable ({assemble})")
+            elif os.path.isfile(assemble):
+                self.log(f"  ! macos_assemble.sh still not executable: {assemble}")
+
+    def _patch_flutter_macos_frames_bug(self):
+        """Official rustdesk CI workaround for flutter/flutter#133533.
+
+        Comment out `_setFramesEnabledState(false);` in the Flutter SDK
+        scheduler so the macOS embedder does not disable frames.
+        """
+        if self.dry_run:
+            return
+        needle = "_setFramesEnabledState(false);"
+        repl = "//_setFramesEnabledState(false);"
+        for home in self._flutter_sdk_roots():
+            dart = os.path.join(
+                home, "packages", "flutter", "lib", "src",
+                "scheduler", "binding.dart")
+            if not os.path.isfile(dart):
+                continue
+            try:
+                with open(dart, "r", encoding="utf-8") as f:
+                    text = f.read()
+            except OSError:
+                continue
+            if needle not in text:
+                continue
+            with open(dart, "w", encoding="utf-8") as f:
+                f.write(text.replace(needle, repl))
+            self.log(f"  · patched Flutter #133533: {dart}")
 
     def _patch_macos_podfile(self):
         """Disable explicit modules and patch sqflite's FMDB import.
@@ -1797,13 +2215,12 @@ class Build:
         self._patch_sqflite_import()
 
     def _patch_sqflite_import(self):
-        """Patch SqfliteImport.h to use `@import FMDB;` instead of
-        `#import <fmdb/FMDB.h>`.
+        """Same as rustdesk-local-builder: `@import FMDB;` + explicit modules off.
 
-        The angle-bracket header import fails during module building on
-        Xcode 26 because the sqflite modulemap doesn't declare a dependency
-        on the FMDB module. Using `@import FMDB;` (Clang module import)
-        resolves correctly because FMDB.framework has a valid modulemap.
+        `#import <fmdb/FMDB.h>` fails Xcode 26's module scanner. `@import`
+        works when we do *not* rewrite FRAMEWORK_SEARCH_PATHS in the Podfile
+        (a string `<<` there corrupts CocoaPods' search paths and then
+        `module 'FMDB' not found`).
         """
         import glob
         pub_cache = os.path.expanduser("~/.pub-cache")
@@ -1902,6 +2319,24 @@ class Build:
                 f.write(text)
             self.log("  · patched generated_bridge.dart: ptr type + Bool->Uint8")
 
+    def _macos_app_complete(self, app):
+        """True when the .app has a real Mach-O in Contents/MacOS (not a stub)."""
+        macos = os.path.join(app or "", "Contents", "MacOS")
+        if not os.path.isdir(macos):
+            return False
+        try:
+            names = os.listdir(macos)
+        except OSError:
+            return False
+        for name in names:
+            p = os.path.join(macos, name)
+            try:
+                if os.path.isfile(p) and os.path.getsize(p) > 1_000_000:
+                    return True
+            except OSError:
+                continue
+        return False
+
     def _create_macos_dmg(self):
         """Create a .dmg from the built RustDesk.app using create-dmg.
 
@@ -1915,8 +2350,9 @@ class Build:
         app_basename = f"{app_name}.app"
         app = os.path.join(self.src_dir, "flutter", "build", "macos",
                            "Build", "Products", "Release", app_basename)
-        if not os.path.isdir(app):
-            self.log(f"  ! {app_basename} not found — skipping DMG creation")
+        if not self._macos_app_complete(app):
+            self.log(f"  ! {app_basename} is missing or empty — skipping DMG "
+                     "(a failed Flutter build used to yield a ~13 KB stub)")
             return
         create_dmg = shutil.which("create-dmg", path=self._effective_path())
         if not create_dmg:
@@ -1967,6 +2403,12 @@ class Build:
                 if not f.lower().startswith(prefixes):
                     continue
                 src = os.path.join(dp, f)
+                try:
+                    if f.lower().endswith(".dmg") and os.path.getsize(src) < 1_000_000:
+                        self.log(f"  · skip stub dmg {src} ({os.path.getsize(src)} bytes)")
+                        continue
+                except OSError:
+                    continue
                 # Rename artifacts to use the custom basename:
                 # - rustdesk-* -> {basename}-*  (Linux .deb/.rpm/.AppImage, macOS .dmg)
                 # - app-*.apk -> {basename}-*.apk  (Android split APKs)
@@ -2020,6 +2462,7 @@ class Build:
             if self.dry_run:
                 self.log("** DRY RUN — commands are printed, nothing is executed **")
 
+            self._ensure_flutter()
             self.checkout_source()
             self._ensure_rust()
             self._ensure_sccache()

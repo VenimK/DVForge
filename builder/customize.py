@@ -176,18 +176,36 @@ def _apply_appname(src, env, platform, log):
                   r'("Over",\s*")([^"]+)(")',
                   rf'\g<1>\g<2> {app}\g<3>', log)
     if platform == "windows":
+        filename = env.get("CUSTOM_FILENAME", "") or app
+        exe = filename if filename.lower().endswith(".exe") else f"{filename}.exe"
         sed(src, "Cargo.toml", 'description = "RustDesk Remote Desktop"',
             f'description = "{app}"', log)
-        sed(src, "flutter/windows/runner/Runner.rc", '"RustDesk Remote Desktop"',
-            f'"{app}"', log)
-        sed(src, "flutter/windows/runner/Runner.rc",
-            'VALUE "InternalName", "rustdesk"',
-            f'VALUE "InternalName", "{app}"', log)
-        # Patch CMakeLists.txt so the output .exe uses the custom filename
-        filename = env.get("CUSTOM_FILENAME", "") or app
-        if filename and filename != "RustDesk" and filename != "rustdesk":
-            cmake = "flutter/windows/runner/CMakeLists.txt"
-            sed(src, cmake, "rustdesk", filename, log)
+        # Flutter runner VERSIONINFO — this is what Explorer Properties shows
+        # on the portable's extracted .exe (and on Release\{filename}.exe).
+        rc = "flutter/windows/runner/Runner.rc"
+        sed(src, rc, '"RustDesk Remote Desktop"', f'"{app}"', log)
+        sed(src, rc, 'VALUE "InternalName", "rustdesk"',
+            f'VALUE "InternalName", "{filename}"', log)
+        sed(src, rc, 'VALUE "OriginalFilename", "rustdesk.exe"',
+            f'VALUE "OriginalFilename", "{exe}"', log)
+        sed(src, rc, 'VALUE "ProductName", "RustDesk"',
+            f'VALUE "ProductName", "{app}"', log)
+        # On-disk Flutter exe name. BINARY_NAME lives in the TOP-LEVEL
+        # windows CMakeLists — runner/CMakeLists.txt has no "rustdesk" string.
+        if filename.lower() != "rustdesk":
+            sed(src, "flutter/windows/CMakeLists.txt",
+                'set(BINARY_NAME "rustdesk")',
+                f'set(BINARY_NAME "{filename}")', log)
+        # cargo winres for the rustc-built exe and the portable packer stub
+        for rel in ("Cargo.toml", "libs/portable/Cargo.toml"):
+            sed(src, rel, 'ProductName = "RustDesk"',
+                f'ProductName = "{app}"', log)
+            sed(src, rel, 'FileDescription = "RustDesk Remote Desktop"',
+                f'FileDescription = "{app}"', log)
+            sed(src, rel, 'OriginalFilename = "rustdesk.exe"',
+                f'OriginalFilename = "{exe}"', log)
+            sed(src, rel, 'description = "RustDesk Remote Desktop"',
+                f'description = "{app}"', log)
     if platform == "android":
         sed(src, "Cargo.toml", 'description = "RustDesk Remote Desktop"', f'description = "{app}"', log)
         sed(src, "Cargo.toml", 'name = "RustDesk"', f'name = "{app}"', log)

@@ -13,6 +13,7 @@ import os
 import platform
 import shutil
 import subprocess
+import sys
 
 
 PINNED = {
@@ -60,9 +61,15 @@ def check_git():
 
 
 def check_python():
-    # we're literally running in python, so it's present; report the interpreter
-    p = shutil.which("python3") or shutil.which("python") or ""
-    return _status(True, "Python " + platform.python_version(), p)
+    # Report the interpreter actually running DVForge. On Windows,
+    # shutil.which("python3") often hits the Microsoft Store stub
+    # (WindowsApps\python3.exe), which is not a usable Python.
+    exe = os.path.abspath(sys.executable) if sys.executable else ""
+    ver = "Python " + platform.python_version()
+    if exe and os.path.isfile(exe):
+        return _status(True, ver, exe)
+    p = shutil.which("python") or shutil.which("python3") or ""
+    return _status(True, ver, p)
 
 
 def check_rust():
@@ -115,12 +122,64 @@ def check_rust_target():
 
 
 def check_flutter():
-    p = _which("flutter")
+    # Prefer the portable 3.24.5 copy. Homebrew/system Flutter often sits
+    # earlier on PATH and is too old for extended_text 14.0.0 (Dart >= 3.5).
+    import re
+    from . import toolchains
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    home = toolchains.find_flutter_home(root)
+    p = None
+    if home:
+        toolchains.repair_flutter_permissions(home)
+        cand = os.path.join(home, "bin", "flutter.bat" if _system() == "Windows"
+                            else "flutter")
+        if os.path.isfile(cand):
+            p = cand
+    if not p:
+        p = _which("flutter")
     if not p:
         return _status(False, hint=_install_hint("flutter"))
-    ver = _run_version(["flutter", "--version"]) or ""
+    try:
+        out = subprocess.check_output(
+            [p, "--version"], stderr=subprocess.STDOUT, timeout=30,
+            encoding="utf-8", errors="replace",
+        )
+    except Exception:
+        out = ""
+    ver = out.strip().splitlines()[0] if out.strip() else ""
+    if not ver:
+        # Toolchain copy exists but isn't runnable (noexec volume, bad
+        # extract). Fall back to whatever `flutter` is on PATH.
+        alt = _which("flutter")
+        if alt and os.path.normcase(os.path.abspath(alt)) != os.path.normcase(
+                os.path.abspath(p)):
+            p = alt
+            try:
+                out = subprocess.check_output(
+                    [p, "--version"], stderr=subprocess.STDOUT, timeout=30,
+                    encoding="utf-8", errors="replace",
+                )
+            except Exception:
+                out = ""
+            ver = out.strip().splitlines()[0] if out.strip() else ""
+        if not ver:
+            return _status(False, "", p, hint=_install_hint("flutter"))
+    dart_m = re.search(r"Dart\s+(\d+)\.(\d+)\.(\d+)", out)
+    dart_ver = tuple(int(x) for x in dart_m.groups()) if dart_m else None
+    fl_m = re.search(r"Flutter\s+(\d+)\.(\d+)\.(\d+)", out or ver)
+    fl_ver = tuple(int(x) for x in fl_m.groups()) if fl_m else None
+    too_old = ((dart_ver is not None and dart_ver < (3, 5, 0))
+               or (dart_ver is None and fl_ver is not None and fl_ver < (3, 24, 0)))
+    if too_old:
+        shown = ("Dart " + ".".join(str(x) for x in dart_ver) if dart_ver
+                 else ver or "unknown")
+        return _status(
+            False, ver, p,
+            note=f"{shown} is too old for extended_text 14.0.0 (needs Dart >= 3.5.0).",
+            hint=_install_hint("flutter"),
+        )
     note = ""
-    if PINNED["flutter"] not in ver:
+    if PINNED["flutter"] not in (out or ver):
         note = f"Workflows use Flutter {PINNED['flutter']}."
     return _status(True, ver, p, note=note)
 

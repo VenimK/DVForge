@@ -3,8 +3,8 @@
   "platform": "windows",
   "version": "1.4.9",
   "delayFix": "on",
-  "exename": "ExeFileName",
-  "appname": "AppName",
+  "exename": "onmac",
+  "appname": "onmac",
   "direction": "both",
   "installation": "installationY",
   "settings": "settingsY",
@@ -14,7 +14,7 @@
   "apiServer": "https://YourApiServer.com/",
   "urlLink": "https://YourUrlLink.com",
   "downloadLink": "https://YourDownloadLink.com",
-  "compname": "YourCompName",
+  "compname": "onmac",
   "passApproveMode": "password",
   "permanentPassword": "CHANGE_ME",
   "iconbase64": "",
@@ -50,6 +50,6 @@
   "removeWallpaper": "on",
   "slogan": "Hulp op afstand",
   "themeColor": "#A3DD92",
-  "iconFile": "workspace/branding/icon.png",
+  "iconFile": "workspace/branding/icon.jpg",
   "logoFile": "workspace/branding/logo.png"
 }
