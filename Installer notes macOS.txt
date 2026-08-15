@@ -1,0 +1,51 @@
+DVForge installers
+==================
+
+macOS desktop builds (.dmg)
+---------------------------
+# Install (default → ~/DVForge)
+bash Setup-DVForge-macOS.sh
+
+# Install into the folder you already have open
+bash Setup-DVForge-macOS.sh --in-place
+
+# Uninstall toolchains only (keeps project + Homebrew + Xcode)
+bash Uninstall-DVForge-macOS.sh
+
+# Uninstall and delete ~/DVForge entirely
+bash Uninstall-DVForge-macOS.sh --install-root "$HOME/DVForge" --remove-project --force
+
+
+Windows desktop builds (.exe / .msi)
+------------------------------------
+powershell -NoProfile -ExecutionPolicy Bypass -File ".\Setup-DVForge-Windows.ps1"
+
+
+Linux + Android (WSL2 Debian)
+-----------------------------
+powershell -NoProfile -ExecutionPolicy Bypass -File ".\Setup-DVForge-WSL2.ps1"
+
+
+What the macOS installer sets up
+--------------------------------
+Xcode Command Line Tools (git, clang, iconutil), Homebrew,
+Python 3.8+, cmake, ninja, nasm, pkg-config, create-dmg, CocoaPods,
+Rust 1.81 (Apple host triple + both Darwin targets for universal DMG),
+Flutter 3.24.5, LLVM/libclang 15.0.6 (.toolchains/llvm), vcpkg (pinned),
+sccache, ImageMagick, potrace, portable .toolchains/env.json under the
+install root, and a DVForge block in ~/.zprofile (and ~/.zshrc if present).
+
+LLVM 15.0.6 is the official CI pin. It is dropped into .toolchains/llvm and
+LIBCLANG_PATH is set; the tarball's clang is kept off PATH so it cannot
+shadow Apple clang / MacOSX.sdk.
+
+Xcode CLT cannot be installed silently — the first run opens Apple's
+installer dialog; re-run this script after it finishes.
+
+Optional:
+  --with-android   Temurin JDK 17 + NDK r28c
+  --skip-optional  skip sccache / ImageMagick / potrace
+
+A Mac only builds macOS .dmg. For Windows .exe/.msi run the Windows
+installer on a Windows PC. For Linux/Android packages use the WSL2
+installer (or a Linux box).

@@ -55,6 +55,11 @@ SOURCE_CACHE_KEEP = (
     "src/bridge_generated.io.rs",
     "flutter/lib/generated_bridge.dart",
     "flutter/lib/generated_bridge.freezed.dart",
+    # Xcode compile input (SWIFT_OBJC_BRIDGING_HEADER). gitignored, so
+    # git clean -fdx deletes it unless listed here; rust/dart-only keep
+    # then made generate_bridge() skip and macOS builds fail.
+    "flutter/macos/Runner/bridge_generated.h",
+    "flutter/ios/Runner/bridge_generated.h",
     "windows-x64-release.zip",
     "windows-x64-release",
 )
@@ -1081,18 +1086,38 @@ class Build:
             self.log(f"  ! warning: official CI pins Flutter {FLUTTER_VERSION}; "
                      "other 3.x versions may hit widget/engine mismatches")
 
+    def _bridge_header_paths(self):
+        mac = os.path.join(self.src_dir, "flutter", "macos", "Runner",
+                           "bridge_generated.h")
+        ios = os.path.join(self.src_dir, "flutter", "ios", "Runner",
+                           "bridge_generated.h")
+        return mac, ios
+
+    def _copy_mac_bridge_header_to_ios(self):
+        mac_h, ios_h = self._bridge_header_paths()
+        if os.path.isfile(mac_h):
+            os.makedirs(os.path.dirname(ios_h), exist_ok=True)
+            shutil.copy2(mac_h, ios_h)
+
     def _bridge_outputs_fresh(self):
-        """True if codegen outputs exist and are not older than flutter_ffi.rs."""
+        """True if rust/dart/C outputs exist and are not older than flutter_ffi.rs.
+
+        The C header is a required Xcode input (SWIFT_OBJC_BRIDGING_HEADER).
+        Checking only rust+dart let a kept compile cache skip codegen after
+        git clean deleted the gitignored header.
+        """
         rust_in = os.path.join(self.src_dir, "src", "flutter_ffi.rs")
         rust_out = os.path.join(self.src_dir, "src", "bridge_generated.rs")
         dart_out = os.path.join(self.src_dir, "flutter", "lib",
                                 "generated_bridge.dart")
-        if not all(os.path.isfile(p) for p in (rust_in, rust_out, dart_out)):
+        mac_h, _ = self._bridge_header_paths()
+        needed = (rust_in, rust_out, dart_out, mac_h)
+        if not all(os.path.isfile(p) for p in needed):
             return False
         try:
             src_m = os.path.getmtime(rust_in)
-            return (os.path.getmtime(rust_out) >= src_m
-                    and os.path.getmtime(dart_out) >= src_m)
+            return all(os.path.getmtime(p) >= src_m
+                       for p in (rust_out, dart_out, mac_h))
         except OSError:
             return False
 
@@ -1103,6 +1128,8 @@ class Build:
         self._ensure_llvm()
         if self._bridge_outputs_fresh():
             self.log("  · bridge files already up to date — skip codegen")
+            if not self.dry_run:
+                self._copy_mac_bridge_header_to_ios()
             return
         # Mirrors the generate-bridge job. cargo installs the codegen binary into
         # ~/.cargo/bin, which run() puts on PATH so it resolves on Windows too.
@@ -1167,13 +1194,12 @@ class Build:
             if not os.path.isfile(dart_bridge):
                 raise RuntimeError(
                     "codegen did not write flutter/lib/generated_bridge.dart")
-            ios_h = os.path.join(self.src_dir, "flutter", "ios", "Runner",
-                                 "bridge_generated.h")
-            mac_h = os.path.join(self.src_dir, "flutter", "macos", "Runner",
-                                 "bridge_generated.h")
-            if os.path.isfile(mac_h):
-                os.makedirs(os.path.dirname(ios_h), exist_ok=True)
-                shutil.copy2(mac_h, ios_h)
+            mac_h, _ = self._bridge_header_paths()
+            if not os.path.isfile(mac_h):
+                raise RuntimeError(
+                    "codegen did not write flutter/macos/Runner/bridge_generated.h — "
+                    "Xcode would fail with 'Build input file cannot be found'")
+            self._copy_mac_bridge_header_to_ios()
             self.log(f"  ✓ {os.path.relpath(rust_bridge, self.src_dir)}")
 
     def customize_for(self, platform):

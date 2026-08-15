@@ -11,8 +11,8 @@
 #   - Python 3.8+, cmake, ninja, nasm, pkg-config, create-dmg, cocoapods
 #   - DVForge at ~/DVForge (or --in-place / --install-root)
 #   - Via builder/toolchains.py (same pins as the GUI):
-#       Rust 1.81 (macOS CI pin), Flutter 3.24.5, vcpkg (pinned),
-#       sccache 0.11.0, ImageMagick, potrace
+#       Rust 1.81 (macOS CI pin), Flutter 3.24.5, LLVM/libclang 15.0.6,
+#       vcpkg (pinned), sccache 0.11.0, ImageMagick, potrace
 #   - Pins rustup default to 1.81-<host> and adds both Darwin targets
 #     so universal DMGs can lipo
 #   - Writes .toolchains/env.json + a DVForge block in ~/.zprofile
@@ -47,8 +47,8 @@ Options:
   --skip-optional      Skip sccache, ImageMagick, potrace
   --with-android       Also install Temurin JDK 17 + NDK r28c
                        (APKs are still marked Linux-only on the board)
-  --with-llvm          Also drop portable LLVM 15 into .toolchains
-                       (not needed — Xcode libclang is preferred)
+  --with-llvm          Accepted for compatibility; LLVM 15.0.6 is installed
+                       by default into .toolchains/llvm
   --force              Re-copy / re-clone into install-root
   -h, --help           Show this help
 EOF
@@ -138,7 +138,7 @@ printf '  Host triple:      %s\n' "$HOST_TRIPLE"
 printf '  Rust pin:         %s (macOS CI; Windows/Linux use 1.75)\n' "$RUST_TOOLCHAIN"
 printf '  Optional tools:   %s\n' "$( [ "$SKIP_OPTIONAL" -eq 1 ] && echo skip || echo 'sccache + ImageMagick + potrace' )"
 printf '  Android extras:   %s\n' "$( [ "$WITH_ANDROID" -eq 1 ] && echo 'JDK 17 + NDK r28c' || echo no )"
-printf '  Portable LLVM:    %s\n' "$( [ "$WITH_LLVM" -eq 1 ] && echo yes || echo 'no (Xcode libclang)' )"
+printf '  Portable LLVM:    15.0.6 -> .toolchains/llvm (clang stays off PATH)\n'
 printf '\n'
 
 # ---------------------------------------------------------------------------
@@ -309,12 +309,12 @@ fi
 # ---------------------------------------------------------------------------
 step 'Phase 4: Install pinned toolchains via builder/toolchains.py'
 
-IDS="rust,flutter,vcpkg"
+IDS="rust,flutter,llvm,vcpkg"
 if [ "$SKIP_OPTIONAL" -eq 0 ]; then
   IDS="${IDS},sccache,imagemagick,potrace"
 fi
 if [ "$WITH_LLVM" -eq 1 ]; then
-  IDS="${IDS},llvm"
+  skip 'LLVM 15.0.6 is already in the default toolchain set'
 fi
 if [ "$WITH_ANDROID" -eq 1 ]; then
   IDS="${IDS},java,android_ndk"
@@ -340,7 +340,7 @@ toolchains.apply_persisted_env(root)
 errs = r.get("errors") or []
 if errs:
     print("TOOLCHAIN_ERRORS", errs)
-    core = {"rust", "flutter", "vcpkg"}
+    core = {"rust", "flutter", "llvm", "vcpkg"}
     bad = [e for e in errs if e[0] in core]
     if bad:
         raise SystemExit("core toolchain install failed: %s" % bad)
@@ -490,6 +490,17 @@ if [ -f "${INSTALL_ROOT}/.toolchains/env.json" ]; then
   ok "env.json: ${INSTALL_ROOT}/.toolchains/env.json"
 else
   warn 'env.json missing — launch app.py once or re-run setup'
+fi
+LLVM_DIR="${INSTALL_ROOT}/.toolchains/llvm"
+if [ -f "${LLVM_DIR}/lib/libclang.dylib" ] || [ -f "${LLVM_DIR}/bin/libclang.dylib" ]; then
+  ok "LLVM 15.0.6 libclang: ${LLVM_DIR}"
+else
+  # tarball nests clang+llvm-15.0.6-*-apple-darwin21.0/
+  if find "$LLVM_DIR" -name 'libclang.dylib' -print -quit 2>/dev/null | grep -q .; then
+    ok "LLVM 15.0.6 libclang under ${LLVM_DIR}"
+  else
+    warn "LLVM/libclang 15.0.6 not found under ${LLVM_DIR}"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
