@@ -432,6 +432,7 @@ def _magick_resize(src_img, size, dst_img, log=None):
     non-square output (e.g. 16x9 from a landscape photo), which iconutil
     and .ico generators reject."""
     if _run_magick([src_img, "-auto-orient",
+                    "-background", "none", "-alpha", "on",
                     "-resize", f"{size}x{size}^",
                     "-gravity", "center",
                     "-extent", f"{size}x{size}",
@@ -481,8 +482,8 @@ def _ensure_png(icon_abs, log=None):
 
 def _make_ico(src_img, dst_ico, log=None):
     """Create a multi-resolution ICO (256,64,48,32,16) from a PNG via ImageMagick."""
-    if _run_magick([src_img, "-define",
-                    "icon:auto-resize=256,64,48,32,16", dst_ico]):
+    if _run_magick([src_img, "-background", "none", "-alpha", "on",
+                    "-define", "icon:auto-resize=256,64,48,32,16", dst_ico]):
         return True
     if log:
         if _magick_bin():
