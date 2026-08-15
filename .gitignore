@@ -47,3 +47,7 @@ nugetmsi.txt
 !precheck.bat
 !precheck.sh
 configs/RustDesk.json
+._Windows reuse is in and verified on.txt
+Windows reuse is in and verified on.txt
+builder/__orchestrator.py
+.gitignore

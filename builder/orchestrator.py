@@ -28,11 +28,36 @@ import platform as _platform
 from . import customize, detect, prereqs, toolchains
 
 RUSTDESK_REPO = "https://github.com/rustdesk/rustdesk.git"
+WINDOWS_FLUTTER_ENGINE_URL = (
+    "https://github.com/rustdesk/engine/releases/download/main/"
+    "windows-x64-release.zip"
+)
 
 # toolchain versions (match the workflows / SKILL.md)
 RUST_VERSION = "1.75"        # Windows/Linux desktop
 MAC_RUST_VERSION = "1.81"    # macOS desktop (official CI uses 1.81)
 FLUTTER_VERSION = "3.24.5"
+
+# Compile caches and bulky downloads that must survive a source reset.
+# Customizations mutate tracked files, so we still git-reset; we just do
+# not delete these (they are gitignored / untracked).
+SOURCE_CACHE_KEEP = (
+    "target",
+    "flutter/build",
+    "flutter/.dart_tool",
+    "flutter/.flutter-plugins",
+    "flutter/.flutter-plugins-dependencies",
+    "flutter/windows/flutter/ephemeral",
+    "flutter/windows/flutter/generated_plugin_registrant.cc",
+    "flutter/windows/flutter/generated_plugin_registrant.h",
+    "flutter/windows/flutter/generated_plugins.cmake",
+    "src/bridge_generated.rs",
+    "src/bridge_generated.io.rs",
+    "flutter/lib/generated_bridge.dart",
+    "flutter/lib/generated_bridge.freezed.dart",
+    "windows-x64-release.zip",
+    "windows-x64-release",
+)
 
 
 def _cargo_bin():
@@ -214,49 +239,190 @@ class Build:
         return steps
 
     # -- steps --------------------------------------------------------------
-    def checkout_source(self):
-        self.log("\n=== 1. Check out RustDesk source ===")
-        # Customizations mutate the source tree (sed/patch/rename), so every
-        # build must start from a pristine checkout. If a previous tree is here,
-        # remove it first — reusing it would double-apply patches and corrupt it.
-        if os.path.exists(self.src_dir):
-            self.log(f"  clearing previous source at {self.src_dir}")
-            if not self.dry_run:
-                # Docker builds can leave the dir with d-w------- (no read/execute),
-                # so rmtree can't traverse it. Fix permissions top-down first.
+    def _git_capture(self, args, cwd=None, timeout=60):
+        """Run git and return (rc, stdout). Never raises. Not logged as a step."""
+        git = shutil.which("git", path=self._effective_path()) or "git"
+        try:
+            r = subprocess.run(
+                [git] + list(args),
+                cwd=cwd or self.src_dir,
+                capture_output=True, text=True, timeout=timeout,
+                encoding="utf-8", errors="replace",
+                env={**os.environ, "PATH": self._effective_path()},
+            )
+            return r.returncode, (r.stdout or "").strip()
+        except Exception as e:
+            return 1, str(e)
+
+    def _cache_park_dir(self):
+        return os.path.join(self.workspace, ".build-cache")
+
+    def _keep_path(self, rel, root=None):
+        bits = rel.replace("\\", "/").split("/")
+        return os.path.join(root or self.src_dir, *bits)
+
+    def _park_build_caches(self):
+        """Move compile caches out of src_dir so a wipe/clone cannot delete them."""
+        if self.dry_run:
+            return
+        park = self._cache_park_dir()
+        os.makedirs(park, exist_ok=True)
+        for rel in SOURCE_CACHE_KEEP:
+            src = self._keep_path(rel)
+            dst = self._keep_path(rel, park)
+            if not os.path.exists(src):
+                continue
+            if os.path.exists(dst):
                 try:
-                    import stat
-                    os.chmod(self.src_dir, stat.S_IRWXU)
-                    for root, dirs, files in os.walk(self.src_dir, topdown=False):
-                        for name in dirs + files:
-                            p = os.path.join(root, name)
-                            try:
-                                os.chmod(p, stat.S_IRWXU)
-                            except OSError:
-                                pass
+                    if os.path.isdir(dst) and not os.path.islink(dst):
+                        _force_rmtree(dst)
+                    else:
+                        os.remove(dst)
                 except OSError:
-                    pass
-                shutil.rmtree(self.src_dir, ignore_errors=True)
-                # a leftover read-only .git on Windows can resist removal
-                if os.path.exists(self.src_dir):
-                    _force_rmtree(self.src_dir)
-                # last resort: shell delete can clear files Python cannot
-                if os.path.exists(self.src_dir):
-                    self.log(f"  force-removing leftover {self.src_dir}")
-                    _shell_rmtree(self.src_dir)
-                # NFS volumes (e.g. /Volumes on macOS) create .nfs* "silly
-                # rename" files when a deleted file is still open.  These
-                # vanish once the process exits, so retry once after a brief
-                # wait.  If the dir *still* won't go, clone into a sibling
-                # temp dir and rename — git clone just needs an empty target.
-                if os.path.exists(self.src_dir):
-                    import time
-                    time.sleep(2)
-                    _shell_rmtree(self.src_dir)
+                    try:
+                        _shell_rmtree(dst)
+                    except Exception:
+                        pass
+            parent = os.path.dirname(dst)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            self.log(f"  · parking {rel} -> {dst}")
+            try:
+                shutil.move(src, dst)
+            except OSError as e:
+                self.log(f"  ! could not park {rel}: {e}")
+
+    def _restore_build_caches(self):
+        """Move parked caches back after a fresh clone."""
+        if self.dry_run:
+            return
+        park = self._cache_park_dir()
+        if not os.path.isdir(park):
+            return
+        for rel in SOURCE_CACHE_KEEP:
+            src = self._keep_path(rel, park)
+            dst = self._keep_path(rel)
+            if not os.path.exists(src):
+                continue
+            if os.path.exists(dst):
+                continue
+            parent = os.path.dirname(dst)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            self.log(f"  · restoring {rel}")
+            try:
+                shutil.move(src, dst)
+            except OSError as e:
+                self.log(f"  ! could not restore {rel}: {e}")
+
+    def _source_tag(self):
+        """Exact tag at HEAD, without a leading v. Empty if untagged."""
+        rc, desc = self._git_capture(
+            ["describe", "--tags", "--exact-match"], cwd=self.src_dir)
+        if rc != 0 or not desc:
+            return ""
+        return desc.lstrip("v")
+
+    def _try_reuse_source(self):
+        """Reset existing rustdesk-src to self.version, keeping compile caches.
+
+        Customizations mutate tracked files, so we still `git reset --hard`.
+        Return True if the tree is ready, False if the caller should wipe+clone.
+        """
+        git_marker = os.path.join(self.src_dir, ".git")
+        if not os.path.exists(git_marker):
+            return False
+
+        rc, url = self._git_capture(["remote", "get-url", "origin"], cwd=self.src_dir)
+        norm = (url or "").replace(":", "/").lower()
+        if rc != 0 or "rustdesk/rustdesk" not in norm:
+            self.log("  ! existing tree is not rustdesk/rustdesk — will reclone")
+            return False
+
+        want = self.version.lstrip("v")
+        have = self._source_tag()
+        if have != want:
+            self.log(f"  · switching checkout {have or 'unknown'} -> {want}")
+            switched = False
+            for ref in (want, f"v{want}"):
+                rc = self.run(
+                    ["git", "fetch", "--depth", "1", "origin",
+                     f"refs/tags/{ref}:refs/tags/{ref}"],
+                    cwd=self.src_dir, check=False)
+                if rc == 0:
+                    rc = self.run(
+                        ["git", "checkout", "--force", ref],
+                        cwd=self.src_dir, check=False)
+                    if rc == 0 and self._source_tag() == want:
+                        switched = True
+                        break
+            if not switched:
+                rc = self.run(
+                    ["git", "fetch", "--depth", "1", "origin", want],
+                    cwd=self.src_dir, check=False)
+                if rc == 0:
+                    self.run(["git", "checkout", "--force", "FETCH_HEAD"],
+                             cwd=self.src_dir, check=False)
+                if self._source_tag() != want:
+                    self.log("  ! could not switch to requested tag — will reclone")
+                    return False
+        else:
+            self.log(f"  · reusing existing v{want} checkout "
+                     "(reset tracked files, keep cargo/flutter caches)")
+
+        rc = self.run(["git", "reset", "--hard", "HEAD"],
+                      cwd=self.src_dir, check=False)
+        if rc != 0:
+            self.log("  ! git reset failed — will reclone")
+            return False
+
+        clean = ["git", "clean", "-fdx"]
+        for rel in SOURCE_CACHE_KEEP:
+            clean += ["-e", "/" + rel.replace("\\", "/")]
+        rc = self.run(clean, cwd=self.src_dir, check=False)
+        if rc != 0:
+            self.log("  ! git clean failed — will reclone")
+            return False
+
+        self.run(["git", "submodule", "foreach", "--recursive",
+                  "git", "reset", "--hard"], cwd=self.src_dir, check=False)
+        self.run(["git", "submodule", "update", "--init", "--recursive"],
+                 cwd=self.src_dir, check=False)
+
+        if not os.path.isfile(os.path.join(self.src_dir, "Cargo.toml")):
+            self.log("  ! Cargo.toml missing after reset — will reclone")
+            return False
+        self.log("  ✓ source reset; compile caches kept")
+        return True
+
+    def _wipe_source_tree(self):
+        """Force-remove rustdesk-src. Used only when incremental reuse fails."""
+        self.log(f"  clearing previous source at {self.src_dir}")
+        try:
+            import stat
+            os.chmod(self.src_dir, stat.S_IRWXU)
+            for root, dirs, files in os.walk(self.src_dir, topdown=False):
+                for name in dirs + files:
+                    p = os.path.join(root, name)
+                    try:
+                        os.chmod(p, stat.S_IRWXU)
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+        shutil.rmtree(self.src_dir, ignore_errors=True)
+        if os.path.exists(self.src_dir):
+            _force_rmtree(self.src_dir)
+        if os.path.exists(self.src_dir):
+            self.log(f"  force-removing leftover {self.src_dir}")
+            _shell_rmtree(self.src_dir)
+        if os.path.exists(self.src_dir):
+            time.sleep(2)
+            _shell_rmtree(self.src_dir)
+
+    def _clone_source(self):
         os.makedirs(self.workspace, exist_ok=True)
         if os.path.exists(self.src_dir):
-            # Could not remove the old tree (NFS stale handles, locked files).
-            # Clone into a fresh temp name, then swap.
             tmp_dir = self.src_dir + ".checkout-tmp"
             if os.path.exists(tmp_dir):
                 _shell_rmtree(tmp_dir)
@@ -264,16 +430,34 @@ class Build:
                     _force_rmtree(tmp_dir)
             self.run(["git", "clone", "--depth", "1", "--branch", self.version,
                       "--recurse-submodules", RUSTDESK_REPO, tmp_dir])
-            # Best-effort: try removing the old dir again, then rename.
             _shell_rmtree(self.src_dir)
             if os.path.exists(self.src_dir):
-                # Still stuck — just use the temp dir as src_dir
                 self.src_dir = tmp_dir
             else:
                 os.rename(tmp_dir, self.src_dir)
         else:
             self.run(["git", "clone", "--depth", "1", "--branch", self.version,
                       "--recurse-submodules", RUSTDESK_REPO, self.src_dir])
+
+    def checkout_source(self):
+        self.log("\n=== 1. Check out RustDesk source ===")
+        # Customizations mutate tracked files (sed/patch/rename), so every
+        # build must start from a pristine *source* tree. Compile caches
+        # (cargo target/, flutter/build, engine zip) are gitignored and
+        # safe to keep — wiping them was the main rebuild tax.
+        os.makedirs(self.workspace, exist_ok=True)
+        if os.path.exists(self.src_dir):
+            if self.dry_run:
+                self.log(f"  (would reset {self.src_dir} to v{self.version}, "
+                         "keeping cargo/flutter caches)")
+                return
+            if self._try_reuse_source():
+                return
+            self.log("  · reuse failed — parking caches and cloning fresh")
+            self._park_build_caches()
+            self._wipe_source_tree()
+        self._clone_source()
+        self._restore_build_caches()
 
     def _project_root(self):
         return os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -455,6 +639,22 @@ class Build:
         host_triple = self._host_rust_triple()
         toolchain = f"{version}-{host_triple}"
         self.log(f"  · ensuring Rust {toolchain}")
+        rustc = shutil.which("rustc", path=self._effective_path())
+        rustc_ver = ""
+        if rustc:
+            try:
+                rustc_ver = subprocess.check_output(
+                    [rustc, "--version"], timeout=15,
+                    encoding="utf-8", errors="replace",
+                    env={**os.environ, "PATH": self._effective_path()},
+                ).strip()
+            except Exception:
+                rustc_ver = ""
+        if rustc_ver and version in rustc_ver:
+            rustfmt = shutil.which("rustfmt", path=self._effective_path())
+            if rustfmt:
+                self.log(f"  · {rustc_ver} already active — skip rustup")
+                return
         self.run(["rustup", "toolchain", "install", toolchain], check=False)
         # Host std is always needed; for macOS also ensure the selected Mac target.
         targets = {host_triple}
@@ -881,20 +1081,36 @@ class Build:
             self.log(f"  ! warning: official CI pins Flutter {FLUTTER_VERSION}; "
                      "other 3.x versions may hit widget/engine mismatches")
 
+    def _bridge_outputs_fresh(self):
+        """True if codegen outputs exist and are not older than flutter_ffi.rs."""
+        rust_in = os.path.join(self.src_dir, "src", "flutter_ffi.rs")
+        rust_out = os.path.join(self.src_dir, "src", "bridge_generated.rs")
+        dart_out = os.path.join(self.src_dir, "flutter", "lib",
+                                "generated_bridge.dart")
+        if not all(os.path.isfile(p) for p in (rust_in, rust_out, dart_out)):
+            return False
+        try:
+            src_m = os.path.getmtime(rust_in)
+            return (os.path.getmtime(rust_out) >= src_m
+                    and os.path.getmtime(dart_out) >= src_m)
+        except OSError:
+            return False
+
     def generate_bridge(self):
         self.log("\n=== 2. Generate flutter_rust_bridge ===")
         # Re-assert toolchains LLVM right before codegen so a later step
         # cannot have clobbered LIBCLANG_PATH.
         self._ensure_llvm()
+        if self._bridge_outputs_fresh():
+            self.log("  · bridge files already up to date — skip codegen")
+            return
         # Mirrors the generate-bridge job. cargo installs the codegen binary into
         # ~/.cargo/bin, which run() puts on PATH so it resolves on Windows too.
-        self.run(["cargo", "install", "flutter_rust_bridge_codegen",
-                  "--version", "1.80.1", "--features", "uuid", "--locked"],
-                 check=False)
+        self._ensure_cargo_install("flutter_rust_bridge_codegen", "1.80.1",
+                                  extra=["--features", "uuid"])
         # Official CI also installs cargo-expand; codegen uses it to expand
         # macros in flutter_ffi.rs before emitting bridge_generated.rs.
-        self.run(["cargo", "install", "cargo-expand",
-                  "--version", "1.0.95", "--locked"], check=False)
+        self._ensure_cargo_install("cargo-expand", "1.0.95")
         # ffigen (invoked by the codegen) needs .dart_tool/package_config.json,
         # which only exists after `flutter pub get`. Without it the codegen
         # emits dummy code with an unresolvable Dart_Handle type and the build
@@ -999,6 +1215,33 @@ class Build:
     # ---- native deps (vcpkg) ---------------------------------------------
     VCPKG_COMMIT = "120deac3062162151622ca4860575a33844ba10b"
 
+    def _cargo_bin_version_text(self, name):
+        """`name --version` stdout, or empty if the binary is missing."""
+        exe = shutil.which(name, path=self._effective_path())
+        if not exe:
+            return ""
+        try:
+            r = subprocess.run(
+                [exe, "--version"],
+                capture_output=True, text=True, timeout=20,
+                encoding="utf-8", errors="replace",
+                env={**os.environ, "PATH": self._effective_path()},
+            )
+            return ((r.stdout or "") + " " + (r.stderr or "")).strip()
+        except Exception:
+            return ""
+
+    def _ensure_cargo_install(self, name, version, extra=None):
+        """`cargo install` only when the pinned version is not already on PATH."""
+        shown = self._cargo_bin_version_text(name)
+        if shown and version in shown:
+            self.log(f"  · {name} {version} already present — skip install")
+            return
+        cmd = ["cargo", "install", name, "--version", version, "--locked"]
+        if extra:
+            cmd.extend(extra)
+        self.run(cmd, check=False)
+
     def setup_vcpkg(self, triplet):
         """Check out the pinned vcpkg commit and install RustDesk's native deps
         (ffmpeg, hwcodec, etc.) for `triplet`. Needs VCPKG_ROOT set."""
@@ -1008,18 +1251,25 @@ class Build:
                      "Set it to your vcpkg checkout so ffmpeg/hwcodec resolve.")
             return
         self.log(f"  vcpkg deps ({triplet}) from {root}")
-        self.run(["git", "-C", root, "fetch", "--depth", "1", "origin", self.VCPKG_COMMIT],
-                 check=False)
-        self.run(["git", "-C", root, "checkout", self.VCPKG_COMMIT], check=False)
         vcpkg_exe = os.path.join(root, "vcpkg.exe" if self.host["os"] == "Windows" else "vcpkg")
-        # After switching commits the vcpkg binary is stale — re-bootstrap it.
-        # On Windows use bootstrap-vcpkg.bat; on Linux/macOS use bootstrap-vcpkg.sh.
-        bootstrap = os.path.join(root,
-                                 "bootstrap-vcpkg.bat" if self.host["os"] == "Windows"
-                                 else "bootstrap-vcpkg.sh")
-        if os.path.isfile(bootstrap):
-            self.log("  · re-bootstrapping vcpkg (stale after checkout)")
-            self.run([bootstrap, "-disableMetrics"], cwd=root, check=False)
+        rc, head = self._git_capture(["rev-parse", "HEAD"], cwd=root)
+        already = (rc == 0 and head and
+                   (head.startswith(self.VCPKG_COMMIT) or
+                    self.VCPKG_COMMIT.startswith(head)))
+        if already and os.path.isfile(vcpkg_exe):
+            self.log(f"  · vcpkg already at {self.VCPKG_COMMIT[:8]} — "
+                     "skip fetch/bootstrap")
+        else:
+            self.run(["git", "-C", root, "fetch", "--depth", "1", "origin",
+                      self.VCPKG_COMMIT], check=False)
+            self.run(["git", "-C", root, "checkout", self.VCPKG_COMMIT], check=False)
+            # After switching commits the vcpkg binary is stale — re-bootstrap it.
+            bootstrap = os.path.join(root,
+                                     "bootstrap-vcpkg.bat" if self.host["os"] == "Windows"
+                                     else "bootstrap-vcpkg.sh")
+            if os.path.isfile(bootstrap):
+                self.log("  · re-bootstrapping vcpkg (stale after checkout)")
+                self.run([bootstrap, "-disableMetrics"], cwd=root, check=False)
         # RustDesk's vcpkg.json declares ffmpeg as a "host" dependency.
         # vcpkg installs host deps for the host triplet (default: x64-windows),
         # but hwcodec's build.rs hardcodes x64-windows-static/include.
@@ -1303,6 +1553,7 @@ class Build:
         candidates = uniq
 
         short = None
+        created_new_junction = False
         for cand in candidates:
             try:
                 # Junctions cannot cross volumes — skip candidates on another drive.
@@ -1339,6 +1590,7 @@ class Build:
                     self.log(f"  ! mklink {cand} failed: {err}")
                     continue
                 short = cand
+                created_new_junction = True
                 break
             except Exception as e:
                 self.log(f"  ! short-path candidate {cand} failed: {e}")
@@ -1358,15 +1610,170 @@ class Build:
             self.src_dir = short
             self.log(f"  · build will use {short} to stay under MAX_PATH")
 
-        # Stale flutter/build/windows from a previous MAX_PATH failure leaves
-        # half-written .tlog dirs that can confuse the next MSBuild run.
-        flutter_win = os.path.join(self.src_dir, "flutter", "build", "windows")
-        if os.path.isdir(flutter_win) and not self.dry_run:
-            self.log("  · cleaning flutter/build/windows (MAX_PATH recovery)")
+        # Only wipe Flutter's Windows intermediates when we just created a
+        # new junction. A previous MAX_PATH failure can leave half-written
+        # .tlog dirs; an already-good short path should keep the cache.
+        if created_new_junction:
+            flutter_win = os.path.join(self.src_dir, "flutter", "build", "windows")
+            if os.path.isdir(flutter_win) and not self.dry_run:
+                self.log("  · cleaning flutter/build/windows "
+                         "(new short-path junction)")
+                try:
+                    _force_rmtree(flutter_win)
+                except Exception as e:
+                    self.log(f"  ! could not clean flutter build dir: {e}")
+
+    def _ensure_windows_flutter_engine(self):
+        """Install RustDesk's custom Flutter engine, skipping work when present.
+
+        The zip is cached under workspace/.build-cache so later builds do not
+        re-download ~60 MB. If flutter_windows.dll is already newer than the
+        zip, the extract/copy step is skipped too.
+        """
+        if self.host["os"] != "Windows":
+            return
+        if self.dry_run:
+            self.log("  (would install custom Flutter engine if missing)")
+            return
+
+        flutter_exe = shutil.which("flutter", path=self._effective_path())
+        if not flutter_exe:
+            self.log("  ! flutter not on PATH — cannot install custom engine")
+            return
+        flutter_dir = os.path.dirname(os.path.dirname(flutter_exe))
+        engine_dir = os.path.join(flutter_dir, "bin", "cache", "artifacts",
+                                  "engine", "windows-x64-release")
+        dll = os.path.join(engine_dir, "flutter_windows.dll")
+        cached_zip = os.path.join(self._cache_park_dir(), "windows-x64-release.zip")
+        src_zip = os.path.join(self.src_dir, "windows-x64-release.zip")
+
+        zip_path = None
+        if os.path.isfile(cached_zip):
+            zip_path = cached_zip
+        elif os.path.isfile(src_zip):
+            zip_path = src_zip
             try:
-                _force_rmtree(flutter_win)
+                os.makedirs(os.path.dirname(cached_zip), exist_ok=True)
+                shutil.copy2(src_zip, cached_zip)
+                zip_path = cached_zip
+            except OSError:
+                pass
+
+        if os.path.isfile(dll) and zip_path and os.path.isfile(zip_path):
+            try:
+                if os.path.getmtime(dll) >= os.path.getmtime(zip_path) - 5:
+                    self.log("  · custom Flutter engine already in place — skip")
+                    return
+            except OSError:
+                pass
+        elif os.path.isfile(dll) and not zip_path:
+            # Engine present from a previous build; zip was cleaned. Trust it.
+            self.log("  · custom Flutter engine already in place — skip")
+            return
+
+        if not os.path.isdir(engine_dir):
+            self.log("  · flutter precache --windows (engine dir missing)")
+            self.run(["flutter", "precache", "--windows"], check=False)
+        else:
+            self.log("  · flutter engine dir present — skip precache")
+
+        if not zip_path:
+            os.makedirs(os.path.dirname(cached_zip), exist_ok=True)
+            self.log("  · downloading custom Flutter engine")
+            self.run(["curl", "-sL", "-o", cached_zip, WINDOWS_FLUTTER_ENGINE_URL],
+                     check=False)
+            zip_path = cached_zip if os.path.isfile(cached_zip) else None
+        else:
+            self.log(f"  · using cached engine zip ({zip_path})")
+
+        if not zip_path or not os.path.isfile(zip_path):
+            self.log("  ! failed to download custom Flutter engine")
+            return
+
+        extract_dir = os.path.join(self.src_dir, "windows-x64-release")
+        try:
+            with zipfile.ZipFile(zip_path, "r") as z:
+                z.extractall(extract_dir)
+        except zipfile.BadZipFile as e:
+            self.log(f"  ! engine zip is corrupt ({e}) — deleting cache")
+            try:
+                os.remove(zip_path)
+            except OSError:
+                pass
+            return
+
+        if not os.path.isdir(engine_dir):
+            self.log(f"  ! engine dir not found: {engine_dir}")
+            return
+        if os.path.isdir(extract_dir):
+            for item in os.listdir(extract_dir):
+                src_item = os.path.join(extract_dir, item)
+                dst_item = os.path.join(engine_dir, item)
+                if os.path.isfile(src_item):
+                    if os.path.isfile(dst_item):
+                        os.remove(dst_item)
+                    shutil.copy2(src_item, dst_item)
+            self.log(f"  ✓ custom engine installed to {engine_dir}")
+
+    def _cached_windows_binary_name(self):
+        """Exe/CMake target name baked into a previous flutter/build/windows."""
+        cache = os.path.join(self.src_dir, "flutter", "build", "windows",
+                             "x64", "CMakeCache.txt")
+        if not os.path.isfile(cache):
+            cache = os.path.join(self.src_dir, "flutter", "build", "windows",
+                                 "CMakeCache.txt")
+        if os.path.isfile(cache):
+            try:
+                text = open(cache, encoding="utf-8", errors="replace").read()
+            except OSError:
+                text = ""
+            m = re.search(r"TARGET_FILE_DIR:([A-Za-z0-9_.-]+)", text)
+            if m:
+                return m.group(1)
+        runner = os.path.join(self.src_dir, "flutter", "build", "windows",
+                              "x64", "runner")
+        if os.path.isdir(runner):
+            skip = {"ALL_BUILD.vcxproj", "ZERO_CHECK.vcxproj",
+                    "INSTALL.vcxproj", "RUN_TESTS.vcxproj"}
+            for name in os.listdir(runner):
+                if name.endswith(".vcxproj") and name not in skip:
+                    return os.path.splitext(name)[0]
+        return ""
+
+    def _invalidate_stale_flutter_windows(self):
+        """Drop flutter/build/windows when the CMake target name changed.
+
+        Config fields like password/server still incrementally compile. Only
+        an app/exe rename (BINARY_NAME) poisons CMakeCache.txt:
+          $<TARGET_FILE_DIR:onmac>  with no target "onmac"
+        Cargo's target/ cache is left alone.
+        """
+        if self.dry_run:
+            return
+        want = (self._output_basename() or "rustdesk").strip()
+        if want.lower().endswith(".exe"):
+            want = want[:-4]
+        have = self._cached_windows_binary_name()
+        if not have:
+            return
+        if have.lower() == want.lower():
+            self.log(f"  · flutter windows cache matches BINARY_NAME={want}")
+            return
+        flutter_win = os.path.join(self.src_dir, "flutter", "build", "windows")
+        self.log(f"  · exe name changed ({have} -> {want}) — "
+                 "clearing flutter/build/windows (cargo cache kept)")
+        try:
+            _force_rmtree(flutter_win)
+        except Exception as e:
+            self.log(f"  ! could not clear flutter windows cache: {e}")
+        # Ephemeral plugin files were generated against the old target too.
+        ephemeral = os.path.join(self.src_dir, "flutter", "windows",
+                                 "flutter", "ephemeral")
+        if os.path.isdir(ephemeral):
+            try:
+                _force_rmtree(ephemeral)
             except Exception as e:
-                self.log(f"  ! could not clean flutter build dir: {e}")
+                self.log(f"  ! could not clear flutter ephemeral: {e}")
 
     def build_windows(self):
         self.log("\n=== Build Windows x86_64 ===")
@@ -1377,14 +1784,27 @@ class Build:
             # Pin Rust 1.75 — matches official CI. Rust 1.78+ has an i128
             # ABI change that breaks sciter and other deps.
             # https://blog.rust-lang.org/2024/03/30/i128-layout-update.html
-            self.run(["rustup", "toolchain", "install",
-                      f"{RUST_VERSION}-x86_64-pc-windows-msvc"], check=False)
-            self.run(["rustup", "target", "add",
-                      "x86_64-pc-windows-msvc",
-                      "--toolchain", f"{RUST_VERSION}-x86_64-pc-windows-msvc"],
-                     check=False)
-            self.run(["rustup", "default",
-                      f"{RUST_VERSION}-x86_64-pc-windows-msvc"], check=False)
+            # _ensure_rust() already did this when the toolchain is missing.
+            rustc = shutil.which("rustc", path=self._effective_path())
+            rustc_ver = ""
+            if rustc:
+                try:
+                    rustc_ver = subprocess.check_output(
+                        [rustc, "--version"], timeout=15,
+                        encoding="utf-8", errors="replace",
+                        env={**os.environ, "PATH": self._effective_path()},
+                    )
+                except Exception:
+                    rustc_ver = ""
+            if RUST_VERSION not in (rustc_ver or ""):
+                self.run(["rustup", "toolchain", "install",
+                          f"{RUST_VERSION}-x86_64-pc-windows-msvc"], check=False)
+                self.run(["rustup", "target", "add",
+                          "x86_64-pc-windows-msvc",
+                          "--toolchain", f"{RUST_VERSION}-x86_64-pc-windows-msvc"],
+                         check=False)
+                self.run(["rustup", "default",
+                          f"{RUST_VERSION}-x86_64-pc-windows-msvc"], check=False)
 
             # LLVM was already set up before generate_bridge — just confirm.
             self._ensure_llvm()
@@ -1393,6 +1813,9 @@ class Build:
 
         self.setup_vcpkg("x64-windows-static")
         self.customize_for("windows")
+        # App/exe rename leaves CMakeCache.txt with $<TARGET_FILE_DIR:oldname>.
+        # Wipe only the Flutter Windows CMake tree — cargo target/ stays.
+        self._invalidate_stale_flutter_windows()
 
         # Patch Flutter dropdown (from official CI)
         dropdown_patch = os.path.join(self.patches_dir,
@@ -1407,37 +1830,7 @@ class Build:
                          cwd=flutter_dir, check=False)
 
         # Replace Flutter engine with RustDesk custom build (from official CI)
-        if self.host["os"] == "Windows" and not self.dry_run:
-            self.log("  · replacing Flutter engine with RustDesk custom build")
-            self.run(["flutter", "precache", "--windows"], check=False)
-            flutter_exe = shutil.which("flutter", path=self._effective_path())
-            if flutter_exe:
-                # Find the engine artifacts dir
-                flutter_dir = os.path.dirname(os.path.dirname(flutter_exe))
-                engine_dir = os.path.join(flutter_dir, "bin", "cache", "artifacts",
-                                          "engine", "windows-x64-release")
-                zip_path = os.path.join(self.src_dir, "windows-x64-release.zip")
-                self.run(["curl", "-sL", "-o", zip_path,
-                          "https://github.com/rustdesk/engine/releases/download/main/windows-x64-release.zip"],
-                         check=False)
-                if os.path.isfile(zip_path):
-                    extract_dir = os.path.join(self.src_dir, "windows-x64-release")
-                    with zipfile.ZipFile(zip_path, 'r') as z:
-                        z.extractall(extract_dir)
-                    # Move contents into the engine dir
-                    if os.path.isdir(extract_dir) and os.path.isdir(engine_dir):
-                        for item in os.listdir(extract_dir):
-                            src_item = os.path.join(extract_dir, item)
-                            dst_item = os.path.join(engine_dir, item)
-                            if os.path.isfile(dst_item):
-                                os.remove(dst_item)
-                            if os.path.isfile(src_item):
-                                shutil.copy2(src_item, dst_item)
-                        self.log(f"  ✓ custom engine installed to {engine_dir}")
-                    else:
-                        self.log(f"  ! engine dir not found: {engine_dir}")
-                else:
-                    self.log("  ! failed to download custom Flutter engine")
+        self._ensure_windows_flutter_engine()
 
         win_targets = [t for t in self.target_ids if t.startswith("windows-")]
         wants_exe = "windows-x86_64-exe" in win_targets
@@ -1663,11 +2056,16 @@ class Build:
                 f"~/rpmbuild/RPMS/{arch}/rustdesk-*.rpm")
             rpms = _glob.glob(rpm_glob)
             if rpms:
-                dest = os.path.join(
-                    self.src_dir, f"{basename}-{version}{suffix}.rpm")
+                name = f"{basename}-{version}{suffix}.rpm"
+                dest = os.path.join(self.src_dir, name)
                 shutil.move(rpms[0], dest)
                 built.append(dest)
-                self.log(f"  ✓ created {os.path.basename(dest)}")
+                os.makedirs(self.out_dir, exist_ok=True)
+                out = os.path.join(self.out_dir, name)
+                shutil.copy2(dest, out)
+                self.artifacts.append(out)
+                self.log(f"  ✓ created {name}")
+                self.log(f"  ✓ artifact: {out}")
             else:
                 self.log(f"  ! no .rpm found in ~/rpmbuild/RPMS/{arch}/ for {spec_name}")
 
@@ -1965,8 +2363,7 @@ class Build:
                          "hwcodec may fail without vcpkg FFmpeg headers")
 
             self.run(["rustup", "target", "add", target], check=False)
-            self.run(["cargo", "install", "cargo-ndk", "--version", "3.1.2", "--locked"],
-                     check=False)
+            self._ensure_cargo_install("cargo-ndk", "3.1.2")
             script = f"./flutter/{ndk}"
             bash = self._bash()
             # Build env: ensure cargo-ndk sees the correct NDK and bindgen
@@ -2387,10 +2784,14 @@ class Build:
             return
         appname = self.config.get("appname", "RustDesk")
         basename = self._output_basename()
-        # Only collect files whose base name starts with the app name or
-        # "rustdesk" — this avoids picking up dependency .deb files that
-        # appimage-builder downloads into appimage/ and other build dirs.
-        prefixes = tuple(p.lower() for p in {appname, "rustdesk", "app-"})
+        # Only collect files whose base name starts with the app name,
+        # file name (exename), or "rustdesk". App name and file name can
+        # differ (e.g. appname=fasterlinuxRPM, exename=fasterlinuxDEB) —
+        # packaging uses exename, so both must be accepted. Still skip
+        # dependency .deb files that appimage-builder downloads.
+        prefixes = tuple(
+            p.lower() for p in (appname, basename, "rustdesk", "app-") if p
+        )
         # Directories to skip entirely during collection.
         skip_dirs = {"appimage", "tmpdeb", ".git"}
         found = 0
@@ -2421,6 +2822,9 @@ class Build:
                         out_name = basename + f[3:]  # replace "app-" prefix
                 os.makedirs(self.out_dir, exist_ok=True)
                 dest = os.path.join(self.out_dir, out_name)
+                if dest in self.artifacts:
+                    found += 1
+                    continue
                 shutil.copy2(src, dest)
                 self.artifacts.append(dest)
                 self.log(f"  ✓ artifact: {dest}")
