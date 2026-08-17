@@ -242,15 +242,28 @@ function buildToggles() {
     `<label class="tg"><input type="checkbox" data-key="${k}"><span>${l}</span></label>`).join("");
 }
 
+const THEME_DEFAULTS = {
+  theme: "system",
+  themeDorO: "default",
+  themeColor: "#0071FF",
+  themeSurfaceLight: "#EFEFF2",
+  themeSurfaceDark: "#18191E",
+  themeMeColor: "#21790B",
+};
+
 function fillConfig(cfg) {
   state.config = cfg;
+  for (const [k, v] of Object.entries(THEME_DEFAULTS)) {
+    if (!cfg[k]) cfg[k] = v;
+  }
   $$("[data-key]").forEach(el => {
     const k = el.dataset.key;
     if (!(k in cfg)) return;
     if (el.type === "checkbox") el.checked = truthy(cfg[k]);
     else el.value = cfg[k] ?? "";
   });
-  syncColorPicker();
+  syncAllColorPickers();
+  updateThemeLive();
   restoreBrandingPreview(cfg);
   refreshPreview();
 }
@@ -283,7 +296,11 @@ async function refreshPreview() {
     `slogan : ${e.CUSTOM_SLOGAN || "(default: Powered by " + e.CUSTOM_APPNAME + ")"}\n` +
     `icon   : ${e.CUSTOM_ICON_FILE ? e.CUSTOM_ICON_FILE.split("/").pop() : "(default)"}\n` +
     `logo   : ${e.CUSTOM_LOGO_FILE ? e.CUSTOM_LOGO_FILE.split("/").pop() : "(default)"}\n` +
-    `theme  : ${e.CUSTOM_THEME_COLOR || "(default blue)"}\n` +
+    `theme  : ${e.CUSTOM_THEME_MODE || "system"} (${e.CUSTOM_THEME_DORO || "default"})\n` +
+    `accent : ${e.CUSTOM_THEME_COLOR || "(stock blue)"}\n` +
+    `light  : ${e.CUSTOM_THEME_SURFACE_LIGHT || "(stock)"}\n` +
+    `dark   : ${e.CUSTOM_THEME_SURFACE_DARK || "(stock)"}\n` +
+    `id/me  : ${e.CUSTOM_THEME_ME_COLOR || "(stock green)"}\n` +
     `flags  : delayFix=${e.CUSTOM_DELAY_FIX} hidecm=${e.CUSTOM_HIDE_CM} ` +
     `xOffline=${e.CUSTOM_X_OFFLINE}`;
 }
@@ -634,12 +651,7 @@ $("#recheck").addEventListener("click", async () => {
 
 boot();
 
-/* ── theme color picker ───────────────────────────────── */
-const cp = $("#themeColorPicker");
-const hue = $("#themeColorHue");
-const hex = $("#themeColorHex");
-const swatch = $("#themeColorSwatch");
-
+/* ── theme color pickers + live preview ───────────────── */
 function hslToHex(h, s, l) {
   s /= 100; l /= 100;
   const k = n => (n + h / 30) % 12;
@@ -650,7 +662,7 @@ function hslToHex(h, s, l) {
 }
 
 function hexToHue(hexVal) {
-  hexVal = hexVal.replace("#", "");
+  hexVal = (hexVal || "").replace("#", "");
   if (hexVal.length !== 6) return 212;
   const r = parseInt(hexVal.slice(0, 2), 16) / 255;
   const g = parseInt(hexVal.slice(2, 4), 16) / 255;
@@ -664,34 +676,140 @@ function hexToHue(hexVal) {
   return Math.round(h);
 }
 
-function syncColorPicker() {
-  const v = hex.value || "#0071FF";
-  cp.value = v;
-  hue.value = hexToHue(v);
-  swatch.style.background = v;
+function mixHex(a, b, t) {
+  const p = h => {
+    h = h.replace("#", "");
+    return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+  };
+  const [r1, g1, b1] = p(a), [r2, g2, b2] = p(b);
+  const c = (x, y) => Math.round(x + (y - x) * t).toString(16).padStart(2, "0");
+  return `#${c(r1, r2)}${c(g1, g2)}${c(b1, b2)}`.toUpperCase();
 }
 
-cp.addEventListener("input", () => {
-  hex.value = cp.value.toUpperCase();
-  hue.value = hexToHue(cp.value);
-  swatch.style.background = cp.value;
-  refreshPreview();
-});
+function colorPickerParts(row) {
+  return {
+    native: $("input[type=color]", row),
+    hue: $("input[type=range]", row),
+    hex: $("input[data-key]", row),
+    swatch: $(".color-swatch", row),
+    fallback: row.dataset.fallback || "#0071FF",
+  };
+}
 
-hue.addEventListener("input", () => {
-  const v = hslToHex(+hue.value, 80, 50);
-  hex.value = v;
-  cp.value = v;
-  swatch.style.background = v;
-  refreshPreview();
-});
+function applyPickerVisual(row, hexVal) {
+  const p = colorPickerParts(row);
+  const v = hexVal || p.fallback;
+  if (p.native) p.native.value = v;
+  if (p.hue) p.hue.value = hexToHue(v);
+  if (p.swatch) p.swatch.style.background = v;
+}
 
-hex.addEventListener("input", () => {
-  const v = hex.value.trim();
-  if (/^#[0-9A-Fa-f]{6}$/.test(v)) {
-    cp.value = v;
-    hue.value = hexToHue(v);
-    swatch.style.background = v;
+function syncAllColorPickers() {
+  $$(".color-picker[data-color]").forEach(row => {
+    const p = colorPickerParts(row);
+    applyPickerVisual(row, (p.hex && p.hex.value) || p.fallback);
+  });
+}
+
+function bindColorPickers() {
+  $$(".color-picker[data-color]").forEach(row => {
+    const p = colorPickerParts(row);
+    if (p.native) p.native.addEventListener("input", () => {
+      const v = p.native.value.toUpperCase();
+      if (p.hex) p.hex.value = v;
+      applyPickerVisual(row, v);
+      updateThemeLive();
+      refreshPreview();
+    });
+    if (p.hue) p.hue.addEventListener("input", () => {
+      const v = hslToHex(+p.hue.value, 80, 50);
+      if (p.hex) p.hex.value = v;
+      applyPickerVisual(row, v);
+      updateThemeLive();
+      refreshPreview();
+    });
+    if (p.hex) p.hex.addEventListener("input", () => {
+      const v = p.hex.value.trim();
+      if (/^#[0-9A-Fa-f]{6}$/.test(v)) {
+        applyPickerVisual(row, v.toUpperCase());
+        updateThemeLive();
+        refreshPreview();
+      }
+    });
+  });
+}
+
+function themeHex(key) {
+  const el = $(`[data-key="${key}"]`);
+  const v = (el && el.value || "").trim();
+  return /^#[0-9A-Fa-f]{6}$/.test(v) ? v.toUpperCase() : (THEME_DEFAULTS[key] || "#0071FF");
+}
+
+function hexRgb(h) {
+  h = (h || "").replace("#", "");
+  return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+}
+
+function luma(h) {
+  const [r, g, b] = hexRgb(h);
+  return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+}
+
+function tooClose(a, b) {
+  const [r1, g1, b1] = hexRgb(a), [r2, g2, b2] = hexRgb(b);
+  const dist = Math.hypot(r1 - r2, g1 - g2, b1 - b2);
+  return dist < 55 || Math.abs(luma(a) - luma(b)) < 0.14;
+}
+
+function contrastOn(fg, bg) {
+  if (!tooClose(fg, bg)) return fg;
+  return mixHex(fg, luma(bg) > 0.5 ? "#000000" : "#FFFFFF", 0.38);
+}
+
+function updateThemeLive() {
+  const win = $("#theme-live");
+  if (!win) return;
+  const mode = win.dataset.mode || "dark";
+  const accent = themeHex("themeColor");
+  const light = themeHex("themeSurfaceLight");
+  const dark = themeHex("themeSurfaceDark");
+  const me = themeHex("themeMeColor");
+  const surface = mode === "light" ? light : dark;
+  const card = surface;
+  const title = mode === "light" ? "#FFFFFF" : "#18191E";
+  win.style.setProperty("--tp-bg", surface);
+  win.style.setProperty("--tp-card", card);
+  win.style.setProperty("--tp-accent", accent);
+  win.style.setProperty("--tp-btn", contrastOn(accent, surface));
+  win.style.setProperty("--tp-me", me);
+  win.style.setProperty("--tp-title", title);
+  const app = $("[data-key=appname]");
+  if ($("#tp-app")) $("#tp-app").textContent = (app && app.value) || "App";
+  const lightBtn = $("#tp-light"), darkBtn = $("#tp-dark");
+  if (lightBtn) lightBtn.classList.toggle("is-on", mode === "light");
+  if (darkBtn) darkBtn.classList.toggle("is-on", mode === "dark");
+}
+
+function bindThemeLive() {
+  const setMode = mode => {
+    const win = $("#theme-live");
+    if (!win) return;
+    win.dataset.mode = mode;
+    updateThemeLive();
+  };
+  const lightBtn = $("#tp-light"), darkBtn = $("#tp-dark");
+  if (lightBtn) lightBtn.addEventListener("click", () => setMode("light"));
+  if (darkBtn) darkBtn.addEventListener("click", () => setMode("dark"));
+  const themeSel = $("[data-key=theme]");
+  if (themeSel) themeSel.addEventListener("change", () => {
+    if (themeSel.value === "light" || themeSel.value === "dark") setMode(themeSel.value);
     refreshPreview();
-  }
-});
+  });
+  const doro = $("[data-key=themeDorO]");
+  if (doro) doro.addEventListener("change", refreshPreview);
+  const app = $("[data-key=appname]");
+  if (app) app.addEventListener("input", updateThemeLive);
+}
+
+bindColorPickers();
+bindThemeLive();

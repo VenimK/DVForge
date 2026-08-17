@@ -111,12 +111,77 @@
             <label>Company<input data-key="compname"></label>
             <label>Slogan<input data-key="slogan" placeholder="blank = Powered by {appname}"></label>
             <label>Android app id<input data-key="androidappid" placeholder="blank = default"></label>
-            <label>Theme color</label>
-            <div class="color-picker">
-              <input type="color" id="themeColorPicker" value="#0071FF">
-              <input type="range" id="themeColorHue" min="0" max="360" value="212" class="hue-slider">
-              <input data-key="themeColor" id="themeColorHex" placeholder="#0071FF" spellcheck="false">
-              <span class="color-swatch" id="themeColorSwatch"></span>
+          </fieldset>
+
+          <fieldset>
+            <legend>Theme</legend>
+            <label>Appearance
+              <select data-key="theme">
+                <option value="system">System (follow OS)</option>
+                <option value="light">Light</option>
+                <option value="dark">Dark</option>
+              </select>
+            </label>
+            <label>Apply as
+              <select data-key="themeDorO">
+                <option value="default">Default — user can change it</option>
+                <option value="override">Override — locked in Settings</option>
+              </select>
+            </label>
+
+            <label>Accent</label>
+            <div class="color-picker" data-color="themeColor" data-fallback="#0071FF">
+              <input type="color" value="#0071FF">
+              <input type="range" min="0" max="360" value="212" class="hue-slider">
+              <input type="text" data-key="themeColor" placeholder="#0071FF" spellcheck="false">
+              <span class="color-swatch"></span>
+            </div>
+
+            <label>Light surface (rail, connection card, settings — title bar stays white)</label>
+            <div class="color-picker" data-color="themeSurfaceLight" data-fallback="#EFEFF2">
+              <input type="color" value="#EFEFF2">
+              <input type="range" min="0" max="360" value="240" class="hue-slider">
+              <input type="text" data-key="themeSurfaceLight" placeholder="#EFEFF2" spellcheck="false">
+              <span class="color-swatch"></span>
+            </div>
+
+            <label>Dark surface (rail, connection card, settings — title bar stays dark chrome)</label>
+            <div class="color-picker" data-color="themeSurfaceDark" data-fallback="#18191E">
+              <input type="color" value="#18191E">
+              <input type="range" min="0" max="360" value="230" class="hue-slider">
+              <input type="text" data-key="themeSurfaceDark" placeholder="#18191E" spellcheck="false">
+              <span class="color-swatch"></span>
+            </div>
+
+            <label>ID / “me” color</label>
+            <div class="color-picker" data-color="themeMeColor" data-fallback="#21790B">
+              <input type="color" value="#21790B">
+              <input type="range" min="0" max="360" value="110" class="hue-slider">
+              <input type="text" data-key="themeMeColor" placeholder="#21790B" spellcheck="false">
+              <span class="color-swatch"></span>
+            </div>
+
+            <div class="theme-live">
+              <div class="theme-live-bar">
+                <span>Client preview</span>
+                <button type="button" class="mini" id="tp-light">light</button>
+                <button type="button" class="mini" id="tp-dark">dark</button>
+              </div>
+              <div class="theme-live-window" id="theme-live" data-mode="dark">
+                <div class="tp-title">
+                  <span class="tp-dot"></span>
+                  <span class="tp-app" id="tp-app">App</span>
+                </div>
+                <div class="tp-body">
+                  <div class="tp-card">
+                    <div class="tp-id" id="tp-id">1 234 567</div>
+                    <div class="tp-sub">ready to connect</div>
+                    <button type="button" class="tp-btn" id="tp-btn">Connect</button>
+                  </div>
+                </div>
+              </div>
+              <p class="theme-live-hint">Accent, surfaces and ID color are compiled in.
+                Appearance is written to <code>custom_.txt</code> (default or locked).</p>
             </div>
           </fieldset>
 

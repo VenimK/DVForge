@@ -10,10 +10,31 @@ custom_.txt and (on Android) embedded into the native code. See SKILL.md §4.1.
 import base64
 import json
 import os
+import re
 
 
 def _b(val):
     return "true" if val in (True, "on") else "false"
+
+
+def _hex(val):
+    """Normalize a #RRGGBB / RRGGBB string, or '' if missing/invalid."""
+    s = (val or "").strip()
+    if s.startswith("#"):
+        s = s[1:]
+    if re.fullmatch(r"[0-9A-Fa-f]{6}", s):
+        return "#" + s.upper()
+    return ""
+
+
+def _theme_mode(val):
+    v = (val or "system").strip().lower()
+    return v if v in ("system", "light", "dark") else "system"
+
+
+def _theme_doro(val):
+    v = (val or "default").strip().lower()
+    return v if v in ("default", "override") else "default"
 
 
 def _project_root() -> str:
@@ -80,7 +101,12 @@ def build_custom_env(cfg: dict) -> dict:
     slogan = d.get("slogan", "") or ""
     icon_file = resolve_branding_path(d.get("iconFile", "") or "", "icon")
     logo_file = resolve_branding_path(d.get("logoFile", "") or "", "logo")
-    theme_color = d.get("themeColor", "") or ""
+    theme_color = _hex(d.get("themeColor", "") or "")
+    theme_surface_light = _hex(d.get("themeSurfaceLight", "") or "")
+    theme_surface_dark = _hex(d.get("themeSurfaceDark", "") or "")
+    theme_me_color = _hex(d.get("themeMeColor", "") or "")
+    theme_mode = _theme_mode(d.get("theme", "system"))
+    theme_doro = _theme_doro(d.get("themeDorO", "default"))
 
     env = {
         "CUSTOM_APPNAME": appname,
@@ -96,6 +122,11 @@ def build_custom_env(cfg: dict) -> dict:
         "CUSTOM_ICON_FILE": icon_file,
         "CUSTOM_LOGO_FILE": logo_file,
         "CUSTOM_THEME_COLOR": theme_color,
+        "CUSTOM_THEME_SURFACE_LIGHT": theme_surface_light,
+        "CUSTOM_THEME_SURFACE_DARK": theme_surface_dark,
+        "CUSTOM_THEME_ME_COLOR": theme_me_color,
+        "CUSTOM_THEME_MODE": theme_mode,
+        "CUSTOM_THEME_DORO": theme_doro,
         "CUSTOM_DELAY_FIX": _b(d.get("delayFix", False)),
         "CUSTOM_HIDE_CM": _b(d.get("hidecm", False)),
         "CUSTOM_X_OFFLINE": _b(d.get("xOffline", False)),
@@ -152,6 +183,13 @@ def build_custom_env(cfg: dict) -> dict:
 
     custom["default-settings"] = ds
     custom["override-settings"] = {}
+
+    # Appearance: RustDesk reads option key "theme" (light|dark|system).
+    # override-settings locks the Settings UI via isOptionFixed("theme").
+    dest = (custom["override-settings"]
+            if theme_doro == "override"
+            else custom["default-settings"])
+    dest["theme"] = theme_mode
 
     for line in (d.get("defaultManual", "") or "").splitlines():
         line = line.strip()
