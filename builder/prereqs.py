@@ -718,6 +718,50 @@ def check_potrace():
     return _status(False, hint=_install_hint("potrace"))
 
 
+def check_azure_cli():
+    """Azure CLI - optional, provides the sign-in Trusted Signing needs.
+
+    Reports whether a session is actually live, not merely whether the tool is
+    installed: `az` being present but logged out fails at sign time, which is
+    the more confusing outcome.
+    """
+    if _system() != "Windows":
+        return _status(False, note="Windows only (code signing).")
+    p = _which("az")
+    if not p:
+        return _status(False,
+                       note="Optional: needed to sign in for Trusted Signing.",
+                       hint="Install from the Toolchain panel, or: "
+                            "winget install --id Microsoft.AzureCLI -e")
+    from . import signing as _signing
+    ok, why = _signing.azure_credential_status()
+    if ok:
+        return _status(True, why, p,
+                       note="Signed in - Trusted Signing can authenticate.")
+    return _status(True, "installed, not signed in", p,
+                   note="Installed but no active session.",
+                   hint="Run: az login   (then restart DVForge so it picks up "
+                        "the session)")
+
+
+def check_trusted_signing():
+    """Microsoft Trusted Signing client - optional, only for code signing.
+
+    Nothing in a build requires it; it is listed so the Toolchain panel can
+    offer the install to people who sign their output.
+    """
+    from . import signing as _signing
+    dlib = _signing.find_dlib()
+    if dlib:
+        return _status(True, "Trusted Signing client", dlib,
+                       note="Optional: dispatch library for signing Windows "
+                            "builds with Microsoft Trusted Signing.")
+    return _status(False, note="Optional: only needed to code-sign Windows "
+                               "builds with Microsoft Trusted Signing.",
+                   hint="Install from the Toolchain panel, or: "
+                        "nuget install Microsoft.ArtifactSigning.Client")
+
+
 CHECKS = {
     "git": check_git,
     "python": check_python,
@@ -739,10 +783,14 @@ CHECKS = {
     "imagemagick": check_imagemagick,
     "iconutil": check_iconutil,
     "potrace": check_potrace,
+    "azure_cli": check_azure_cli,
+    "trusted_signing": check_trusted_signing,
 }
 
 LABELS = {
     "git": "Git",
+    "azure_cli": "Azure CLI (Trusted Signing sign-in)",
+    "trusted_signing": "Artifact Signing client (code signing)",
     "python": "Python 3",
     "rust": "Rust toolchain (rustc + cargo)",
     "rust_target": "Rust target (MSVC vs GNU)",
