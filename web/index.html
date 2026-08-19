@@ -233,6 +233,53 @@
             <div class="toggles" id="flag-toggles"></div>
           </fieldset>
 
+          <fieldset id="signing-box">
+            <legend>Code signing</legend>
+            <p class="preview-note">Applies to this DVForge session only. Nothing here
+              is written to the config file &mdash; re-enter it after a restart.</p>
+            <label class="tg"><input type="checkbox" data-sign="signEnabled"><span>Sign this build</span></label>
+            <div id="sign-fields" hidden>
+              <label>Method
+                <select data-sign="signMode">
+                  <option value="pfx">Certificate file (.pfx)</option>
+                  <option value="store">Windows certificate store</option>
+                  <option value="trusted-signing">Microsoft Trusted Signing</option>
+                </select>
+              </label>
+              <div data-mode="pfx">
+                <label>Certificate file<input data-sign="signPfxPath" placeholder="C:\certs\mycert.pfx"></label>
+                <label>Password<input type="password" data-sign="signPfxPassword" placeholder="or set DVFORGE_SIGN_PASSWORD"></label>
+              </div>
+              <div data-mode="store" hidden>
+                <label>Thumbprint (SHA-1)<input data-sign="signThumbprint" placeholder="40 hex characters"></label>
+              </div>
+              <div data-mode="trusted-signing" hidden>
+                <label>Endpoint region
+                  <select data-sign="signRegion">
+                    <option value="eastus">East US</option>
+                    <option value="eastus2">East US 2</option>
+                    <option value="westus">West US</option>
+                    <option value="westus2">West US 2</option>
+                    <option value="westcentralus">West Central US</option>
+                    <option value="northeurope">North Europe</option>
+                    <option value="westeurope">West Europe</option>
+                  </select>
+                </label>
+                <label>Signing account name<input data-sign="signAccountName"></label>
+                <label>Certificate profile<input data-sign="signCertProfile"></label>
+                <label>Correlation Id <span class="preview-note">(optional)</span><input data-sign="signCorrelationId"></label>
+                <label>Dispatch library<input data-sign="signDlibPath" placeholder="auto-detected from the NuGet cache"></label>
+                <label>Custom endpoint <span class="preview-note">(overrides region)</span><input data-sign="signEndpoint" placeholder="https://&lt;region&gt;.codesigning.azure.net/"></label>
+                <p class="preview-note" id="sign-azure-note">Azure sign-in is checked when you press Test signing.</p>
+              </div>
+              <label>Timestamp URL<input data-sign="signTimestampUrl" placeholder="http://timestamp.acs.microsoft.com"></label>
+              <div class="form-actions">
+                <button class="btn" id="btn-test-sign" type="button">Test signing</button>
+                <span class="save-note" id="sign-note"></span>
+              </div>
+            </div>
+          </fieldset>
+
           <div class="form-actions">
             <button class="btn primary" id="btn-save-config">Save config</button>
             <span class="save-note" id="save-note"></span>

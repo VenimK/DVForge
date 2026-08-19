@@ -25,7 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from builder import detect, prereqs, config_gen, orchestrator, toolchains  # noqa: E402
+from builder import signing as signing_mod, detect, prereqs, config_gen, orchestrator, toolchains  # noqa: E402
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(ROOT, "web")
@@ -78,7 +78,7 @@ class BuildSession:
             if q in self.subscribers:
                 self.subscribers.remove(q)
 
-    def start(self, version, target_ids, config, dry_run=False):
+    def start(self, version, target_ids, config, dry_run=False, signing=None):
         if self.running:
             return False, "a build is already running"
         with self.lock:
@@ -86,7 +86,7 @@ class BuildSession:
             self.result = None
         self.build = orchestrator.Build(
             version, target_ids, config, WORKSPACE,
-            log=self._emit, dry_run=dry_run,
+            log=self._emit, dry_run=dry_run, signing=signing,
         )
         self.running = True
 
@@ -224,6 +224,15 @@ class Handler(BaseHTTPRequestHandler):
                 "running": SESSION.running,
                 "result": SESSION.result,
             })
+        if path == "/api/sign/status":
+            st = signing_mod.find_signtool()
+            dlib = signing_mod.find_dlib()
+            az_ok, az_why = signing_mod.azure_credential_status()
+            return self._send_json({"signtool": st or "",
+                                    "available": bool(st),
+                                    "dlib": dlib or "",
+                                    "azureOk": az_ok,
+                                    "azure": az_why})
         if path == "/api/toolchains":
             host = detect.host_info()
             inst = toolchains.installable(host["os"], detect.normalize_arch(host["arch"]))
@@ -297,8 +306,31 @@ class Handler(BaseHTTPRequestHandler):
             version = data.get("version") or "latest"
             dry = bool(data.get("dry_run", False))
             cfg = config_gen.load_config(CONFIG_PATH)
-            ok, msg = SESSION.start(version, targets, cfg, dry_run=dry)
+            # Signing settings live only for this request/build. They are
+            # deliberately NOT written to CONFIG_PATH - the config file is
+            # tracked in git and pushed to a public remote.
+            sign_cfg = signing_mod.SigningConfig.from_dict(data.get("signing"))
+            if sign_cfg.enabled:
+                problems = sign_cfg.validate()
+                if problems:
+                    return self._send_json(
+                        {"error": "signing is enabled but not usable: "
+                                  + "; ".join(problems)}, 400)
+            ok, msg = SESSION.start(version, targets, cfg, dry_run=dry,
+                                    signing=sign_cfg)
             return self._send_json({"ok": ok, "message": msg}, 200 if ok else 409)
+
+        if path == "/api/sign/test":
+            # Prove the credentials work before committing to a build.
+            # Signs a throwaway copy of a system binary in a temp dir;
+            # nothing on the machine is modified and nothing is stored.
+            sign_cfg = signing_mod.SigningConfig.from_dict(data.get("signing"))
+            if not sign_cfg.enabled:
+                return self._send_json(
+                    {"ok": False, "message": "signing is not enabled"})
+            ok, message = signing_mod.test_sign(sign_cfg)
+            return self._send_json({"ok": ok, "message": message,
+                                    "mode": sign_cfg.describe()})
 
         if path == "/api/build/cancel":
             return self._send_json({"ok": SESSION.cancel()})
