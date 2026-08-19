@@ -25,7 +25,7 @@ import time
 import zipfile
 import platform as _platform
 
-from . import customize, detect, prereqs, toolchains
+from . import customize, detect, prereqs, signing, toolchains
 
 RUSTDESK_REPO = "https://github.com/rustdesk/rustdesk.git"
 WINDOWS_FLUTTER_ENGINE_URL = (
@@ -125,13 +125,15 @@ class BuildCancelled(Exception):
 
 class Build:
     def __init__(self, version, target_ids, config, workspace,
-                 log=None, dry_run=False):
+                 log=None, dry_run=False, signing=None):
         self.version = version.lstrip("v")
         self.target_ids = target_ids
         self.config = config
         self.workspace = os.path.abspath(workspace)
         self._log = log or (lambda m: print(m))
         self.dry_run = dry_run
+        # Session-only: signing credentials are never persisted.
+        self.signing = signing
         self.cancel_event = threading.Event()
 
         self.src_dir = os.path.join(self.workspace, "rustdesk-src")
@@ -1495,6 +1497,55 @@ class Build:
                 f"WixToolset.Sdk 4.0.5 (install .NET SDK + `dotnet restore`), "
                 f"or missing WixToolset.DUtil/WcaUtil under res/msi/packages.")
 
+        # CustomActions.dll runs elevated during install - it registers the
+        # service, adds the firewall rules and installs the printer - so it is
+        # arguably more worth signing than the app binaries themselves.
+        #
+        # WiX seals it into the package via
+        #   <Binary SourceFile="$(var.CustomActions.TargetDir)...dll" />
+        # where TargetDir is resolved by MSBuild from the ProjectReference, so
+        # the harvest path depends on how the project was built. Rather than
+        # guess it, sign every copy msbuild produced and run the build again:
+        # WiX sees a changed Binary source and re-harvests, while the C++
+        # project stays up to date (its output is now newer than its inputs)
+        # and is not relinked. Costs one extra WiX pass, which is seconds.
+        if self.signing is not None and self.signing.enabled:
+            self.log("\n=== Code signing: MSI custom actions ===")
+            ca_dlls = [c for c in (
+                os.path.join(msi_dir, "x64", "Release", "CustomActions.dll"),
+                os.path.join(msi_dir, "CustomActions", "x64", "Release",
+                             "CustomActions.dll"),
+            ) if os.path.isfile(c)]
+            if not ca_dlls:
+                raise RuntimeError(
+                    "CustomActions.dll not found after the MSI build - cannot "
+                    "sign the custom actions")
+            self._sign_paths(ca_dlls, "CustomActions.dll")
+            stamps = {c: (os.path.getmtime(c), os.path.getsize(c))
+                      for c in ca_dlls}
+
+            self.log("  \u00b7 rebuilding the package so WiX picks up the "
+                     "signed DLL")
+            rc = self.run([msbuild, "msi.sln",
+                           "-p:Configuration=Release", "-p:Platform=x64",
+                           "/p:TargetVersion=Windows10",
+                           "/m"],
+                          cwd=msi_dir, check=False)
+            if rc != 0:
+                raise RuntimeError(
+                    f"MSI rebuild after signing failed (exit {rc})")
+
+            # If the C++ project relinked, the signature is gone and the MSI
+            # now carries an unsigned custom-action DLL. Fail rather than ship.
+            for c, before in stamps.items():
+                if not os.path.isfile(c) or \
+                        (os.path.getmtime(c), os.path.getsize(c)) != before:
+                    raise RuntimeError(
+                        "CustomActions.dll was rebuilt after signing, so the "
+                        "MSI carries an unsigned custom-action DLL. "
+                        "Build stopped.")
+            self.log("  \u2713 signed CustomActions.dll harvested intact")
+
         # 4. Collect the MSI
         msi_src = os.path.join(msi_dir, "Package", "bin", "x64", "Release",
                                "en-us", "Package.msi")
@@ -1993,6 +2044,8 @@ class Build:
             env = self._env()
             customize.write_custom_txt(release, env, log=self.log)
             self._ensure_windows_printer_driver(release)
+            self._install_open_printer_adapter(release)
+            self._sign_release_binaries(release)
 
         basename = self._output_basename()
         version = self.version
@@ -2026,6 +2079,121 @@ class Build:
                 self.log("  ! portable exe not found — portable pack may have failed")
             # Also copy the Release directory as a fallback (loose files)
             self._collect_dir(release, "windows", "Release")
+
+        self._sign_final_artifacts()
+    def _install_open_printer_adapter(self, release):
+        """Build printer-adapter/ and install it over RustDesk's adapter.
+
+        RustDesk's own `printer_driver_adapter.dll` verifies the calling
+        executable's Authenticode signature against a hardcoded vendor
+        allow-list (it links `codesign-verify-rs` and imports `WinVerifyTrust`).
+        A custom-branded build is never on that list, so its `init()` returns
+        non-zero and the server logs:
+
+            printer service init failed: Failed to init printer driver
+
+        which disables remote printing entirely. `printer-adapter/` is a
+        clean-room reimplementation of the same four-function ABI declared in
+        `src/server/printer_service.rs`, with no signature check.
+
+        Must run AFTER _ensure_windows_printer_driver() so it replaces the
+        downloaded DLL, and BEFORE the MSI harvest and portable packer so the
+        replacement ships inside both installers.
+
+        Non-fatal: on failure the build keeps RustDesk's adapter and still
+        produces a working client, minus remote printing.
+        """
+        crate = os.path.join(self._project_root(), "printer-adapter")
+        manifest = os.path.join(crate, "Cargo.toml")
+        if not os.path.isfile(manifest):
+            self.log("  ! printer-adapter/ not found - keeping RustDesk's "
+                     "signature-checked adapter (remote printing will not work)")
+            return
+
+        self.log("\n=== Open printer adapter ===")
+        if self.dry_run:
+            self.log(f"  [dry-run] would cargo build {manifest}")
+            self.log(f"  [dry-run] would install the DLL into {release}")
+            return
+
+        rc = self.run(["cargo", "build", "--release", "--locked",
+                       "--manifest-path", manifest],
+                      cwd=crate, check=False)
+        if rc != 0:
+            self.log(f"  ! cargo build failed (exit {rc}) - keeping RustDesk's "
+                     "adapter; remote printing will not work in this build")
+            return
+
+        built = os.path.join(crate, "target", "release",
+                             "printer_driver_adapter.dll")
+        if not os.path.isfile(built):
+            self.log("  ! cargo reported success but the DLL is missing")
+            return
+
+        try:
+            dst = os.path.join(release, "printer_driver_adapter.dll")
+            shutil.copy2(built, dst)
+            self.log(f"  ✓ printer_driver_adapter.dll ({os.path.getsize(dst)} "
+                     "bytes) - replaces the signature-checked build")
+        except OSError as exc:
+            self.log(f"  ! could not install the adapter ({exc})")
+
+    def _sign_paths(self, paths, what):
+        """Sign `paths` with the session's signing config. Strict when enabled.
+
+        Signing is opt-in: with no config, or signing disabled, this is a no-op
+        and the build is byte-identical to an unsigned one. But once someone has
+        explicitly asked for signed output, silently shipping unsigned binaries
+        is worse than failing, so a signing error aborts the build. The
+        pre-flight test sign exists so that failure happens before the build
+        starts, not forty minutes in.
+        """
+        cfg = self.signing
+        if cfg is None or not cfg.enabled:
+            return
+        paths = [p for p in paths if os.path.isfile(p)]
+        if not paths:
+            return
+        if self.dry_run:
+            self.log(f"  [dry-run] would sign {len(paths)} {what}")
+            return
+        ok, msg = signing.sign_files(cfg, paths, log=self.log)
+        if not ok:
+            raise RuntimeError(
+                f"code signing failed for {what}: {msg}. "
+                "Signing was enabled for this build, so the build is stopped "
+                "rather than shipping unsigned binaries.")
+        self.log(f"  ✓ signed {len(paths)} {what}")
+
+    def _sign_release_binaries(self, release):
+        """Sign every exe/dll in the Flutter Release folder.
+
+        Must run BEFORE the MSI harvest and the portable packer consume this
+        folder. Sign afterwards and the installers are signed on the outside
+        while every binary they carry is unsigned.
+        """
+        cfg = self.signing
+        if cfg is None or not cfg.enabled:
+            return
+        self.log("\n=== Code signing: payload ===")
+        self.log(f"  mode: {cfg.describe()}")
+        self._sign_paths(signing.collect_signable(release), "payload binaries")
+
+    def _sign_final_artifacts(self):
+        """Sign the finished installers (MSI, portable exe).
+
+        Runs last, on whatever landed in self.artifacts, so it covers every
+        output the build actually produced.
+        """
+        cfg = self.signing
+        if cfg is None or not cfg.enabled:
+            return
+        targets = [a for a in self.artifacts
+                   if a.lower().endswith((".exe", ".msi"))]
+        if not targets:
+            return
+        self.log("\n=== Code signing: installers ===")
+        self._sign_paths(targets, "installer(s)")
 
     def _pack_windows_portable(self, release, version):
         """Run libs/portable/generate.py ourselves (mirrors build.py's own

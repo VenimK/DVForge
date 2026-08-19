@@ -55,6 +55,10 @@ SIZE_HINTS = {
     "sccache":     {"download": "~30 MB",  "disk": "~100 MB", "version": "0.11.0"},
     "imagemagick": {"download": "~60 MB",  "disk": "~200 MB", "version": "7.x"},
     "potrace":     {"download": "~1 MB",   "disk": "~5 MB",   "version": "1.16"},
+    "azure_cli":   {"download": "~70 MB", "disk": "~1 GB",
+                    "version": "latest"},
+    "trusted_signing": {"download": "~15 MB", "disk": "~40 MB",
+                        "version": "Trusted Signing client"},
 }
 
 WIN = platform.system() == "Windows"
@@ -170,6 +174,38 @@ TOOLS = {
     # NuGet CLI + nuget.org feed — restore WiX CustomActions packages for MSI.
     # Chocolatey nuget often ships with zero package sources; install step
     # always re-registers nuget.org.
+    # Optional: only needed to code-sign builds with Microsoft Trusted Signing.
+    # Nothing requires it, so preflight never asks for it - it shows up in the
+    # Toolchain panel for people who sign, and is ignored by everyone else.
+    # Optional: Trusted Signing authenticates through Azure Entra ID rather
+    # than a static token, so signing needs either an `az login` session or a
+    # service principal in the environment. Offered here so the sign-in path
+    # is installable from the Toolchain panel like everything else.
+    "azure_cli": {
+        "label": "Azure CLI (optional, for Trusted Signing sign-in)",
+        "kind": "package",
+        "marker": "az",
+        "packages": {
+            "Windows": ("winget", [
+                "install", "--id", "Microsoft.AzureCLI", "-e",
+                "--accept-source-agreements",
+                "--accept-package-agreements",
+                "--disable-interactivity",
+            ]),
+        },
+    },
+    "trusted_signing": {
+        "label": "Artifact Signing client (optional, for code signing)",
+        "kind": "nuget_package",
+        # Microsoft renamed this: Trusted Signing / Azure Code Signing is now
+        # "Artifact Signing". Try the current id first and fall back to the
+        # older ones, so this keeps working on either side of the rename.
+        "packages_try": [
+            "Microsoft.ArtifactSigning.Client",
+            "Azure.CodeSigning.Client",
+            "Azure.CodeSigning.Sdk",
+        ],
+    },
     "nuget": {
         "label": "NuGet CLI (MSI / WiX packages)",
         "kind": "nuget",
@@ -399,6 +435,12 @@ def installable(host_os=None, host_arch=None):
         elif spec["kind"] == "vs":
             if host_os != "Windows":
                 ok, reason = False, "Visual Studio Build Tools are Windows-only"
+        elif spec["kind"] == "nuget_package":
+            if host_os != "Windows":
+                ok, reason = False, "code signing is Windows-only"
+            elif not shutil.which("nuget"):
+                ok, reason = (False,
+                              "needs the NuGet CLI - install that first")
         elif spec["kind"] == "nuget":
             if host_os != "Windows":
                 ok, reason = False, "NuGet CLI is only needed for Windows MSI builds"
@@ -953,6 +995,62 @@ def install_one(tid, root, log, cancelled=lambda: False):
             os.environ["PATH"] = env_path[0] + os.pathsep + os.environ.get("PATH", "")
         return {"tool": tid, "home": os.path.dirname(found) if (tid == "imagemagick" and found) else "",
                 "env": {"vars": {}, "path": env_path}}
+
+    if spec["kind"] == "nuget_package":
+        # Drop a NuGet package into .toolchains/<tid>/ so installed_info()
+        # sees it and the UI can size and remove it like any other toolchain.
+        home = os.path.join(tools_dir(root), tid)
+        os.makedirs(home, exist_ok=True)
+        nuget_exe = shutil.which("nuget")
+        if not nuget_exe:
+            raise RuntimeError(
+                "NuGet CLI not found. Install the 'NuGet CLI' toolchain first, "
+                "then retry.")
+
+        def _try(pkg):
+            """Install one candidate. Returns (ok, last_output_line)."""
+            log(f"  installing {pkg} into {home}")
+            proc = subprocess.run(
+                [nuget_exe, "install", pkg,
+                 "-OutputDirectory", home,
+                 "-Source", "https://api.nuget.org/v3/index.json",
+                 "-NonInteractive"],
+                capture_output=True)
+            out = ((proc.stdout or b"") + b"\n" + (proc.stderr or b"")
+                   ).decode("utf-8", "replace")
+            for line in out.splitlines():
+                line = line.rstrip()
+                if line:
+                    log(f"    {line}")
+            # nuget can report "Unable to find package" and still exit 0, so
+            # trust the text as well as the exit code.
+            if proc.returncode != 0 or "Unable to find package" in out:
+                tail = [l for l in out.splitlines() if l.strip()]
+                return False, (tail[-1] if tail else f"exit {proc.returncode}")
+            return True, ""
+
+        errors = []
+        installed = None
+        for pkg in spec["packages_try"]:
+            ok, why = _try(pkg)
+            if ok:
+                installed = pkg
+                break
+            errors.append(f"{pkg}: {why}")
+        if not installed:
+            raise RuntimeError("could not install the signing client. "
+                               + "; ".join(errors))
+
+        hits = []
+        for dirpath, _dirs, files in os.walk(home):
+            for f in files:
+                if f.lower().endswith("dlib.dll"):
+                    hits.append(os.path.join(dirpath, f))
+        if not hits:
+            raise RuntimeError(
+                f"{installed} installed but no *Dlib.dll was found in it")
+        log(f"  \u2713 dispatch library: {sorted(hits)[-1]}")
+        return {"tool": tid, "home": home, "env": {"vars": {}, "path": []}}
 
     if spec["kind"] == "nuget":
         # Install NuGet CLI (if needed) and always ensure nuget.org is registered.
