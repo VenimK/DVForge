@@ -1065,6 +1065,84 @@ def _apply_windows_build_fix(src, log):
         log("  · patched build.py: python3 -> sys.executable (Windows fix)")
 
 
+def _apply_printer_port(src, env, log):
+    """Point the remote printer at a file port the open adapter can read.
+
+    Stock RustDesk creates the printer's port as a *named* Local Port
+    ("<App> Printer"). The rendered job then flows through their render filter
+    into their closed adapter, which we cannot read from. Repointing the port at
+    a file path makes the spooler write the job straight to disk, where
+    printer-adapter/ collects it.
+
+    There are TWO independent implementations of the printer setup and both
+    must be patched, or the printer silently comes back on the wrong port:
+
+      1. libs/remote_printer/src/lib.rs  - Rust, used by
+         `--install-remote-printer` and the in-app Settings button.
+      2. res/msi/CustomActions/RemotePrinter.cpp - a full C++ reimplementation
+         used by the MSI's InstallPrinter custom action. This is the one that
+         runs during a normal installer run.
+
+    Only the PORT changes. The printer name stays "<App> Printer" and the
+    driver stays "RustDesk v4 Printer Driver", which is signed by Microsoft,
+    not RustDesk, and does not care who calls it.
+
+    Must run AFTER _apply_appname(), which substitutes the app name into both
+    files.
+    """
+    app = env.get("CUSTOM_APPNAME") or "RustDesk"
+    # C/C++ and Rust string literals both need the backslashes doubled.
+    literal = "C:\\\\ProgramData\\\\%s\\\\printer-spool\\\\job.prn" % app
+
+    # -- 1. Rust ----------------------------------------------------------
+    rs = os.path.join(src, "libs", "remote_printer", "src", "lib.rs")
+    if not os.path.isfile(rs):
+        log("  ! remote_printer/src/lib.rs not found - Rust printer port unchanged")
+    else:
+        t = _read(rs)
+        if "printer-spool" in t:
+            log("  \u00b7 Rust printer port already points at the spool file")
+        else:
+            old = ('fn get_port_name(app_name: &str) -> Vec<u16> {\n'
+                   '    format!("{} Printer", app_name)')
+            new = ('fn get_port_name(app_name: &str) -> Vec<u16> {\n'
+                   '    // DVForge: a Local Port whose NAME IS A FILE PATH makes the\n'
+                   '    // spooler write the rendered job straight to that file, where\n'
+                   '    // the open printer adapter collects it.\n'
+                   '    let base = std::env::var("ProgramData")\n'
+                   '        .unwrap_or_else(|_| "C:\\\\ProgramData".to_string());\n'
+                   '    let dir = format!("{}\\\\{}\\\\printer-spool", base, app_name);\n'
+                   '    let _ = std::fs::create_dir_all(&dir);\n'
+                   '    format!("{}\\\\job.prn", dir)')
+            if old not in t:
+                log("  ! get_port_name() not in the expected form - "
+                    "Rust printer port unchanged")
+            else:
+                _write(rs, t.replace(old, new, 1))
+                log("  \u00b7 Rust printer port -> %ProgramData%/<app>/printer-spool/job.prn")
+
+    # -- 2. C++ MSI custom action -----------------------------------------
+    cpp = os.path.join(src, "res", "msi", "CustomActions", "RemotePrinter.cpp")
+    if not os.path.isfile(cpp):
+        log("  ! RemotePrinter.cpp not found - MSI will install the printer "
+            "on the wrong port and capture will not work")
+        return
+    t = _read(cpp)
+    if "printer-spool" in t:
+        log("  \u00b7 MSI printer port already points at the spool file")
+        return
+    # Replace only RD_PRINTER_PORT. RD_PRINTER_NAME must keep its own value,
+    # so anchor on the identifier rather than the shared literal.
+    pattern = r'(RD_PRINTER_PORT\s*=\s*)L"[^"]*"'
+    new_t, n = re.subn(pattern, lambda m: m.group(1) + 'L"%s"' % literal, t, count=1)
+    if n != 1:
+        log("  ! RD_PRINTER_PORT not found in RemotePrinter.cpp - MSI will "
+            "install the printer on the wrong port")
+        return
+    _write(cpp, new_t)
+    log("  \u00b7 MSI printer port -> %ProgramData%/<app>/printer-spool/job.prn")
+
+
 def apply(src_dir, platform, env, patches_dir, log=print):
     """
     Apply all customizations for `platform` in-place on `src_dir`.
@@ -1081,6 +1159,8 @@ def apply(src_dir, platform, env, patches_dir, log=print):
     if platform == "windows":
         _apply_windows_build_fix(src_dir, log)
     _apply_appname(src_dir, env, platform, log)
+    if platform == "windows":
+        _apply_printer_port(src_dir, env, log)
     _apply_company(src_dir, env, platform, log)
     _apply_flags(src_dir, env, patches_dir, log)
     _apply_gpu_texture_fix(src_dir, log)
