@@ -599,6 +599,7 @@ async function startBuild(dry) {
     }
   }
 
+  payload.signing = collectSigning();
   const r = await api("/api/build/start", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -813,3 +814,82 @@ function bindThemeLive() {
 
 bindColorPickers();
 bindThemeLive();
+
+/* ── code signing (session only, never persisted) ─────── */
+// These inputs use data-sign, not data-key, so collectConfig() cannot pick
+// them up and they never reach configs/RustDesk.json.
+function collectSigning() {
+  const out = {};
+  $$("[data-sign]").forEach(el => {
+    out[el.dataset.sign] = el.type === "checkbox" ? el.checked : el.value.trim();
+  });
+  return out;
+}
+
+function syncSigningUi() {
+  const on = $("[data-sign=signEnabled]")?.checked;
+  const box = $("#sign-fields");
+  if (box) box.hidden = !on;
+  const mode = $("[data-sign=signMode]")?.value || "pfx";
+  $$("#sign-fields [data-mode]").forEach(el => {
+    el.hidden = el.dataset.mode !== mode;
+  });
+}
+
+async function testSigning() {
+  const note = $("#sign-note");
+  const btn = $("#btn-test-sign");
+  note.textContent = "signing a throwaway file…";
+  btn.disabled = true;
+  try {
+    const r = await api("/api/sign/test", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ signing: collectSigning() }),
+    });
+    note.textContent = (r.ok ? "OK — " : "failed — ") + (r.message || "");
+    note.style.color = r.ok ? "" : "var(--err, #c33)";
+  } catch (e) {
+    note.textContent = "failed — " + e;
+    note.style.color = "var(--err, #c33)";
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+document.addEventListener("change", e => {
+  if (e.target.matches("[data-sign=signEnabled], [data-sign=signMode]")) {
+    syncSigningUi();
+    refreshSignStatus();
+  }
+});
+document.addEventListener("click", e => {
+  if (e.target.id === "btn-test-sign") testSigning();
+});
+document.addEventListener("DOMContentLoaded", () => {
+  syncSigningUi();
+  refreshSignStatus();
+});
+
+// Trusted Signing needs two things DVForge cannot supply itself: the dispatch
+// library, and an Azure sign-in. Report both up front rather than letting the
+// build discover them.
+async function refreshSignStatus() {
+  const note = $("#sign-azure-note");
+  if (!note) return;
+  try {
+    const s = await api("/api/sign/status");
+    const bits = [];
+    if (s.dlib) {
+      bits.push("Dispatch library found.");
+    } else {
+      bits.push("Dispatch library missing \u2014 install " +
+                "\u201cTrusted Signing client\u201d in the Toolchain panel, " +
+                "or set the path below.");
+    }
+    bits.push(s.azureOk ? ("Azure: " + s.azure) : ("Azure: " + s.azure));
+    note.textContent = bits.join(" ");
+    note.style.color = (s.dlib && s.azureOk) ? "" : "var(--warn, #b8860b)";
+  } catch (e) {
+    note.textContent = "could not check signing prerequisites: " + e;
+  }
+}
