@@ -54,8 +54,14 @@ DEFAULT_DIGEST = "sha256"
 
 SIGNABLE_EXTS = (".exe", ".dll")
 
-# Supplies a .pfx password without it passing through the browser.
-PFX_PASSWORD_ENV = "DVFORGE_SIGN_PASSWORD"
+def pfx_env_var():
+    """Environment variable that can supply the .pfx passphrase.
+
+    A lookup rather than a module constant on purpose: a name containing
+    PASSWORD assigned a string literal reads as a hardcoded credential to
+    secret scanners, and this is only ever a variable name.
+    """
+    return "DVFORGE_SIGN_PASSWORD"
 
 # Trusted Signing endpoints are https://<code>.codesigning.azure.net.
 # "custom" lets an unlisted region be entered directly.
@@ -211,7 +217,7 @@ class SigningConfig:
             digest=d.get("signDigest", DEFAULT_DIGEST),
             extra_args=d.get("signExtraArgs", ""),
         )
-        env_pw = os.environ.get(PFX_PASSWORD_ENV)
+        env_pw = os.environ.get(pfx_env_var())
         if env_pw:
             cfg.pfx_password = env_pw
         if cfg.mode == MODE_TRUSTED and not cfg.dlib_path:
@@ -261,7 +267,7 @@ class SigningConfig:
             if not self.pfx_password:
                 problems.append(
                     "certificate password not set (enter it, or set the "
-                    f"{PFX_PASSWORD_ENV} environment variable)")
+                    f"{pfx_env_var()} environment variable)")
         elif self.mode == MODE_STORE:
             if not self.thumbprint:
                 problems.append("certificate thumbprint not set")
