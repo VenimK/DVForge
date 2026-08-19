@@ -82,51 +82,57 @@ cargo build --release
 Output: `target\release\printer_driver_adapter.dll` (~140 KB, no dependencies —
 std only).
 
-## Test
+## How the build wires it in
 
+DVForge does all of this automatically for Windows builds — nothing here needs
+to be run by hand.
+
+`builder/orchestrator.py` → `_install_open_printer_adapter()`
+: cargo-builds this crate and copies the DLL into the Flutter `Release/` folder,
+  overwriting the signature-checked one that `_ensure_windows_printer_driver()`
+  downloaded. It runs before the MSI harvest and the portable packer, so the
+  replacement ships inside both installers.
+
+`builder/customize.py` → `_apply_printer_port()`
+: repoints the printer's port at the spool file. **Two** implementations exist
+  and both are patched, because patching only one leaves the printer on the
+  wrong port:
+
+  - `libs/remote_printer/src/lib.rs` — Rust, used by `--install-remote-printer`
+    and the in-app Settings button.
+  - `res/msi/CustomActions/RemotePrinter.cpp` — a full C++ reimplementation used
+    by the MSI's `InstallPrinter` custom action. This is the one that runs during
+    a normal installer run.
+
+  Only the port changes. The printer keeps its name, and the driver stays
+  `RustDesk v4 Printer Driver`.
+
+It runs after `_apply_appname()`, since both files have the app name substituted
+into them.
+
+## Verifying a build
+
+After installing, confirm the adapter loaded:
+
+```powershell
+Get-ChildItem "C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\<App>\log" `
+  -Recurse -Filter *.log | Select-String "printer service"
 ```
-python test_adapter.py
+
+Expect `printer service initialized`. The old failure reads
+`printer service init failed: Failed to init printer driver`.
+
+Confirm the port is the spool file, not a named port:
+
+```powershell
+Get-Printer -Name "<App> Printer" | Select-Object Name,DriverName,PortName
 ```
 
-Drives the real C ABI through ctypes exactly as RustDesk does. Covers capture,
-byte-exact round trip, deletion after capture, no double-delivery, files still
-held open by the spooler, oldest-first ordering, stale-job clearing on re-init,
-and null-pointer safety. All 17 checks pass.
+`PortName` should be `C:\ProgramData\<App>\printer-spool\job.prn`.
 
-## Install
-
-1. Create the printer (elevated). Pick the driver — see the note below:
-
-   ```
-   .\setup-printer.ps1 -Tag "Darnellcloud-Connect"
-   ```
-
-2. Copy the DLL next to the app exe, replacing RustDesk's:
-
-   ```
-   Copy-Item .\target\release\printer_driver_adapter.dll `
-             "C:\Program Files\Darnellcloud-Connect\" -Force
-   ```
-
-3. Restart the service so the server reloads it.
-
-4. Confirm it initialised:
-
-   ```
-   Get-ChildItem "C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\Darnellcloud-Connect\log" `
-     -Recurse -Filter *.log | Select-String "printer service"
-   ```
-
-   Expect `printer service initialized`.
-
-5. Connect from another machine, print on the controlled machine, and check
-   `%ProgramData%\<Tag>\printer-spool\adapter.log` for a `captured` line.
-
-**`-Tag` must equal `get_app_name()` in the build** — the adapter derives its
-spool path from whatever RustDesk passes to `init()`.
-
-Do not also run the app's own "Install Printer" button. That installs RustDesk's
-driver on a port their adapter owns, and the two would fight over the printer name.
+Then connect from another machine, print on the controlled one, and check
+`%ProgramData%\<App>\printer-spool\adapter.log` for a `captured` line and the
+server log for `Got prn data, data len:`.
 
 ## Which driver to render with
 
