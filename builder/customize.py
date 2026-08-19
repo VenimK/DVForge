@@ -666,27 +666,41 @@ def _magick_resize(src_img, size, dst_img, log=None):
     return False
 
 
-def _ensure_png(icon_abs, log=None):
-    """Convert an icon to a normalized square PNG with alpha.
+def _ensure_png(icon_abs, log=None, square=True):
+    """Convert an icon to a normalized PNG with alpha.
 
     Applies Exif orientation, converts to PNG with an alpha channel, and
-    center-crops to a square (1024x1024) so downstream resizes produce
+    (when ``square``) center-crops to 1024x1024 so downstream resizes produce
     exact dimensions. iconutil rejects non-square or non-alpha PNGs, and
     a JPG with Exif rotation would come out sideways without -auto-orient.
     Uses a temp file so the user's original is never overwritten.
-    Returns the normalized PNG path, or the original on conversion failure."""
+    Returns the normalized PNG path, or the original on conversion failure.
+
+    Pass ``square=False`` for logos: they are usually wide banners, and a
+    square crop would slice the left and right off them.
+    """
     # Use a temp file so we never overwrite the user's source image.
     tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
     tmp.close()
     png_path = tmp.name
-    if _run_magick([icon_abs, "-auto-orient",
-                    "-resize", "1024x1024^",
-                    "-gravity", "center", "-extent", "1024x1024",
-                    "-background", "none", "-alpha", "on",
-                    png_path]):
+    # `-background none -alpha set` MUST come BEFORE -resize/-extent.
+    # -extent composites the image onto the *current* background colour,
+    # which defaults to white — so setting the background afterwards leaves
+    # an already-flattened, fully opaque image and every downstream icon
+    # (res/icon.png, icon.ico, app_icon.ico, .icns) loses its transparency.
+    args = [icon_abs, "-auto-orient", "-background", "none", "-alpha", "set"]
+    if square:
+        args += ["-resize", "1024x1024^",
+                 "-gravity", "center", "-extent", "1024x1024"]
+    else:
+        # Bound the longest edge, keep the aspect ratio, never upscale.
+        args += ["-resize", "1024x1024>"]
+    args.append(png_path)
+    if _run_magick(args):
         if log:
+            shape = "1024x1024 square" if square else "aspect-preserved"
             log(f"    · converted {os.path.basename(icon_abs)} -> "
-                "1024x1024 PNG (auto-orient + alpha)")
+                f"{shape} PNG (auto-orient + alpha)")
         return png_path
     if log:
         why = ("ImageMagick failed" if _magick_bin()
@@ -951,16 +965,25 @@ def _apply_logo(src, env, platform, log):
 
     flutter_assets = os.path.join(src, "flutter", "assets")
 
-    # If the logo is a raster image (PNG/JPG/WEBP/etc.), copy as icon.png
-    # (the in-app logo displayed in about) and try to generate an SVG via
-    # potrace (macOS/Linux only; on Windows potrace is often unavailable,
-    # so the PNG fallback in loadIcon() is used).
+    # If the logo is a raster image (PNG/JPG/WEBP/etc.), write it as
+    # assets/logo.png (what loadLogo() renders top-left) and try to generate
+    # an SVG via potrace (macOS/Linux only; on Windows potrace is often
+    # unavailable, so the PNG fallback in loadIcon() is used).
+    # Note: assets/icon.png is deliberately NOT written here — that belongs to
+    # _apply_icon(). Clobbering it with a wide logo distorts loadIcon(), which
+    # forces a square width/height.
     # Non-PNG rasters are converted to PNG first so the file content matches
-    # the .png extension — a JPG copied as "icon.png" has wrong magic bytes.
+    # the .png extension — a JPG copied as "logo.png" has wrong magic bytes.
     if logo_abs.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")):
-        logo_png = _ensure_png(logo_abs, log)
-        shutil.copy2(logo_png, os.path.join(flutter_assets, "icon.png"))
-        log("    · flutter/assets/icon.png (logo)")
+        logo_png = _ensure_png(logo_abs, log, square=False)
+        # loadLogo() in flutter/lib/common.dart resolves, in order:
+        #   dark theme : assets/logo_dark.png  -> assets/logo.png
+        #   light theme: assets/logo_light.png -> assets/logo.png
+        # and renders const Offstage() (i.e. nothing) when none of them are
+        # in the bundle. RustDesk ships no assets/logo.png, so without this
+        # the top-left logo silently never appears.
+        shutil.copy2(logo_png, os.path.join(flutter_assets, "logo.png"))
+        log("    · flutter/assets/logo.png (top-left in-app logo)")
         if platform in ("macos", "linux"):
             pbm = tempfile.NamedTemporaryFile(suffix=".pbm", delete=False)
             pbm.close()
@@ -980,6 +1003,15 @@ def _apply_logo(src, env, platform, log):
     elif logo_abs.lower().endswith(".svg"):
         shutil.copy2(logo_abs, os.path.join(flutter_assets, "icon.svg"))
         log("    · flutter/assets/icon.svg")
+        # loadLogo() only ever calls Image.asset(), so an SVG alone leaves the
+        # top-left logo blank — rasterise a PNG companion for it.
+        if _run_magick([logo_abs, "-background", "none", "-alpha", "set",
+                        "-resize", "1024x1024>",
+                        os.path.join(flutter_assets, "logo.png")]):
+            log("    · flutter/assets/logo.png (rasterised from SVG)")
+        else:
+            log("    ! could not rasterise logo.svg -> logo.png; "
+                "the in-app logo will not render")
     else:
         # Unknown type — copy as-is but use the original extension, not .svg
         dst = os.path.join(flutter_assets, os.path.basename(logo_abs))
@@ -989,7 +1021,7 @@ def _apply_logo(src, env, platform, log):
     # Also copy to rustdesk/data/flutter_assets/assets/ if it exists
     fa2 = os.path.join(src, "rustdesk", "data", "flutter_assets", "assets")
     if os.path.isdir(fa2):
-        for fname in ("icon.svg", "icon.png"):
+        for fname in ("icon.svg", "icon.png", "logo.png"):
             src_f = os.path.join(flutter_assets, fname)
             if os.path.exists(src_f):
                 shutil.copy2(src_f, os.path.join(fa2, fname))
