@@ -32,6 +32,16 @@ WINDOWS_FLUTTER_ENGINE_URL = (
     "https://github.com/rustdesk/engine/releases/download/main/"
     "windows-x64-release.zip"
 )
+# Official CI (flutter-build.yml) ships these next to rustdesk.exe so
+# Settings → Printer can find drivers/RustDeskPrinterDriver/*.inf
+PRINTER_DRIVER_ZIP_URL = (
+    "https://github.com/rustdesk/hbb_common/releases/download/driver/"
+    "rustdesk_printer_driver_v4-1.4.zip"
+)
+PRINTER_ADAPTER_ZIP_URL = (
+    "https://github.com/rustdesk/hbb_common/releases/download/driver/"
+    "printer_driver_adapter.zip"
+)
 
 # toolchain versions (match the workflows / SKILL.md)
 RUST_VERSION = "1.75"        # Windows/Linux desktop
@@ -1741,6 +1751,107 @@ class Build:
                     shutil.copy2(src_item, dst_item)
             self.log(f"  ✓ custom engine installed to {engine_dir}")
 
+    def _ensure_windows_printer_driver(self, release):
+        """Copy official printer driver + adapter DLL into the Flutter Release
+        folder so Settings → Printer can install the virtual printer.
+
+        Official CI downloads:
+          rustdesk_printer_driver_v4-1.4.zip
+            → Release/drivers/RustDeskPrinterDriver/*.inf
+          printer_driver_adapter.zip
+            → Release/printer_driver_adapter.dll
+        Cached under workspace/.build-cache/printer-driver/.
+        """
+        if self.host["os"] != "Windows":
+            return
+        if self.dry_run:
+            self.log("  (would install printer driver into Release if missing)")
+            return
+        if not os.path.isdir(release):
+            self.log(f"  ! Release dir missing, skip printer driver: {release}")
+            return
+
+        dest_drv = os.path.join(release, "drivers", "RustDeskPrinterDriver")
+        dest_inf = os.path.join(dest_drv, "RustDeskPrinterDriver.inf")
+        dest_dll = os.path.join(release, "printer_driver_adapter.dll")
+        if os.path.isfile(dest_inf) and os.path.isfile(dest_dll):
+            self.log("  · printer driver already in Release — skip download")
+            return
+
+        cache = os.path.join(self._cache_park_dir(), "printer-driver")
+        os.makedirs(cache, exist_ok=True)
+        drv_zip = os.path.join(cache, "rustdesk_printer_driver_v4-1.4.zip")
+        adp_zip = os.path.join(cache, "printer_driver_adapter.zip")
+
+        def _fetch(url, path, label):
+            if os.path.isfile(path) and os.path.getsize(path) > 1000:
+                self.log(f"  · using cached {label}")
+                return True
+            self.log(f"  · downloading {label}")
+            self.run(["curl", "-sL", "-o", path, url], check=False)
+            if not os.path.isfile(path) or os.path.getsize(path) < 1000:
+                self.log(f"  ! failed to download {label} from {url}")
+                return False
+            return True
+
+        if not _fetch(PRINTER_DRIVER_ZIP_URL, drv_zip, "printer driver zip"):
+            return
+        if not _fetch(PRINTER_ADAPTER_ZIP_URL, adp_zip, "printer adapter zip"):
+            return
+
+        extract_root = os.path.join(cache, "extract")
+        if os.path.isdir(extract_root):
+            try:
+                _force_rmtree(extract_root)
+            except Exception:
+                pass
+        os.makedirs(extract_root, exist_ok=True)
+        try:
+            with zipfile.ZipFile(drv_zip, "r") as z:
+                z.extractall(extract_root)
+            with zipfile.ZipFile(adp_zip, "r") as z:
+                z.extractall(extract_root)
+        except zipfile.BadZipFile as e:
+            self.log(f"  ! printer zip corrupt ({e}) — deleting cache")
+            for p in (drv_zip, adp_zip):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+            return
+
+        inf_src = None
+        dll_src = None
+        for root, _dirs, files in os.walk(extract_root):
+            for f in files:
+                low = f.lower()
+                if low == "rustdeskprinterdriver.inf":
+                    inf_src = os.path.join(root, f)
+                elif low == "printer_driver_adapter.dll":
+                    dll_src = os.path.join(root, f)
+
+        if not inf_src:
+            self.log("  ! RustDeskPrinterDriver.inf not found in driver zip")
+            return
+
+        os.makedirs(dest_drv, exist_ok=True)
+        src_dir = os.path.dirname(inf_src)
+        for name in os.listdir(src_dir):
+            src_p = os.path.join(src_dir, name)
+            dst_p = os.path.join(dest_drv, name)
+            if os.path.isfile(src_p):
+                shutil.copy2(src_p, dst_p)
+        if dll_src:
+            shutil.copy2(dll_src, dest_dll)
+        if os.path.isfile(dest_inf):
+            self.log(f"  ✓ printer driver → {dest_drv}")
+        else:
+            self.log("  ! copied driver files but INF still missing")
+        if os.path.isfile(dest_dll):
+            self.log(f"  ✓ printer adapter → {dest_dll}")
+        else:
+            self.log("  ! printer_driver_adapter.dll not found in adapter zip")
+
     def _cached_windows_binary_name(self):
         """Exe/CMake target name baked into a previous flutter/build/windows."""
         cache = os.path.join(self.src_dir, "flutter", "build", "windows",
@@ -1881,6 +1992,7 @@ class Build:
         if not self.dry_run:
             env = self._env()
             customize.write_custom_txt(release, env, log=self.log)
+            self._ensure_windows_printer_driver(release)
 
         basename = self._output_basename()
         version = self.version
