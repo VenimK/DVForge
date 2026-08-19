@@ -1993,6 +1993,7 @@ class Build:
             env = self._env()
             customize.write_custom_txt(release, env, log=self.log)
             self._ensure_windows_printer_driver(release)
+            self._install_open_printer_adapter(release)
 
         basename = self._output_basename()
         version = self.version
@@ -2026,6 +2027,63 @@ class Build:
                 self.log("  ! portable exe not found — portable pack may have failed")
             # Also copy the Release directory as a fallback (loose files)
             self._collect_dir(release, "windows", "Release")
+
+    def _install_open_printer_adapter(self, release):
+        """Build printer-adapter/ and install it over RustDesk's adapter.
+
+        RustDesk's own `printer_driver_adapter.dll` verifies the calling
+        executable's Authenticode signature against a hardcoded vendor
+        allow-list (it links `codesign-verify-rs` and imports `WinVerifyTrust`).
+        A custom-branded build is never on that list, so its `init()` returns
+        non-zero and the server logs:
+
+            printer service init failed: Failed to init printer driver
+
+        which disables remote printing entirely. `printer-adapter/` is a
+        clean-room reimplementation of the same four-function ABI declared in
+        `src/server/printer_service.rs`, with no signature check.
+
+        Must run AFTER _ensure_windows_printer_driver() so it replaces the
+        downloaded DLL, and BEFORE the MSI harvest and portable packer so the
+        replacement ships inside both installers.
+
+        Non-fatal: on failure the build keeps RustDesk's adapter and still
+        produces a working client, minus remote printing.
+        """
+        crate = os.path.join(self._project_root(), "printer-adapter")
+        manifest = os.path.join(crate, "Cargo.toml")
+        if not os.path.isfile(manifest):
+            self.log("  ! printer-adapter/ not found - keeping RustDesk's "
+                     "signature-checked adapter (remote printing will not work)")
+            return
+
+        self.log("\n=== Open printer adapter ===")
+        if self.dry_run:
+            self.log(f"  [dry-run] would cargo build {manifest}")
+            self.log(f"  [dry-run] would install the DLL into {release}")
+            return
+
+        rc = self.run(["cargo", "build", "--release", "--locked",
+                       "--manifest-path", manifest],
+                      cwd=crate, check=False)
+        if rc != 0:
+            self.log(f"  ! cargo build failed (exit {rc}) - keeping RustDesk's "
+                     "adapter; remote printing will not work in this build")
+            return
+
+        built = os.path.join(crate, "target", "release",
+                             "printer_driver_adapter.dll")
+        if not os.path.isfile(built):
+            self.log("  ! cargo reported success but the DLL is missing")
+            return
+
+        try:
+            dst = os.path.join(release, "printer_driver_adapter.dll")
+            shutil.copy2(built, dst)
+            self.log(f"  ✓ printer_driver_adapter.dll ({os.path.getsize(dst)} "
+                     "bytes) - replaces the signature-checked build")
+        except OSError as exc:
+            self.log(f"  ! could not install the adapter ({exc})")
 
     def _pack_windows_portable(self, release, version):
         """Run libs/portable/generate.py ourselves (mirrors build.py's own
