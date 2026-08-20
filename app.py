@@ -165,8 +165,106 @@ class InstallSession:
         return True, "started"
 
 
+class UpdateSession:
+    """Runs a git pull on the DVForge repo in the background with SSE fan-out."""
+    def __init__(self):
+        self.subscribers = []
+        self.lock = threading.Lock()
+        self.history = []
+        self.running = False
+        self.result = None
+
+    def _emit(self, line):
+        with self.lock:
+            self.history.append(line)
+            for q in list(self.subscribers):
+                q.put(line)
+
+    def subscribe(self):
+        q = queue.Queue()
+        with self.lock:
+            for line in self.history:
+                q.put(line)
+            self.subscribers.append(q)
+        return q
+
+    def unsubscribe(self, q):
+        with self.lock:
+            if q in self.subscribers:
+                self.subscribers.remove(q)
+
+    def start(self, root):
+        if self.running:
+            return False, "an update is already running"
+        with self.lock:
+            self.history = []
+            self.result = None
+        self.running = True
+
+        def _run():
+            import subprocess
+            import shutil as _shutil
+            try:
+                self._emit("Checking for updates…")
+                # Fetch first so we can see if there's anything new
+                rc = subprocess.call(["git", "fetch", "origin"], cwd=root)
+                if rc != 0:
+                    self._emit("! git fetch failed — are you offline?")
+                    self.result = {"ok": False, "error": "git fetch failed"}
+                    return
+                # Compare local vs remote
+                local = subprocess.check_output(
+                    ["git", "rev-parse", "HEAD"], cwd=root,
+                    encoding="utf-8", errors="replace").strip()
+                remote = subprocess.check_output(
+                    ["git", "rev-parse", "origin/HEAD"], cwd=root,
+                    encoding="utf-8", errors="replace").strip()
+                if local == remote:
+                    self._emit("Already up to date.")
+                    self.result = {"ok": True, "updated": False,
+                                   "commit": local[:8]}
+                    return
+                self._emit(f"Updating {local[:8]} → {remote[:8]}")
+                # configs/RustDesk.json is user-edited and always dirty.
+                # Back it up, restore the tracked version so pull succeeds,
+                # then restore the user's config after pull completes.
+                cfg = os.path.join(root, "configs", "RustDesk.json")
+                cfg_backup = None
+                if os.path.isfile(cfg):
+                    cfg_backup = cfg + ".update-bak"
+                    _shutil.copy2(cfg, cfg_backup)
+                    subprocess.call(["git", "checkout", "--", cfg], cwd=root)
+                    self._emit("  · backed up configs/RustDesk.json")
+                rc = subprocess.call(["git", "pull", "--ff-only"], cwd=root)
+                # Restore user config regardless of pull outcome
+                if cfg_backup and os.path.isfile(cfg_backup):
+                    _shutil.move(cfg_backup, cfg)
+                    self._emit("  · restored configs/RustDesk.json")
+                if rc != 0:
+                    self._emit("! git pull failed — other local changes may conflict.")
+                    self._emit("  Stash them with: git stash && git pull && git stash pop")
+                    self.result = {"ok": False, "error": "git pull failed"}
+                    return
+                new_head = subprocess.check_output(
+                    ["git", "rev-parse", "HEAD"], cwd=root,
+                    encoding="utf-8", errors="replace").strip()
+                self._emit(f"✓ Updated to {new_head[:8]}")
+                self._emit("  Restart DVForge to apply changes.")
+                self.result = {"ok": True, "updated": True,
+                               "commit": new_head[:8]}
+            except Exception as e:
+                self._emit(f"update error: {e}")
+                self.result = {"ok": False, "error": str(e)}
+            finally:
+                self.running = False
+                self._emit("\x00DONE")
+        threading.Thread(target=_run, daemon=True).start()
+        return True, "started"
+
+
 SESSION = BuildSession()
 INSTALL = InstallSession()
+UPDATE = UpdateSession()
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +350,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/toolchains/status":
             return self._send_json({"running": INSTALL.running,
                                     "result": INSTALL.result})
+        if path == "/api/update/status":
+            return self._send_json({"running": UPDATE.running,
+                                    "result": UPDATE.result})
+        if path == "/api/update/stream":
+            return self._stream(UPDATE)
         if path.startswith("/api/branding/"):
             return self._serve_branding(path)
         return self._serve_static(path)
@@ -351,6 +454,11 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/toolchains/cancel":
             return self._send_json({"ok": INSTALL.cancel()})
+
+        if path == "/api/update/start":
+            ok, msg = UPDATE.start(ROOT)
+            return self._send_json({"ok": ok, "message": msg},
+                                   200 if ok else 409)
 
         if path == "/api/toolchains/remove":
             tid = data.get("id")

@@ -813,3 +813,44 @@ function bindThemeLive() {
 
 bindColorPickers();
 bindThemeLive();
+
+/* ── self-update ──────────────────────────────────────── */
+const updateConsole = $("#update-console");
+function updateLine(text) {
+  const span = document.createElement("span");
+  if (/✓|Updated|up to date/.test(text)) span.className = "con-ok";
+  else if (/!|failed|error/i.test(text)) span.className = "con-err";
+  span.textContent = text + "\n";
+  updateConsole.appendChild(span);
+  updateConsole.scrollTop = updateConsole.scrollHeight;
+}
+
+$("#check-updates").addEventListener("click", async () => {
+  const btn = $("#check-updates");
+  btn.disabled = true;
+  btn.textContent = "checking…";
+  $("#update-log").hidden = false;
+  updateConsole.textContent = "";
+  const r = await api("/api/update/start", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  if (!r.ok) {
+    updateLine("!! " + (r.message || r.error || "could not start"));
+    btn.disabled = false;
+    btn.textContent = "Check for updates";
+    return;
+  }
+  const es = new EventSource("/api/update/stream");
+  es.onmessage = ev => { try { updateLine(JSON.parse(ev.data).line); } catch {} };
+  es.addEventListener("done", async () => {
+    es.close();
+    btn.disabled = false;
+    btn.textContent = "Check for updates";
+    const st = await api("/api/update/status");
+    if (st.result?.updated) {
+      updateLine("Restart DVForge to apply the updated files.");
+    }
+  });
+  es.onerror = () => {};
+});
