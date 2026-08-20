@@ -718,6 +718,64 @@ def check_potrace():
     return _status(False, hint=_install_hint("potrace"))
 
 
+def check_cmake():
+    """cmake — required by vcpkg and native builds."""
+    p = _which("cmake")
+    if p:
+        return _status(True, _run_version(["cmake", "--version"]) or "cmake", p,
+                       note="Required for vcpkg and native C/C++ builds.")
+    return _status(False, hint=_install_hint("cmake"))
+
+
+def check_ninja():
+    """ninja — required by vcpkg/cmake as a build backend."""
+    p = _which("ninja")
+    if p:
+        return _status(True, _run_version(["ninja", "--version"]) or "ninja", p,
+                       note="Required by vcpkg/cmake (NMake/Ninja backend).")
+    return _status(False, hint=_install_hint("ninja"))
+
+
+def check_nasm():
+    """nasm — required for OpenSSL assembly optimizations."""
+    p = _which("nasm")
+    if p:
+        return _status(True, _run_version(["nasm", "--version"]) or "nasm", p,
+                       note="Required for OpenSSL asm optimisations.")
+    return _status(False, hint=_install_hint("nasm"))
+
+
+def check_pkgconfig():
+    """pkg-config — required for native library discovery."""
+    p = _which("pkg-config")
+    if p:
+        return _status(True, _run_version(["pkg-config", "--version"]) or "pkg-config", p,
+                       note="Required for native library discovery (vcpkg, openssl).")
+    return _status(False, hint=_install_hint("pkgconfig"))
+
+
+def check_create_dmg():
+    """create-dmg — required for macOS .dmg packaging."""
+    if _system() != "macOS":
+        return _status(False, note="macOS only.")
+    p = _which("create-dmg")
+    if p:
+        return _status(True, "create-dmg", p,
+                       note="Required for macOS .dmg packaging.")
+    return _status(False, hint=_install_hint("create_dmg"))
+
+
+def check_cocoapods():
+    """CocoaPods (pod) — required by flutter build macos."""
+    if _system() != "macOS":
+        return _status(False, note="macOS only.")
+    p = _which("pod")
+    if p:
+        return _status(True, _run_version(["pod", "--version"]) or "CocoaPods", p,
+                       note="Required by 'flutter build macos'.")
+    return _status(False, hint=_install_hint("cocoapods"))
+
+
 CHECKS = {
     "git": check_git,
     "python": check_python,
@@ -739,6 +797,12 @@ CHECKS = {
     "imagemagick": check_imagemagick,
     "iconutil": check_iconutil,
     "potrace": check_potrace,
+    "cmake": check_cmake,
+    "ninja": check_ninja,
+    "nasm": check_nasm,
+    "pkgconfig": check_pkgconfig,
+    "create_dmg": check_create_dmg,
+    "cocoapods": check_cocoapods,
 }
 
 LABELS = {
@@ -762,6 +826,12 @@ LABELS = {
     "imagemagick": "ImageMagick (icon/logo branding)",
     "iconutil": "iconutil (macOS .icns generation)",
     "potrace": "potrace (PNG→SVG logo conversion)",
+    "cmake": "cmake (vcpkg / native builds)",
+    "ninja": "ninja (vcpkg/cmake build backend)",
+    "nasm": "nasm (OpenSSL assembly)",
+    "pkgconfig": "pkg-config (native library discovery)",
+    "create_dmg": "create-dmg (macOS .dmg packaging)",
+    "cocoapods": "CocoaPods (flutter build macos)",
 }
 
 
@@ -869,6 +939,32 @@ def _install_hint(tool):
                        "(.NET 8+ SDK required for WiX Toolset 4 / MSI)",
             "Linux": "N/A — MSI is Windows-only.",
             "macOS": "N/A — MSI is Windows-only.",
+        },
+        "cmake": {
+            "Windows": "winget install Kitware.CMake  or: https://cmake.org/download",
+            "Linux": "sudo apt install cmake",
+            "macOS": "brew install cmake",
+        },
+        "ninja": {
+            "Windows": "winget install Ninja-build.Ninja  or: choco install ninja",
+            "Linux": "sudo apt install ninja-build",
+            "macOS": "brew install ninja",
+        },
+        "nasm": {
+            "Windows": "choco install nasm  or: https://www.nasm.us",
+            "Linux": "sudo apt install nasm",
+            "macOS": "brew install nasm",
+        },
+        "pkgconfig": {
+            "Windows": "choco install pkgconfiglite",
+            "Linux": "sudo apt install pkg-config",
+            "macOS": "brew install pkg-config",
+        },
+        "create_dmg": {
+            "macOS": "brew install create-dmg",
+        },
+        "cocoapods": {
+            "macOS": "brew install cocoapods  or: sudo gem install cocoapods",
         },
     }
     return hints.get(tool, {}).get(os_name, "")
