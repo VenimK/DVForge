@@ -351,6 +351,29 @@ PY
 ok 'Toolchains install finished'
 
 # ---------------------------------------------------------------------------
+# Phase 4b — Force vcpkg to the pinned commit
+# ---------------------------------------------------------------------------
+step 'Phase 4b: Pin vcpkg commit'
+
+VCPKG_DIR="${INSTALL_ROOT}/.toolchains/vcpkg"
+VCPKG_PIN="120deac3062162151622ca4860575a33844ba10b"
+if [ -d "${VCPKG_DIR}/.git" ]; then
+  CUR_VCPKG="$(git -C "$VCPKG_DIR" rev-parse HEAD 2>/dev/null || true)"
+  if [ "$CUR_VCPKG" = "$VCPKG_PIN" ]; then
+    skip "vcpkg already on pinned commit ${VCPKG_PIN:0:8}"
+  else
+    printf '  vcpkg is on %s, checking out %s ...\n' "${CUR_VCPKG:0:8}" "${VCPKG_PIN:0:8}"
+    git -C "$VCPKG_DIR" fetch --all
+    git -C "$VCPKG_DIR" checkout "$VCPKG_PIN"
+    # Re-bootstrap after checkout so the binary matches the commit
+    bash "${VCPKG_DIR}/bootstrap-vcpkg.sh"
+    ok "vcpkg pinned to ${VCPKG_PIN:0:8}"
+  fi
+else
+  warn "vcpkg not found under .toolchains/vcpkg — skipping pin step"
+fi
+
+# ---------------------------------------------------------------------------
 # Phase 5 — Pin Rust 1.81 (macOS CI) + both Darwin targets
 # ---------------------------------------------------------------------------
 step 'Phase 5: Pin Rust 1.81 for macOS'

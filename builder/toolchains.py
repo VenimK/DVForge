@@ -1132,12 +1132,19 @@ def install_one(tid, root, log, cancelled=lambda: False):
 
     if spec["kind"] == "git":
         if os.path.isdir(home_target):
-            log("  already present, updating")
+            log("  already present, checking out pinned commit")
         else:
             log(f"  git clone {spec['repo']}")
             rc = subprocess.call(["git", "clone", spec["repo"], home_target])
             if rc != 0:
                 raise RuntimeError("git clone failed")
+        # Force checkout of the pinned commit so vcpkg matches the build's
+        # expected manifest baseline (prereqs.VCPKG_COMMIT / PINNED["vcpkg"]).
+        pinned = PINNED.get("vcpkg", "")
+        if pinned:
+            log(f"  git checkout {pinned[:8]}")
+            subprocess.call(["git", "-C", home_target, "fetch", "--all"])
+            subprocess.call(["git", "-C", home_target, "checkout", pinned])
         # bootstrap so the vcpkg binary exists
         boot = os.path.join(home_target, "bootstrap-vcpkg." + ("bat" if WIN else "sh"))
         log("  bootstrapping vcpkg")
