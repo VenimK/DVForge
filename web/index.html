@@ -43,7 +43,11 @@
     </section>
 
     <footer class="rig-foot">
-      <button class="mini" id="check-updates" title="Check for DVForge updates">Check for updates</button>
+      <div class="update-row">
+        <button class="mini" id="check-updates" title="Fetch origin and show whether DVForge has a newer commit">Check for updates</button>
+        <button class="mini" id="install-update" hidden title="Pull the newer DVForge commit">Install update</button>
+      </div>
+      <div class="update-status" id="update-status">Not checked yet</div>
       <div class="update-log" id="update-log" hidden>
         <pre id="update-console"></pre>
       </div>

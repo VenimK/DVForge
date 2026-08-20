@@ -193,7 +193,33 @@ class UpdateSession:
             if q in self.subscribers:
                 self.subscribers.remove(q)
 
-    def start(self, root):
+    @staticmethod
+    def _git(args, root, check=True):
+        import subprocess
+        kw = dict(cwd=root, encoding="utf-8", errors="replace")
+        if check:
+            return subprocess.check_output(["git"] + args, **kw).strip()
+        return subprocess.call(["git"] + args, cwd=root)
+
+    def _remote_head(self, root):
+        """Best-effort upstream SHA after a fetch."""
+        for ref in ("@{u}", "origin/HEAD", "origin/main", "origin/master"):
+            try:
+                return self._git(["rev-parse", "--verify", ref], root)
+            except Exception:
+                continue
+        return ""
+
+    def _incoming_log(self, root, remote, limit=8):
+        try:
+            out = self._git(
+                ["log", "--oneline", f"--max-count={limit}",
+                 f"HEAD..{remote}"], root)
+            return [ln for ln in out.splitlines() if ln.strip()]
+        except Exception:
+            return []
+
+    def start(self, root, apply=False):
         if self.running:
             return False, "an update is already running"
         with self.lock:
@@ -202,27 +228,39 @@ class UpdateSession:
         self.running = True
 
         def _run():
-            import subprocess
             import shutil as _shutil
             try:
                 self._emit("Checking for updates…")
-                # Fetch first so we can see if there's anything new
-                rc = subprocess.call(["git", "fetch", "origin"], cwd=root)
+                rc = self._git(["fetch", "origin"], root, check=False)
                 if rc != 0:
                     self._emit("! git fetch failed — are you offline?")
-                    self.result = {"ok": False, "error": "git fetch failed"}
+                    self.result = {"ok": False, "error": "git fetch failed",
+                                   "available": False}
                     return
-                # Compare local vs remote
-                local = subprocess.check_output(
-                    ["git", "rev-parse", "HEAD"], cwd=root,
-                    encoding="utf-8", errors="replace").strip()
-                remote = subprocess.check_output(
-                    ["git", "rev-parse", "origin/HEAD"], cwd=root,
-                    encoding="utf-8", errors="replace").strip()
+                local = self._git(["rev-parse", "HEAD"], root)
+                remote = self._remote_head(root)
+                if not remote:
+                    self._emit("! could not resolve origin/main (or origin/HEAD)")
+                    self.result = {"ok": False, "error": "no remote HEAD",
+                                   "available": False}
+                    return
+                commits = self._incoming_log(root, remote)
                 if local == remote:
-                    self._emit("Already up to date.")
+                    self._emit(f"Already up to date ({local[:8]}).")
                     self.result = {"ok": True, "updated": False,
-                                   "commit": local[:8]}
+                                   "available": False, "commit": local[:8],
+                                   "local": local[:8], "remote": remote[:8],
+                                   "commits": []}
+                    return
+                self._emit(f"Update available: {local[:8]} → {remote[:8]}")
+                for ln in commits:
+                    self._emit(f"  · {ln}")
+                if not apply:
+                    self._emit("Click “Install update” to apply it.")
+                    self.result = {"ok": True, "updated": False,
+                                   "available": True, "commit": remote[:8],
+                                   "local": local[:8], "remote": remote[:8],
+                                   "commits": commits}
                     return
                 self._emit(f"Updating {local[:8]} → {remote[:8]}")
                 # configs/RustDesk.json is user-edited and always dirty.
@@ -233,28 +271,28 @@ class UpdateSession:
                 if os.path.isfile(cfg):
                     cfg_backup = cfg + ".update-bak"
                     _shutil.copy2(cfg, cfg_backup)
-                    subprocess.call(["git", "checkout", "--", cfg], cwd=root)
+                    self._git(["checkout", "--", cfg], root, check=False)
                     self._emit("  · backed up configs/RustDesk.json")
-                rc = subprocess.call(["git", "pull", "--ff-only"], cwd=root)
-                # Restore user config regardless of pull outcome
+                rc = self._git(["pull", "--ff-only"], root, check=False)
                 if cfg_backup and os.path.isfile(cfg_backup):
                     _shutil.move(cfg_backup, cfg)
                     self._emit("  · restored configs/RustDesk.json")
                 if rc != 0:
                     self._emit("! git pull failed — other local changes may conflict.")
                     self._emit("  Stash them with: git stash && git pull && git stash pop")
-                    self.result = {"ok": False, "error": "git pull failed"}
+                    self.result = {"ok": False, "error": "git pull failed",
+                                   "available": True}
                     return
-                new_head = subprocess.check_output(
-                    ["git", "rev-parse", "HEAD"], cwd=root,
-                    encoding="utf-8", errors="replace").strip()
+                new_head = self._git(["rev-parse", "HEAD"], root)
                 self._emit(f"✓ Updated to {new_head[:8]}")
                 self._emit("  Restart DVForge to apply changes.")
-                self.result = {"ok": True, "updated": True,
-                               "commit": new_head[:8]}
+                self.result = {"ok": True, "updated": True, "available": False,
+                               "commit": new_head[:8],
+                               "local": new_head[:8], "remote": remote[:8],
+                               "commits": commits}
             except Exception as e:
                 self._emit(f"update error: {e}")
-                self.result = {"ok": False, "error": str(e)}
+                self.result = {"ok": False, "error": str(e), "available": False}
             finally:
                 self.running = False
                 self._emit("\x00DONE")
@@ -456,7 +494,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json({"ok": INSTALL.cancel()})
 
         if path == "/api/update/start":
-            ok, msg = UPDATE.start(ROOT)
+            ok, msg = UPDATE.start(ROOT, apply=bool(data.get("apply")))
             return self._send_json({"ok": ok, "message": msg},
                                    200 if ok else 409)
 

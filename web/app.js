@@ -817,41 +817,82 @@ bindThemeLive();
 
 /* ── self-update ──────────────────────────────────────── */
 const updateConsole = $("#update-console");
+const updateStatus = $("#update-status");
+const installUpdateBtn = $("#install-update");
+
+function setUpdateStatus(text, kind) {
+  updateStatus.textContent = text;
+  updateStatus.className = "update-status" + (kind ? " is-" + kind : "");
+}
+
 function updateLine(text) {
   const span = document.createElement("span");
-  if (/✓|Updated|up to date/.test(text)) span.className = "con-ok";
+  if (/✓|Already up to date/.test(text)) span.className = "con-ok";
+  else if (/Update available/.test(text)) span.className = "con-warn";
   else if (/!|failed|error/i.test(text)) span.className = "con-err";
   span.textContent = text + "\n";
   updateConsole.appendChild(span);
   updateConsole.scrollTop = updateConsole.scrollHeight;
 }
 
-$("#check-updates").addEventListener("click", async () => {
-  const btn = $("#check-updates");
-  btn.disabled = true;
-  btn.textContent = "checking…";
+function paintUpdateResult(res) {
+  if (!res) return;
+  if (res.updated) {
+    setUpdateStatus("Updated to " + (res.commit || "?") + " — restart DVForge", "ok");
+    installUpdateBtn.hidden = true;
+    return;
+  }
+  if (res.available) {
+    const from = res.local || "?";
+    const to = res.remote || res.commit || "?";
+    setUpdateStatus("Update available · " + from + " → " + to, "avail");
+    installUpdateBtn.hidden = false;
+    return;
+  }
+  if (res.ok === false) {
+    setUpdateStatus(res.error || "Update check failed", "err");
+    installUpdateBtn.hidden = true;
+    return;
+  }
+  setUpdateStatus("Up to date · " + (res.commit || res.local || ""), "ok");
+  installUpdateBtn.hidden = true;
+}
+
+async function runUpdate(apply) {
+  const checkBtn = $("#check-updates");
+  checkBtn.disabled = true;
+  installUpdateBtn.disabled = true;
+  checkBtn.textContent = apply ? "installing…" : "checking…";
+  setUpdateStatus(apply ? "Installing update…" : "Checking origin…");
   $("#update-log").hidden = false;
   updateConsole.textContent = "";
   const r = await api("/api/update/start", {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({}),
+    body: JSON.stringify({ apply: !!apply }),
   });
   if (!r.ok) {
     updateLine("!! " + (r.message || r.error || "could not start"));
-    btn.disabled = false;
-    btn.textContent = "Check for updates";
+    setUpdateStatus(r.message || r.error || "could not start", "err");
+    checkBtn.disabled = false;
+    installUpdateBtn.disabled = false;
+    checkBtn.textContent = "Check for updates";
     return;
   }
   const es = new EventSource("/api/update/stream");
   es.onmessage = ev => { try { updateLine(JSON.parse(ev.data).line); } catch {} };
   es.addEventListener("done", async () => {
     es.close();
-    btn.disabled = false;
-    btn.textContent = "Check for updates";
+    checkBtn.disabled = false;
+    installUpdateBtn.disabled = false;
+    checkBtn.textContent = "Check for updates";
     const st = await api("/api/update/status");
+    paintUpdateResult(st.result);
     if (st.result?.updated) {
       updateLine("Restart DVForge to apply the updated files.");
     }
   });
   es.onerror = () => {};
-});
+}
+
+$("#check-updates").addEventListener("click", () => runUpdate(false));
+installUpdateBtn.addEventListener("click", () => runUpdate(true));

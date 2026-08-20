@@ -196,6 +196,14 @@ code, pre, .mono { font-family: var(--mono); }
 #install-console .con-head { color: var(--amber); }
 
 /* update log in footer */
+.update-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.update-status {
+  margin-top: 6px; font-family: var(--mono); font-size: 11px;
+  color: var(--ink-faint); line-height: 1.4;
+}
+.update-status.is-ok { color: var(--good); }
+.update-status.is-avail { color: var(--amber); }
+.update-status.is-err { color: var(--bad); }
 .update-log {
   margin-top: 8px; border: 1px solid var(--line); border-radius: var(--r-sm);
   background: #0b0e14; overflow: hidden;
@@ -207,8 +215,10 @@ code, pre, .mono { font-family: var(--mono); }
 }
 #update-console .con-ok  { color: var(--good); }
 #update-console .con-err { color: var(--bad); }
+#update-console .con-warn { color: var(--amber); }
 .rig-foot-note { display: block; margin-top: 6px; }
-#check-updates { margin-bottom: 4px; }
+#install-update { border-color: var(--amber-dim); color: var(--amber); }
+#install-update:hover { border-color: var(--amber); color: var(--amber); }
 
 /* ── main ──────────────────────────────────────────────── */
 .main { padding: 0 34px 60px; max-width: 1180px; }
