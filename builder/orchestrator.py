@@ -2621,6 +2621,7 @@ class Build:
             resources_dir = os.path.join(app_bundle, "Contents", "Resources")
             os.makedirs(resources_dir, exist_ok=True)
             customize.write_custom_txt(resources_dir, env, log=self.log)
+        self._codesign_macos_app(app_bundle)
         self._create_macos_dmg()
         self._collect(self.src_dir, (".dmg",), "macos")
 
@@ -2871,6 +2872,29 @@ class Build:
             except OSError:
                 continue
         return False
+
+    def _codesign_macos_app(self, app_bundle):
+        """Ad-hoc sign the .app so macOS doesn't kill it on launch.
+
+        Without any signature, Gatekeeper terminates the app immediately
+        (the classic "opens and flashes" symptom). Ad-hoc signing (-s -)
+        lets it run on the build machine and any machine that trusts the
+        developer. For distribution, replace with a Developer ID signature.
+        """
+        if self.dry_run:
+            self.log("  (would codesign)")
+            return
+        if not os.path.isdir(app_bundle):
+            return
+        self.log(f"  · ad-hoc codesigning {os.path.basename(app_bundle)}")
+        self.run(["codesign", "--force", "--deep", "--sign", "-",
+                  app_bundle], check=False)
+        rc = self.run(["codesign", "--verify", "--verbose=1",
+                       app_bundle], check=False)
+        if rc == 0:
+            self.log("  ✓ codesign verified")
+        else:
+            self.log("  ! codesign verification failed — app may be killed on launch")
 
     def _create_macos_dmg(self):
         """Create a .dmg from the built RustDesk.app using create-dmg.
