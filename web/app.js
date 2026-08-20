@@ -302,7 +302,8 @@ async function refreshPreview() {
     `dark   : ${e.CUSTOM_THEME_SURFACE_DARK || "(stock)"}\n` +
     `id/me  : ${e.CUSTOM_THEME_ME_COLOR || "(stock green)"}\n` +
     `flags  : delayFix=${e.CUSTOM_DELAY_FIX} hidecm=${e.CUSTOM_HIDE_CM} ` +
-    `xOffline=${e.CUSTOM_X_OFFLINE}`;
+    `xOffline=${e.CUSTOM_X_OFFLINE}\n` +
+    `dir    : ${cfg.direction || "both"}`;
 }
 
 $("#btn-save-config").addEventListener("click", async () => {

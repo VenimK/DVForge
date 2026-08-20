@@ -234,6 +234,13 @@
 
           <fieldset>
             <legend>Tweaks</legend>
+            <label>Connection direction
+              <select data-key="direction">
+                <option value="both">Both — this PC can be controlled and can connect out</option>
+                <option value="incoming">Incoming only — this PC can be controlled, cannot connect out</option>
+                <option value="outgoing">Outgoing only — this PC can connect out, cannot be controlled</option>
+              </select>
+            </label>
             <div class="toggles" id="flag-toggles"></div>
           </fieldset>
 
