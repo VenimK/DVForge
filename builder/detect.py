@@ -9,7 +9,7 @@ The rules come straight from the GitHub Actions workflows in rustdesk-builder-v2
   - Windows desktop  = Flutter Windows engine, MSVC toolchain  -> Windows host only
   - macOS desktop    = Xcode / clang / create-dmg              -> macOS host only
   - Linux desktop    = gcc/clang + flutter-elinux for arm64     -> Linux host only
-  - Android (all archs) = Android NDK (cross-platform)          -> Linux host only
+  - Android (all archs) = Android NDK + JDK 17 + Flutter        -> Linux or macOS
 """
 
 import os
@@ -188,22 +188,24 @@ TARGETS = [
      "label": "Linux arm64 — .deb", "ext": "deb", "host_os": ["Linux"],
      "note": "arm64 build. Native on an arm64 Linux host; needs flutter-elinux."},
 
-    # ---- Android (NDK) -> Linux host only ----
-    # NOTE: Android builds on macOS and Windows are disabled — the NDK/Gradle/
-    # OpenSSL toolchain is unreliable on those hosts (broken MSYS2 Perl breaks
-    # openssl-sys on Windows; NDK/Gradle issues on macOS). Use a Linux host.
+    # ---- Android (NDK) -> Linux or macOS ----
+    # Windows is still blocked: MSYS2 Perl breaks openssl-sys. macOS uses the
+    # NDK r28c darwin.dmg (HOST_TAG darwin-aarch64 or darwin-x86_64).
     {"id": "android-arm64", "platform": "android", "arch": "aarch64",
-     "label": "Android arm64-v8a APK", "ext": "apk", "host_os": ["Linux"],
-     "note": "Most modern phones. Built via Android NDK on Linux."},
+     "label": "Android arm64-v8a APK", "ext": "apk",
+     "host_os": ["Linux", "macOS"],
+     "note": "Most modern phones. Built via Android NDK."},
     {"id": "android-armv7", "platform": "android", "arch": "armv7",
-     "label": "Android armeabi-v7a APK", "ext": "apk", "host_os": ["Linux"],
+     "label": "Android armeabi-v7a APK", "ext": "apk",
+     "host_os": ["Linux", "macOS"],
      "note": "Older 32-bit phones."},
     {"id": "android-x86_64", "platform": "android", "arch": "x86_64",
-     "label": "Android x86_64 APK", "ext": "apk", "host_os": ["Linux"],
+     "label": "Android x86_64 APK", "ext": "apk",
+     "host_os": ["Linux", "macOS"],
      "note": "Emulators / x86 tablets."},
     {"id": "android-universal", "platform": "android", "arch": "universal",
      "label": "Android universal APK (all ABIs)", "ext": "apk",
-     "host_os": ["Linux"],
+     "host_os": ["Linux", "macOS"],
      "note": "One APK for every device — recommended. Reuses the per-arch native libs."},
 
     # ---- macOS (Xcode) -> macOS host only ----
@@ -293,7 +295,7 @@ def required_tools(target, host_os_name):
     if p == "macos":
         return common + ["flutter", "xcode"]
     if p == "android":
-        tools = common + ["flutter", "android_ndk", "java"]
+        tools = common + ["flutter", "android_ndk", "android_sdk", "java"]
         # On a Windows host the Rust host toolchain is MSVC, so building anything
         # (even Android — its build scripts/proc-macros compile for the host)
         # needs link.exe from the VC++ Build Tools. Reflect that honestly.

@@ -2,7 +2,7 @@
 
 # DVForge
 
-A local desktop app that does what your `rustdesk-builder-v2` GitHub Actions
+A local desktop app that does what your  GitHub Actions
 workflows do — build a custom RustDesk client with your server, key, password
 and permissions baked in — but **on your own machine, with no GitHub**.
 
@@ -22,12 +22,13 @@ No dependencies beyond **Python 3** — the whole app uses the standard library.
 **Windows, macOS (Intel + Apple Silicon), and Linux** — the exact same folder.
 `app.py` is pure standard-library Python, so the only thing you need already
 installed is **Python 3.8+** (macOS and most Linux ship it; on Windows you
-install it once). Everything else — Flutter, LLVM, the NDK, the JDK, vcpkg — the
+install it once). Everything else — Flutter, LLVM, the NDK, the Android SDK, the JDK, vcpkg — the
 app can download for you into a local `.toolchains/` folder.
 
 The capability board then shows what *that* machine can build: a Windows PC
-builds Windows, a Mac builds macOS (Apple Silicon, Intel, or universal), a
-Linux box builds Linux + Android. Same app, different lit cells.
+builds Windows, a Mac builds macOS (Apple Silicon, Intel, or universal) **and
+Android APKs**, a Linux box builds Linux + Android. Same app, different lit
+cells.
 
 ---
 
@@ -64,12 +65,13 @@ no cross-OS desktop builds):
 | macOS Intel `.dmg`             | macOS (native on Intel; ARM Macs cross-compile x86_64) |
 | macOS universal `.dmg`         | macOS (lipo of both slices) |
 | Linux `.deb`/`.rpm`/`.AppImage`| Linux only        |
-| **Android APKs** (all ABIs)    | **Linux host** |
+| **Android APKs** (all ABIs)    | **Linux or macOS** |
 
 So: a Windows PC builds Windows; a Linux box builds Linux + Android; a Mac
-builds macOS. The capability board shows this automatically — lit (amber) cells
-are ready, outlined (steel) cells need a toolchain, hatched cells need a
-different host OS.
+builds macOS **and Android APKs**. Windows still cannot build APKs (MSYS2 Perl
+breaks `openssl-sys`). The capability board shows this automatically — lit
+(amber) cells are ready, outlined (steel) cells need a toolchain, hatched cells
+need a different host OS.
 
 ### macOS targets (Intel, Apple Silicon, universal)
 
@@ -85,6 +87,23 @@ Examples: `MyApp-1.4.9-aarch64.dmg`, `MyApp-1.4.9-x86_64.dmg`, `MyApp-1.4.9-univ
 
 Universal installs `arm64-osx` and `x64-osx` into **isolated** vcpkg roots so the second triplet does not delete the first (manifest-mode vcpkg otherwise prunes `installed/arm64-osx` and FFmpeg headers vanish). Cross-target cargo on a `/Volumes` NAS uses `~/Library/Caches/dvforge/cargo-target/` and turns sccache off — rustc rmeta encode is unreliable on network volumes.
 
+### Android APKs on macOS
+
+The board lights Android cells on a Mac once JDK 17, NDK r28c, and the
+Android SDK are present (same Flutter 3.24.5 you already use for DMGs).
+All three install into `.toolchains/`:
+
+| Need | How |
+|------|-----|
+| JDK 17 | Board **install**, or `brew install openjdk@17` |
+| Android NDK r28c | Board **install** (darwin.dmg → `.toolchains/android_ndk`) |
+| Android SDK | Board **install** (cmdline-tools + API 34 → `.toolchains/android_sdk`) |
+| All of the above | `bash Setup-DVForge-macOS.sh --with-android` |
+
+Then pick **Android arm64-v8a**, **armeabi-v7a**, **x86_64**, or **universal**.
+DVForge sets NDK `HOST_TAG` to `darwin-aarch64` on Apple Silicon when that
+prebuilt exists, otherwise `darwin-x86_64` (Rosetta).
+
 **Connection direction** (Config → Tweaks): `both`, `incoming` (host-only), or `outgoing` (client-only). Written as `conn-type` in `custom_.txt`.
 
 ---
@@ -99,10 +118,10 @@ records the needed environment variables in `.toolchains/env.json` and applies
 them on every launch, so the tools "just work" for builds. Delete that folder to
 start clean.
 
-Auto-installable: **Flutter, LLVM 15, Android NDK r28c, JDK 17, vcpkg**, and
-**Rust 1.75** (added via your existing `rustup`). The Visual Studio **C++
-workload** and **Xcode** can't be sideloaded silently, so those stay guided
-steps with a copy-paste hint.
+Auto-installable: **Flutter, LLVM 15, Android NDK r28c, Android SDK, JDK 17,
+vcpkg**, and **Rust 1.75** (added via your existing `rustup`). The Visual
+Studio **C++ workload** and **Xcode** can't be sideloaded silently, so those
+stay guided steps with a copy-paste hint.
 
 Versions mirror the workflows:
 
@@ -116,7 +135,8 @@ Versions mirror the workflows:
 | vcpkg           | pinned  | native deps (ffmpeg, hwcodec)  |
 | MSBuild (VS)    | 2022    | Windows `.msi`                 |
 | Java (JDK)      | 17      | Android                        |
-| Android NDK     | r27c    | Android                        |
+| Android NDK     | r28c    | Android                        |
+| Android SDK     | API 34  | Android (`flutter build apk`)  |
 | Xcode CLT       | —       | macOS                          |
 
 Point `VCPKG_ROOT` at your vcpkg checkout; the builder checks out the pinned

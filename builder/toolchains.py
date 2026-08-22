@@ -2,12 +2,12 @@
 toolchains.py — optionally auto-download the build toolchains into a local
 `.toolchains/` folder next to the app, with **no admin rights and no system
 changes**. We extract portable archives, then record the env vars (PATH
-additions, LIBCLANG_PATH, VCPKG_ROOT, ANDROID_NDK_HOME, JAVA_HOME) to
+additions, LIBCLANG_PATH, VCPKG_ROOT, ANDROID_NDK_HOME, ANDROID_SDK_ROOT, JAVA_HOME) to
 `.toolchains/env.json`. `app.py` loads that file on startup and applies it, so
 detection immediately sees the freshly-installed tools.
 
 What can be auto-installed (portable, deterministic):
-    flutter · llvm · vcpkg · android_ndk · java · rust(add 1.75 via rustup)
+    flutter · llvm · vcpkg · android_ndk · android_sdk · java · rust(add 1.75 via rustup)
 
 What can't (needs a real system installer / elevation) stays a guided hint
 or a package-manager install:
@@ -46,6 +46,7 @@ SIZE_HINTS = {
     "flutter":     {"download": "~1.1 GB", "disk": "~2.8 GB", "version": "3.24.5"},
     "llvm":        {"download": "~150 MB", "disk": "~2.5 GB", "version": "15.0.6"},
     "android_ndk": {"download": "~700 MB", "disk": "~2.6 GB", "version": "r28c"},
+    "android_sdk": {"download": "~160 MB + packages", "disk": "~1.2 GB", "version": "cmdline-tools + API 34"},
     "java":        {"download": "~190 MB", "disk": "~330 MB", "version": "17 (Temurin)"},
     "vcpkg":       {"download": "~10 MB",  "disk": "~600 MB", "version": "pinned"},
     "rust":        {"download": "~250 MB", "disk": "~800 MB", "version": "1.75"},
@@ -80,7 +81,15 @@ def _arch():
 FLUTTER_BASE = "https://storage.googleapis.com/flutter_infra_release/releases/stable"
 LLVM_REL = "https://github.com/llvm/llvm-project/releases/download/llvmorg-15.0.6"
 NDK_BASE = "https://dl.google.com/android/repository"
+# cmdline-tools zip (same pin as Setup-DVForge-WSL2.ps1). sdkmanager then
+# installs platform-tools + android-34 + build-tools into the same folder.
+CMDLINE_TOOLS_VER = "11076708"
 ADOPTIUM = "https://api.adoptium.net/v3/binary/latest/17/ga"
+SDK_PACKAGES = (
+    "platform-tools",
+    "platforms;android-34",
+    "build-tools;34.0.0",
+)
 
 TOOLS = {
     "flutter": {
@@ -139,6 +148,25 @@ TOOLS = {
             ("macOS", "arm64"):    (f"{ADOPTIUM}/mac/aarch64/jdk/hotspot/normal/eclipse", "tar"),
         },
         "marker": os.path.join("bin", "java" + EXE),
+    },
+    # After java: sdkmanager is a Java tool. install-missing walks TOOLS in
+    # insertion order, so JDK 17 is on disk before this bootstrap runs.
+    "android_sdk": {
+        "label": "Android SDK (cmdline-tools + API 34)",
+        "kind": "archive",
+        "urls": {
+            ("Linux", "x86_64"): (
+                f"{NDK_BASE}/commandlinetools-linux-{CMDLINE_TOOLS_VER}_latest.zip",
+                "zip"),
+            ("macOS", "x86_64"): (
+                f"{NDK_BASE}/commandlinetools-mac-{CMDLINE_TOOLS_VER}_latest.zip",
+                "zip"),
+            ("macOS", "arm64"): (
+                f"{NDK_BASE}/commandlinetools-mac-{CMDLINE_TOOLS_VER}_latest.zip",
+                "zip"),
+        },
+        "marker": os.path.join("cmdline-tools", "latest", "bin",
+                               "sdkmanager.bat" if WIN else "sdkmanager"),
     },
     "vcpkg": {
         "label": "vcpkg (native deps)",
@@ -235,6 +263,7 @@ TOOLS = {
 
 # which detection id each tool satisfies (prereqs.py ids)
 SATISFIES = {"flutter": "flutter", "llvm": "llvm", "android_ndk": "android_ndk",
+             "android_sdk": "android_sdk",
              "java": "java", "vcpkg": "vcpkg", "rust": "rust",
              "vs_buildtools": "msbuild", "nuget": "nuget", "dotnet": "dotnet",
              "sccache": "sccache",
@@ -383,10 +412,10 @@ def installable(host_os=None, host_arch=None):
     out = {}
     for tid, spec in TOOLS.items():
         ok, reason = True, ""
-        # Android builds are only supported on Linux — don't offer the NDK for
-        # install on macOS/Windows (the build_android path is kept for Linux).
-        if tid == "android_ndk" and host_os != "Linux":
-            ok, reason = False, "Android builds are only supported on Linux"
+        # Android APKs are Linux/macOS. Windows is still blocked (MSYS2 Perl
+        # breaks openssl-sys), so don't offer NDK/SDK installers there.
+        if tid in ("android_ndk", "android_sdk") and host_os == "Windows":
+            ok, reason = False, "Android builds are not supported on Windows"
         elif spec["kind"] == "archive":
             if (host_os, host_arch) not in spec["urls"]:
                 ok, reason = False, f"no portable {spec['label']} for {host_os}/{host_arch}"
@@ -543,6 +572,214 @@ def _locate(base, marker, log):
             return dirpath
     log(f"  ! could not find marker '{marker}' under {base}")
     return base
+
+
+def _ndk_release_name(home):
+    """Pkg.ReleaseName from source.properties (e.g. r28c), or ''."""
+    props = []
+    p = os.path.join(home or "", "source.properties")
+    if os.path.isfile(p):
+        props.append(p)
+    try:
+        for child in os.listdir(home or ""):
+            if child.endswith(".app"):
+                inner = os.path.join(home, child, "Contents", "NDK",
+                                     "source.properties")
+                if os.path.isfile(inner):
+                    props.append(inner)
+    except OSError:
+        pass
+    for path in props:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    if line.startswith("Pkg.ReleaseName"):
+                        return line.split("=", 1)[-1].strip()
+        except OSError:
+            continue
+    return ""
+
+
+def _sdkmanager_bin(sdk_home):
+    exe = "sdkmanager.bat" if WIN else "sdkmanager"
+    for p in (
+        os.path.join(sdk_home, "cmdline-tools", "latest", "bin", exe),
+        os.path.join(sdk_home, "cmdline-tools", "bin", exe),
+    ):
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+def _layout_android_sdk(home, log):
+    """Google's zip is cmdline-tools/{bin,lib}; sdkmanager wants …/latest/bin."""
+    if os.path.isdir(os.path.join(home, "cmdline-tools", "latest", "bin")):
+        return home
+    inner = os.path.join(home, "cmdline-tools")
+    nested = os.path.join(inner, "cmdline-tools")
+    if os.path.isdir(os.path.join(nested, "bin")):
+        inner = nested
+    if os.path.isdir(os.path.join(inner, "bin")):
+        tmp = home + ".cmdline-tools-tmp"
+        if os.path.exists(tmp):
+            shutil.rmtree(tmp, ignore_errors=True)
+        shutil.move(inner, tmp)
+        dest_parent = os.path.join(home, "cmdline-tools")
+        os.makedirs(dest_parent, exist_ok=True)
+        latest = os.path.join(dest_parent, "latest")
+        if os.path.exists(latest):
+            shutil.rmtree(latest, ignore_errors=True)
+        shutil.move(tmp, latest)
+        log("  · laid out cmdline-tools/latest/")
+    return home
+
+
+def _java_home_for_sdk(root):
+    """JDK home for sdkmanager. Prefer .toolchains/java (install-missing order)."""
+    cands = []
+    jh = os.environ.get("JAVA_HOME") or ""
+    if jh:
+        cands.append(jh)
+    if root:
+        tc = os.path.join(root, ".toolchains", "java")
+        cands.extend([
+            os.path.join(tc, "Contents", "Home"),
+            tc,
+        ])
+        # Temurin tarball nests jdk-17.*/Contents/Home/bin/java
+        if os.path.isdir(tc):
+            try:
+                for dirpath, _dirs, files in os.walk(tc):
+                    if ("java" + EXE) in files and os.path.basename(dirpath) == "bin":
+                        cands.append(os.path.dirname(dirpath))
+                        break
+            except OSError:
+                pass
+    cands.extend([
+        "/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home",
+        "/opt/homebrew/opt/openjdk@17",
+        "/usr/local/opt/openjdk@17",
+        "/usr/lib/jvm/java-17-openjdk-amd64",
+        "/usr/lib/jvm/java-17-openjdk",
+    ])
+    for cand in cands:
+        if not cand:
+            continue
+        home = cand
+        nested = os.path.join(home, "Contents", "Home")
+        if os.path.isdir(os.path.join(nested, "bin")):
+            home = nested
+        java = os.path.join(home, "bin", "java" + EXE)
+        if os.path.isfile(java):
+            return home
+    which = shutil.which("java")
+    if which:
+        bindir = os.path.dirname(os.path.abspath(which))
+        home = os.path.dirname(bindir)
+        if os.path.isdir(home):
+            return home
+    return ""
+
+
+def _write_android_licenses(sdk_home, log):
+    licenses = os.path.join(sdk_home, "licenses")
+    os.makedirs(licenses, exist_ok=True)
+    files = {
+        "android-sdk-license": (
+            "\n8933bad161af4178b1185d1a37fbf41ea5269c55\n"
+            "\nd56f5187479451eabf01fb78af6dfcb131a6481e\n"
+            "24333f8a63b6825ea9c5514f83c2829b004d1fee\n"),
+        "android-sdk-preview-license":
+            "\n84831b9409646a918e30573bab4c9c91346d8abd\n",
+        "intel-android-extra-license":
+            "\nd975f751698a77b662f1254ddbeed3901e976f5a\n",
+        "google-gdk-license":
+            "\n33b6a2b64607f11b759f320ef9dff4ae5c47d97a\n",
+    }
+    for name, content in files.items():
+        with open(os.path.join(licenses, name), "w") as f:
+            f.write(content)
+    log("  · wrote Android SDK licenses")
+
+
+def _chmod_sdk_binaries(sdk_home):
+    if WIN:
+        return
+    for rel in (
+        os.path.join("cmdline-tools", "latest", "bin"),
+        "platform-tools",
+        os.path.join("build-tools", "34.0.0"),
+    ):
+        d = os.path.join(sdk_home, rel)
+        if not os.path.isdir(d):
+            continue
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for n in names:
+            p = os.path.join(d, n)
+            if os.path.isfile(p) and not n.endswith((".jar", ".bat", ".dll")):
+                try:
+                    os.chmod(p, os.stat(p).st_mode | 0o111)
+                except OSError:
+                    pass
+
+
+def _bootstrap_android_sdk(sdk_home, root, log, cancelled):
+    """After cmdline-tools extract: licenses + platform-tools/android-34/build-tools."""
+    sm = _sdkmanager_bin(sdk_home)
+    if not sm:
+        raise RuntimeError(
+            "sdkmanager missing after cmdline-tools extract — zip layout changed?")
+    _chmod_sdk_binaries(sdk_home)
+    _write_android_licenses(sdk_home, log)
+    plat = os.path.join(sdk_home, "platforms", "android-34")
+    pt = os.path.join(sdk_home, "platform-tools")
+    bt = os.path.join(sdk_home, "build-tools", "34.0.0")
+    if os.path.isdir(plat) and os.path.isdir(pt) and os.path.isdir(bt):
+        log("  ✓ Android SDK packages already present")
+        return
+    if cancelled():
+        raise RuntimeError("cancelled")
+    env = os.environ.copy()
+    env["ANDROID_SDK_ROOT"] = sdk_home
+    env["ANDROID_HOME"] = sdk_home
+    jhome = _java_home_for_sdk(root)
+    if jhome:
+        env["JAVA_HOME"] = jhome
+        env["PATH"] = os.path.join(jhome, "bin") + os.pathsep + env.get("PATH", "")
+        log(f"  · sdkmanager JAVA_HOME={jhome}")
+    else:
+        log("  ! no JDK found — sdkmanager needs Java. Install JDK 17 first.")
+    try:
+        subprocess.run(
+            [sm, f"--sdk_root={sdk_home}", "--licenses"],
+            input="y\n" * 30, env=env, check=False,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            encoding="utf-8", errors="replace", timeout=180)
+    except Exception as exc:
+        log(f"  ! sdkmanager --licenses: {exc}")
+    log("  · sdkmanager " + " ".join(SDK_PACKAGES))
+    try:
+        proc = subprocess.run(
+            [sm, f"--sdk_root={sdk_home}"] + list(SDK_PACKAGES),
+            env=env, check=False,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            encoding="utf-8", errors="replace", timeout=900)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("sdkmanager timed out installing SDK packages")
+    if cancelled():
+        raise RuntimeError("cancelled")
+    for line in (proc.stdout or "").splitlines():
+        if line.strip():
+            log("    " + line)
+    _chmod_sdk_binaries(sdk_home)
+    if not os.path.isdir(plat):
+        raise RuntimeError(
+            "sdkmanager did not install platforms/android-34 "
+            f"(exit {proc.returncode})")
+    log("  ✓ Android SDK platforms + build-tools installed")
 
 
 def find_flutter_home(root):
@@ -772,6 +1009,16 @@ def _env_for(tid, home):
         return {"vars": {"JAVA_HOME": jhome}, "path": [os.path.join(jhome, "bin")]}
     if tid == "android_ndk":
         return {"vars": {"ANDROID_NDK_HOME": home, "ANDROID_NDK_ROOT": home}, "path": []}
+    if tid == "android_sdk":
+        path = []
+        for sub in (
+            os.path.join(home, "cmdline-tools", "latest", "bin"),
+            os.path.join(home, "platform-tools"),
+        ):
+            if os.path.isdir(sub):
+                path.append(sub)
+        return {"vars": {"ANDROID_SDK_ROOT": home, "ANDROID_HOME": home},
+                "path": path}
     if tid == "vcpkg":
         return {"vars": {"VCPKG_ROOT": home}, "path": [home]}
     if tid == "sccache":
@@ -1240,6 +1487,43 @@ def install_one(tid, root, log, cancelled=lambda: False):
             log(f"  ! installer finished but clang not found under {home_target}")
         return {"tool": tid, "home": home, "env": env}
 
+    # Skip the (large) re-download when this archive is already the pin.
+    if os.path.isdir(home_target) and arch_kind not in ("pip", "nsis"):
+        skip_home = None
+        if tid == "android_ndk":
+            have = _ndk_release_name(home_target)
+            want = PINNED.get("ndk", "r28c")
+            if have == want:
+                skip_home = None
+                if _system() == "macOS":
+                    for child in sorted(os.listdir(home_target)):
+                        if child.endswith(".app"):
+                            app_ndk = os.path.join(
+                                home_target, child, "Contents", "NDK")
+                            if os.path.isdir(os.path.join(app_ndk, "toolchains")):
+                                skip_home = app_ndk
+                                break
+                if skip_home is None:
+                    skip_home = _locate(home_target, spec["marker"], log)
+            else:
+                log(f"  · existing NDK is {have or 'unknown'}, want {want} — reinstall")
+        elif tid == "android_sdk":
+            laid = _layout_android_sdk(home_target, log)
+            if _sdkmanager_bin(laid):
+                _bootstrap_android_sdk(laid, root, log, cancelled)
+                if os.path.isdir(os.path.join(laid, "platforms", "android-34")):
+                    skip_home = laid
+        else:
+            found = _locate(home_target, spec.get("marker", ""), lambda m: None)
+            if found and os.path.exists(os.path.join(found, spec.get("marker", ""))):
+                skip_home = found
+        if skip_home:
+            if tid == "flutter":
+                repair_flutter_permissions(skip_home, log, deep=True)
+            env = _env_for(tid, skip_home)
+            log(f"  ✓ already installed at {skip_home}")
+            return {"tool": tid, "home": skip_home, "env": env}
+
     ext = {"zip": ".zip", "dmg": ".dmg"}.get(arch_kind, ".tar")
     with tempfile.TemporaryDirectory() as tmp:
         fname = os.path.join(tmp, tid + ext)
@@ -1251,11 +1535,14 @@ def install_one(tid, root, log, cancelled=lambda: False):
             shutil.rmtree(home_target, ignore_errors=True)
         _extract(fname, arch_kind, home_target, log)
 
-    # macOS NDK r28c ships as a .app bundle inside the DMG. The DMG root
+    # macOS NDK ships as a .app bundle inside the DMG. The DMG root
     # has a source.properties but the actual NDK (toolchains/, build/, etc.)
     # lives at AndroidNDK*.app/Contents/NDK/. _locate finds the root-level
     # source.properties first and returns the wrong directory.
-    if tid == "android_ndk" and _system() == "macOS":
+    if tid == "android_sdk":
+        home = _layout_android_sdk(home_target, log)
+        _bootstrap_android_sdk(home, root, log, cancelled)
+    elif tid == "android_ndk" and _system() == "macOS":
         home = None
         for child in sorted(os.listdir(home_target)):
             if child.endswith(".app"):
@@ -1291,6 +1578,9 @@ def install_one(tid, root, log, cancelled=lambda: False):
 
 def install_many(ids, root, log, cancelled=lambda: False):
     results, errors = [], []
+    # Keep TOOLS order so JDK 17 is on disk before android_sdk's sdkmanager.
+    preferred = {t: i for i, t in enumerate(TOOLS)}
+    ids = sorted(ids, key=lambda t: preferred.get(t, 999))
     for tid in ids:
         if cancelled():
             log("\n[cancelled]")

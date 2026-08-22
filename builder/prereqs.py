@@ -412,12 +412,10 @@ def _ndk_resolve(path):
 
 
 def check_android_ndk():
-    # Android builds are only supported on Linux — the NDK/Gradle/OpenSSL
-    # toolchain is unreliable on macOS (NDK/Gradle issues) and Windows
-    # (broken MSYS2 Perl breaks openssl-sys). Skip the check on those hosts
-    # so the prereqs panel stays clean.
-    if _system() in ("macOS", "Windows"):
-        return _status(False, note="Android builds are only supported on Linux.")
+    # Windows is still unsupported (MSYS2 Perl breaks openssl-sys). macOS
+    # can install the NDK darwin.dmg and build APKs.
+    if _system() == "Windows":
+        return _status(False, note="Android builds are not supported on Windows.")
     # NDK is found via env or inside the Android SDK
     for var in ("ANDROID_NDK_HOME", "ANDROID_NDK_ROOT", "NDK_HOME"):
         v = os.environ.get(var)
@@ -432,6 +430,35 @@ def check_android_ndk():
             if versions:
                 return _status(True, versions[-1], os.path.join(ndk_dir, versions[-1]))
     return _status(False, hint=_install_hint("android_ndk"))
+
+
+def _sdk_valid(path):
+    """True when path has platforms/android-* (enough for flutter build apk)."""
+    plat = os.path.join(path or "", "platforms")
+    if not os.path.isdir(plat):
+        return False
+    try:
+        return any(n.startswith("android-") for n in os.listdir(plat))
+    except OSError:
+        return False
+
+
+def check_android_sdk():
+    if _system() == "Windows":
+        return _status(False, note="Android builds are not supported on Windows.")
+    for var in ("ANDROID_SDK_ROOT", "ANDROID_HOME", "ANDROID_SDK_HOME"):
+        v = os.environ.get(var)
+        if v and _sdk_valid(v):
+            return _status(True, os.path.basename(v.rstrip("/\\")), v)
+    for cand in (
+        os.path.expanduser("~/Library/Android/sdk"),
+        os.path.expanduser("~/Android/Sdk"),
+        "/opt/android-sdk",
+        "/opt/homebrew/share/android-commandlinetools",
+    ):
+        if _sdk_valid(cand):
+            return _status(True, os.path.basename(cand.rstrip("/\\")), cand)
+    return _status(False, hint=_install_hint("android_sdk"))
 
 
 def check_xcode():
@@ -790,6 +817,7 @@ CHECKS = {
     "dotnet": check_dotnet,
     "java": check_java,
     "android_ndk": check_android_ndk,
+    "android_sdk": check_android_sdk,
     "xcode": check_xcode,
     "rpmbuild": check_rpmbuild,
     "appimage_builder": check_appimage_builder,
@@ -819,6 +847,7 @@ LABELS = {
     "dotnet": ".NET SDK (WiX Toolset / MSI)",
     "java": "Java (JDK 17)",
     "android_ndk": "Android NDK",
+    "android_sdk": "Android SDK",
     "xcode": "Xcode command-line tools",
     "rpmbuild": "rpmbuild (RPM packaging)",
     "appimage_builder": "appimage-builder (AppImage packaging)",
@@ -896,8 +925,13 @@ def _install_hint(tool):
         },
         "android_ndk": {
             "Windows": "Install Android Studio, add NDK r28c via SDK Manager, set ANDROID_NDK_HOME.",
-            "Linux": "Install Android command-line tools + NDK r28c, set ANDROID_NDK_HOME.",
-            "macOS": "Install Android Studio / cmdline-tools + NDK r28c, set ANDROID_NDK_HOME.",
+            "Linux": "Click install — DVForge downloads NDK r28c into .toolchains/android_ndk.",
+            "macOS": "Click install — DVForge downloads NDK r28c (darwin.dmg) into .toolchains/android_ndk.",
+        },
+        "android_sdk": {
+            "Windows": "N/A — Android builds are not supported on Windows.",
+            "Linux": "Click install — DVForge puts cmdline-tools + API 34 into .toolchains/android_sdk.",
+            "macOS": "Click install — DVForge puts cmdline-tools + API 34 into .toolchains/android_sdk.",
         },
         "xcode": {
             "macOS": "xcode-select --install   then: brew install create-dmg",

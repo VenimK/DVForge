@@ -23,7 +23,7 @@
 #   bash Setup-DVForge-macOS.sh
 #   bash Setup-DVForge-macOS.sh --in-place
 #   bash Setup-DVForge-macOS.sh --install-root "$HOME/src/DVForge"
-#   bash Setup-DVForge-macOS.sh --with-android   # also JDK 17 + NDK r28c
+#   bash Setup-DVForge-macOS.sh --with-android   # JDK 17 + NDK r28c + SDK (APKs)
 #   bash Setup-DVForge-macOS.sh --skip-optional  # no sccache / imagemagick / potrace
 
 set -euo pipefail
@@ -45,8 +45,8 @@ Options:
   --in-place           Use this script's directory (do not copy/clone)
   --repo-url URL       Git clone URL when the folder is empty
   --skip-optional      Skip sccache, ImageMagick, potrace
-  --with-android       Also install Temurin JDK 17 + NDK r28c
-                       (APKs are still marked Linux-only on the board)
+  --with-android       Also install Temurin JDK 17, NDK r28c, and the
+                       Android SDK (cmdline-tools + API 34) into .toolchains/
   --with-llvm          Accepted for compatibility; LLVM 15.0.6 is installed
                        by default into .toolchains/llvm
   --force              Re-copy / re-clone into install-root
@@ -137,7 +137,7 @@ printf '  Source tree:      %s\n' "${SOURCE_ROOT:-'(git clone)'}"
 printf '  Host triple:      %s\n' "$HOST_TRIPLE"
 printf '  Rust pin:         %s (macOS CI; Windows/Linux use 1.75)\n' "$RUST_TOOLCHAIN"
 printf '  Optional tools:   %s\n' "$( [ "$SKIP_OPTIONAL" -eq 1 ] && echo skip || echo 'sccache + ImageMagick + potrace' )"
-printf '  Android extras:   %s\n' "$( [ "$WITH_ANDROID" -eq 1 ] && echo 'JDK 17 + NDK r28c' || echo no )"
+printf '  Android extras:   %s\n' "$( [ "$WITH_ANDROID" -eq 1 ] && echo 'JDK 17 + NDK r28c + SDK' || echo no )"
 printf '  Portable LLVM:    15.0.6 -> .toolchains/llvm (clang stays off PATH)\n'
 printf '\n'
 
@@ -273,10 +273,13 @@ copy_tree() {
 if is_dvforge_root "$INSTALL_ROOT"; then
   if [ -n "$SOURCE_ROOT" ] && [ "$SOURCE_ROOT" = "$INSTALL_ROOT" ]; then
     skip "Already running inside install root: $INSTALL_ROOT"
-  elif [ "$FORCE" -eq 1 ] && [ -n "$SOURCE_ROOT" ]; then
+  elif [ -n "$SOURCE_ROOT" ]; then
+    # Always refresh app code from the tree this script was launched from.
+    # .toolchains/ is excluded, so Flutter/NDK/JDK downloads are kept.
+    # --force is only needed to wipe a non-DVForge folder or re-clone.
     copy_tree "$SOURCE_ROOT" "$INSTALL_ROOT"
   else
-    skip "DVForge already present at $INSTALL_ROOT (pass --force to re-copy)"
+    skip "DVForge already present at $INSTALL_ROOT (pass --force to re-clone)"
   fi
 elif [ -n "$SOURCE_ROOT" ]; then
   if [ ! -e "$INSTALL_ROOT" ] || [ "$FORCE" -eq 1 ]; then
@@ -317,7 +320,28 @@ if [ "$WITH_LLVM" -eq 1 ]; then
   skip 'LLVM 15.0.6 is already in the default toolchain set'
 fi
 if [ "$WITH_ANDROID" -eq 1 ]; then
-  IDS="${IDS},java,android_ndk"
+  IDS="${IDS},java,android_ndk,android_sdk"
+  # Stale NDK (anything other than r28c) must be replaced.
+  NDK_HOME="${INSTALL_ROOT}/.toolchains/android_ndk"
+  NDK_PROPS=""
+  for cand in \
+      "${NDK_HOME}/source.properties" \
+      "${NDK_HOME}/AndroidNDK"*.app/Contents/NDK/source.properties
+  do
+    if [ -f "$cand" ]; then
+      NDK_PROPS="$cand"
+      break
+    fi
+  done
+  if [ -n "$NDK_PROPS" ]; then
+    NDK_REL="$(awk -F' *= *' '/^Pkg.ReleaseName/ { print $2; exit }' "$NDK_PROPS")"
+    if [ "$NDK_REL" != "r28c" ]; then
+      warn "Removing Android NDK ${NDK_REL:-unknown} (want r28c)"
+      rm -rf "$NDK_HOME"
+    else
+      skip "Android NDK r28c already present"
+    fi
+  fi
 fi
 
 printf '  tools: %s\n' "$IDS"
@@ -327,23 +351,33 @@ export PATH="${HOME}/.cargo/bin:${PATH}"
 
 (
   cd "$INSTALL_ROOT"
-  IDS_CSV="$IDS" "$PY" - <<'PY'
+  IDS_CSV="$IDS" WITH_ANDROID="$WITH_ANDROID" "$PY" - <<'PY'
 import os, sys
 root = os.getcwd()
 ids_csv = os.environ.get("IDS_CSV", "")
 sys.path.insert(0, root)
 from builder import toolchains
 ids = [x.strip() for x in ids_csv.split(",") if x.strip()]
+unknown = [t for t in ids if t not in toolchains.TOOLS]
+if unknown:
+    raise SystemExit(
+        "unknown tool(s) %s — install root is stale. Re-run this script "
+        "from the updated DVForge tree (project files are now refreshed "
+        "automatically)." % (unknown,))
 print("Installing:", ids)
+print("NDK pin:", toolchains.PINNED.get("ndk"),
+      toolchains.TOOLS.get("android_ndk", {}).get("label"))
 r = toolchains.install_many(ids, root, print)
 toolchains.apply_persisted_env(root)
 errs = r.get("errors") or []
 if errs:
     print("TOOLCHAIN_ERRORS", errs)
     core = {"rust", "flutter", "llvm", "vcpkg"}
+    if os.environ.get("WITH_ANDROID") == "1":
+        core |= {"java", "android_ndk", "android_sdk"}
     bad = [e for e in errs if e[0] in core]
     if bad:
-        raise SystemExit("core toolchain install failed: %s" % bad)
+        raise SystemExit("toolchain install failed: %s" % bad)
 print("TOOLCHAINS_OK", r.get("installed"))
 PY
 )
@@ -540,8 +574,13 @@ printf '       or:  python3 app.py\n'
 printf '    3. Open http://127.0.0.1:8765\n'
 printf '\n'
 printf '  Capability board should light macOS — .dmg when Xcode CLT + Flutter are present.\n'
+if [ "$WITH_ANDROID" -eq 1 ]; then
+  printf '  Android APK cells light when JDK 17 + NDK r28c + SDK are in .toolchains/.\n'
+else
+  printf '  Android APKs on this Mac: re-run with --with-android (JDK 17 + NDK + SDK).\n'
+fi
 printf '  Windows .exe/.msi: use Setup-DVForge-Windows.ps1 on a Windows PC.\n'
-printf '  Linux/Android packages: use Setup-DVForge-WSL2.ps1 (or a Linux box).\n'
+printf '  Linux packages: use Setup-DVForge-WSL2.ps1 (or a Linux box).\n'
 printf '\n'
 printf '  Uninstall:\n'
 printf '    bash "%s/Uninstall-DVForge-macOS.sh"\n' "$INSTALL_ROOT"

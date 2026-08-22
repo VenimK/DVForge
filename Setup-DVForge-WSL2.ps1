@@ -304,7 +304,7 @@ else
 
     # Keep stdout visible; only tolerate license-pipe SIGPIPE from `yes`
     set +e
-    yes | "$SDKMANAGER" "platform-tools" "platforms;android-34"
+    yes | "$SDKMANAGER" "platform-tools" "platforms;android-34" "build-tools;34.0.0"
     yes | "$SDKMANAGER" "$NDK_PKG"
     set -e
 

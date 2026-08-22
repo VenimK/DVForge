@@ -2387,6 +2387,24 @@ class Build:
         else:
             self.log("  ! AppImage not found after build")
 
+    def _android_gradle_env(self, jdk17=None):
+        """JAVA_HOME + ANDROID_SDK_ROOT for flutter build apk / Gradle."""
+        env = {}
+        if jdk17:
+            env["JAVA_HOME"] = jdk17
+            env["PATH"] = (os.path.join(jdk17, "bin") + os.pathsep
+                           + os.environ.get("PATH", ""))
+        sdk = (os.environ.get("ANDROID_SDK_ROOT")
+               or os.environ.get("ANDROID_HOME")
+               or "")
+        if not sdk or not os.path.isdir(sdk):
+            cand = os.path.join(self._project_root(), ".toolchains", "android_sdk")
+            sdk = cand if os.path.isdir(cand) else ""
+        if sdk:
+            env["ANDROID_SDK_ROOT"] = sdk
+            env["ANDROID_HOME"] = sdk
+        return env
+
     def _accept_android_sdk_licenses(self, jdk17=None):
         """Find the Android SDK and accept all licenses so Gradle doesn't fail."""
         # 1) Detect SDK path from env, local.properties, or common locations
@@ -2405,9 +2423,11 @@ class Build:
                             break
         if not sdk:
             for cand in (
+                os.path.join(self._project_root(), ".toolchains", "android_sdk"),
                 os.path.expanduser("~/Library/Android/sdk"),
                 "/opt/homebrew/share/android-commandlinetools",
                 "/opt/android-sdk",
+                os.path.expanduser("~/Android/Sdk"),
                 os.path.expanduser("~/AppData/Local/Android/Sdk"),
                 "C:\\Android\\sdk",
                 os.path.join(os.environ.get("LOCALAPPDATA", ""),
@@ -2485,6 +2505,207 @@ class Build:
             self.log(f"  ! sdkmanager --licenses failed: {exc}")
         self.log("  ✓ Android SDK licenses accepted")
 
+    def _ndk_host_tag(self, ndk_home=""):
+        """NDK llvm/prebuilt/<tag> for this host.
+
+        NDK r28c on Apple Silicon may ship darwin-aarch64, darwin-x86_64, or
+        both. Prefer the native tag when it exists; otherwise the other
+        darwin/linux tag (Rosetta / qemu).
+        """
+        os_name = self.host.get("os")
+        arch = self.host.get("arch") or ""
+        arm = arch in ("aarch64", "arm64")
+        if os_name == "macOS":
+            preferred = (["darwin-aarch64", "darwin-x86_64"] if arm
+                         else ["darwin-x86_64", "darwin-aarch64"])
+        elif os_name == "Windows":
+            preferred = ["windows-x86_64"]
+        else:
+            preferred = (["linux-aarch64", "linux-x86_64"] if arm
+                         else ["linux-x86_64", "linux-aarch64"])
+        prebuilt = os.path.join(ndk_home or "", "toolchains", "llvm", "prebuilt")
+        tags = []
+        if os.path.isdir(prebuilt):
+            try:
+                tags = [n for n in os.listdir(prebuilt)
+                        if os.path.isdir(os.path.join(prebuilt, n))]
+            except OSError:
+                tags = []
+        for p in preferred:
+            if p in tags:
+                return p
+        if tags:
+            return tags[0]
+        return preferred[0]
+
+    def _patch_android_deps_script(self, path, host_tag):
+        """1.4.9 build_android_deps.sh hardcodes linux-x86_64 and GNU readlink -f."""
+        if self.dry_run or not os.path.isfile(path) or not host_tag:
+            return
+        with open(path, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+        orig = text
+        text, n_tag = re.subn(
+            r'HOST_TAG="[^"]*"', f'HOST_TAG="{host_tag}"', text, count=1)
+        if self._is_macos_host() and "readlink -f" in text:
+            portable = 'SCRIPTDIR="$(cd "$(dirname "$0")" && pwd)"'
+            text2, n_rl = re.subn(
+                r'SCRIPTDIR="\$\(readlink -f "\$0"\)"\s*\n'
+                r'SCRIPTDIR="\$\(dirname "\$SCRIPTDIR"\)"',
+                portable, text, count=1)
+            if n_rl:
+                text = text2
+            else:
+                text = text.replace(
+                    'SCRIPTDIR="$(readlink -f "$0")"', portable, 1)
+                text, _ = re.subn(
+                    r'\nSCRIPTDIR="\$\(dirname "\$SCRIPTDIR"\)"',
+                    "\n# dirname skipped; SCRIPTDIR is already the script dir",
+                    text, count=1)
+        if text != orig:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+            self.log(f"  · patched flutter/build_android_deps.sh "
+                     f"(HOST_TAG={host_tag})")
+        elif n_tag:
+            self.log(f"  · build_android_deps.sh HOST_TAG={host_tag}")
+
+    def _patch_android_ndk_script(self, path):
+        """Android only needs librustdesk.so — skip host-style bins (naming/service)."""
+        if self.dry_run or not os.path.isfile(path):
+            return
+        with open(path, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+        if re.search(r"\s--lib(\s|$)", text):
+            return
+        new, n = re.subn(
+            r"(build --locked --release --features \S+)",
+            r"\1 --lib",
+            text,
+            count=1,
+        )
+        if not n:
+            new, n = re.subn(
+                r"(cargo ndk\b[^\n]*\bbuild\b)",
+                r"\1 --lib",
+                text,
+                count=1,
+            )
+        if n and new != text:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(new)
+            self.log(f"  · patched {os.path.basename(path)} with --lib")
+
+    def _ensure_android_16k_pages(self):
+        """Android 15+ refuses APKs whose JNI .so LOAD segments are 4 KiB.
+
+        NDK r28c defaults to 16 KiB; we still pass the flag so a leftover
+        r27c (or older cargo-ndk link) cannot produce a 4 KiB .so that
+        Android 15+ rejects with INSTALL_FAILED_INVALID_APK.
+        """
+        cfg_dir = os.path.join(self.src_dir, ".cargo")
+        cfg = os.path.join(cfg_dir, "config.toml")
+        if self.dry_run:
+            self.log("  · (dry-run) would set Android 16 KiB page-size rustflags")
+            return
+        os.makedirs(cfg_dir, exist_ok=True)
+        existing = ""
+        if os.path.isfile(cfg):
+            with open(cfg, encoding="utf-8", errors="replace") as f:
+                existing = f.read()
+        if "max-page-size=16384" in existing:
+            self.log("  · Android 16 KiB page size already in .cargo/config.toml")
+            return
+        block = "\n".join([
+            "",
+            "# DVForge: 16 KiB ELF LOAD so the APK installs on Android 15+",
+            '[target.aarch64-linux-android]',
+            'rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]',
+            '[target.armv7-linux-androideabi]',
+            'rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]',
+            '[target.x86_64-linux-android]',
+            'rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]',
+            '[target.i686-linux-android]',
+            'rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]',
+            "",
+        ])
+        with open(cfg, "a", encoding="utf-8") as f:
+            f.write(block)
+        self.log("  · .cargo/config.toml: 16 KiB ELF page size for Android")
+
+    def _android_llvm_ar_env(self, ndk_bin, target):
+        """Autotools (libsodium-sys) uses $AR, not cargo-ndk's AR_<triple>.
+
+        On macOS that defaults to Apple `ar`, which writes a Darwin archive
+        Android ld.lld cannot index → undefined crypto_sign_ed25519_open.
+        """
+        env = {}
+        if not ndk_bin or not os.path.isdir(ndk_bin):
+            return env
+        ar = os.path.join(ndk_bin, "llvm-ar")
+        ranlib = os.path.join(ndk_bin, "llvm-ranlib")
+        nm = os.path.join(ndk_bin, "llvm-nm")
+        underscored = (target or "").replace("-", "_")
+        triple_u = underscored.upper()
+        if os.path.isfile(ar):
+            env["AR"] = ar
+            env[f"AR_{underscored}"] = ar
+            if triple_u:
+                env[f"CARGO_TARGET_{triple_u}_AR"] = ar
+        if os.path.isfile(ranlib):
+            env["RANLIB"] = ranlib
+            env[f"RANLIB_{underscored}"] = ranlib
+        if os.path.isfile(nm):
+            env["NM"] = nm
+            env[f"NM_{underscored}"] = nm
+        return env
+
+    def _find_jdk17(self):
+        """JDK 17 home (…/bin/java). Gradle + Kotlin fail on JDK 21+."""
+        cands = []
+        jh = os.environ.get("JAVA_HOME") or ""
+        if jh:
+            cands.append(jh)
+        root = self._project_root()
+        cands.extend([
+            os.path.join(root, ".toolchains", "java", "Contents", "Home"),
+            os.path.join(root, ".toolchains", "java"),
+            "/usr/lib/jvm/java-17-openjdk-amd64",
+            "/usr/lib/jvm/java-17-openjdk",
+            "/usr/lib/jvm/temurin-17",
+            "/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home",
+            "/opt/homebrew/opt/openjdk@17",
+            "/usr/local/opt/openjdk@17",
+        ])
+        cands.extend(_glob.glob("/usr/lib/jvm/*17*"))
+        cands.extend(_glob.glob(
+            "/Library/Java/JavaVirtualMachines/*17*/Contents/Home"))
+        cands.extend(_glob.glob(
+            "/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home"))
+        seen = set()
+        for cand in cands:
+            if not cand:
+                continue
+            home = cand
+            nested = os.path.join(home, "Contents", "Home")
+            if os.path.isdir(os.path.join(nested, "bin")):
+                home = nested
+            java = os.path.join(home, "bin", "java")
+            if home in seen or not os.path.isfile(java):
+                continue
+            seen.add(home)
+            if "17" in home.replace("\\", "/"):
+                return home
+            try:
+                out = subprocess.check_output(
+                    [java, "-version"], stderr=subprocess.STDOUT,
+                    encoding="utf-8", errors="replace", timeout=10)
+            except Exception:
+                continue
+            if re.search(r'version "17[\. "]', out) or " 17." in out:
+                return home
+        return None
+
     def build_android(self):
         self.log("\n=== Build Android ===")
         self.customize_for("android")
@@ -2496,28 +2717,13 @@ class Build:
 
         # Android builds require JDK 17 — JDK 21 causes a JVM-target
         # mismatch (Java compiles to 1.8, Kotlin picks up 21 from the JDK).
-        # Detect JDK 17 and set JAVA_HOME so Gradle uses it.
-        jdk17 = None
-        for candidate in (
-            "/usr/lib/jvm/java-17-openjdk-amd64",
-            "/usr/lib/jvm/java-17-openjdk",
-            "/usr/lib/jvm/temurin-17",
-            "/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home",
-        ):
-            if os.path.isdir(candidate):
-                jdk17 = candidate
-                break
-        if not jdk17:
-            # Try to find any java-17 via update-alternatives or common paths
-            hits = (_glob.glob("/usr/lib/jvm/*17*")
-                    + _glob.glob("/Library/Java/JavaVirtualMachines/*17*/Contents/Home"))
-            if hits:
-                jdk17 = hits[0]
+        jdk17 = self._find_jdk17()
         if jdk17:
             self.log(f"  · using JDK 17: {jdk17}")
         else:
             self.log("  ! JDK 17 not found — Android build may fail with "
-                     "JVM-target mismatch. Install openjdk-17-jdk.")
+                     "JVM-target mismatch. Install JDK 17 (board install, "
+                     "brew install openjdk@17, or --with-android).")
 
         # Clean stale Gradle caches from prior JDK 21 attempts
         gradle_cache = os.path.expanduser("~/.gradle/caches")
@@ -2557,20 +2763,14 @@ class Build:
         ndk_home = os.environ.get("ANDROID_NDK_HOME") or os.environ.get("ANDROID_NDK_ROOT", "")
         ndk_sysroot = ""
         ndk_bin = ""
-        if ndk_home:
-            # Detect the prebuilt host tag dynamically
+        host_tag = self._ndk_host_tag(ndk_home)
+        if ndk_home and host_tag:
             prebuilt_base = os.path.join(ndk_home, "toolchains", "llvm", "prebuilt")
-            host_tag = ""
-            if os.path.isdir(prebuilt_base):
-                for tag in os.listdir(prebuilt_base):
-                    if os.path.isdir(os.path.join(prebuilt_base, tag)):
-                        host_tag = tag
-                        break
-            if host_tag:
-                ndk_bin = os.path.join(prebuilt_base, host_tag, "bin")
-                ndk_sysroot = os.path.join(prebuilt_base, host_tag, "sysroot")
-                if not os.path.isdir(ndk_sysroot):
-                    ndk_sysroot = ""
+            ndk_bin = os.path.join(prebuilt_base, host_tag, "bin")
+            ndk_sysroot = os.path.join(prebuilt_base, host_tag, "sysroot")
+            if not os.path.isdir(ndk_sysroot):
+                ndk_sysroot = ""
+            self.log(f"  · NDK HOST_TAG={host_tag}")
 
         # Ensure vcpkg is at the pinned commit — build_android_deps.sh
         # calls vcpkg install but doesn't checkout the right version.
@@ -2593,6 +2793,19 @@ class Build:
         if universal and not wanted:
             wanted = list(archs.keys())  # universal needs all three arch libs
 
+        self._ensure_android_16k_pages()
+
+        deps_script = os.path.join(self.src_dir, "flutter",
+                                   "build_android_deps.sh")
+        if os.path.isfile(deps_script):
+            self._patch_android_deps_script(deps_script, host_tag)
+
+        apk_dir = os.path.join(self.src_dir, "flutter", "build", "app",
+                               "outputs", "flutter-apk")
+        # Flutter leaves previous ABI/universal APKs here. Wipe once before
+        # this run so we cannot collect (and rename) an older ABI.
+        self._clear_files(apk_dir, (".apk",))
+
         for tid in wanted:
             target, ftarget, abi, ndk, jni_arch, cc_prefix = archs[tid]
             self.log(f"\n-- Android {abi} --")
@@ -2600,27 +2813,26 @@ class Build:
             # Install vcpkg deps (FFmpeg, etc.) for this ABI via RustDesk's
             # own script — matches official CI.  Without this, hwcodec can't
             # find libavcodec/libavutil headers.
-            deps_script = os.path.join(self.src_dir, "flutter",
-                                       "build_android_deps.sh")
             if os.path.isfile(deps_script):
                 self.log("  · installing vcpkg Android deps")
-                # Fix hardcoded HOST_TAG — script assumes linux-x86_64 but
-                # macOS needs darwin-x86_64.
-                if self.host.get("os") == "macOS":
-                    self._sed_i(
-                        's/HOST_TAG="linux-x86_64"/HOST_TAG="darwin-x86_64"/g',
-                        deps_script, check=False)
                 bash = self._bash()
+                deps_env = {}
+                if ndk_home:
+                    deps_env["ANDROID_NDK_HOME"] = ndk_home
+                    deps_env["ANDROID_NDK_ROOT"] = ndk_home
+                    deps_env["ANDROID_NDK"] = ndk_home
                 if bash or self.dry_run:
                     self.run([bash or "bash", deps_script, abi],
-                             cwd=self.src_dir, check=False)
+                             cwd=self.src_dir, check=False,
+                             env=deps_env or None)
             else:
                 self.log("  ! flutter/build_android_deps.sh not found — "
                          "hwcodec may fail without vcpkg FFmpeg headers")
 
             self.run(["rustup", "target", "add", target], check=False)
             self._ensure_cargo_install("cargo-ndk", "3.1.2")
-            script = f"./flutter/{ndk}"
+            script = os.path.join(self.src_dir, "flutter", ndk)
+            self._patch_android_ndk_script(script)
             bash = self._bash()
             # Build env: ensure cargo-ndk sees the correct NDK and bindgen
             # gets the Android sysroot.  Do NOT set plain CC/CXX/CFLAGS here —
@@ -2628,10 +2840,26 @@ class Build:
             # host build-dependency) and cause a cross-compiler mismatch.
             # cargo-ndk sets per-target vars (CC_aarch64_linux_android etc.)
             # automatically when ANDROID_NDK_HOME is correct.
-            ndk_env = {}
+            ndk_env = {
+                # Android is always a cross target. sccache + NDK rustc
+                # produced 1800+ cache write errors on macOS.
+                "RUSTC_WRAPPER": None,
+                "CARGO_INCREMENTAL": "0",
+            }
+            # Per-target rustflags (in addition to .cargo/config.toml) so
+            # cargo-ndk 3.1.2 cannot drop the 16 KiB page-size link arg.
+            triple_u = target.replace("-", "_").upper()
+            page = "-C link-arg=-Wl,-z,max-page-size=16384"
+            prev_rf = os.environ.get(f"CARGO_TARGET_{triple_u}_RUSTFLAGS", "")
+            ndk_env[f"CARGO_TARGET_{triple_u}_RUSTFLAGS"] = (
+                (prev_rf + " " + page).strip() if prev_rf else page)
             if ndk_home:
                 ndk_env["ANDROID_NDK_HOME"] = ndk_home
                 ndk_env["ANDROID_NDK_ROOT"] = ndk_home
+                ndk_env["ANDROID_NDK"] = ndk_home
+            ndk_env.update(self._android_llvm_ar_env(ndk_bin, target))
+            if ndk_env.get("AR"):
+                self.log(f"  · AR={ndk_env['AR']}")
             if ndk_sysroot:
                 ndk_env["BINDGEN_EXTRA_CLANG_ARGS"] = f"--sysroot={ndk_sysroot}"
                 ndk_env[f"BINDGEN_EXTRA_CLANG_ARGS_{target.replace('-', '_')}"] = f"--sysroot={ndk_sysroot}"
@@ -2640,9 +2868,16 @@ class Build:
                 target_underscored = target.replace('-', '_')
                 ndk_env[f"CFLAGS_{target_underscored}"] = f"--sysroot={ndk_sysroot}"
                 ndk_env[f"CXXFLAGS_{target_underscored}"] = f"--sysroot={ndk_sysroot}"
-                ndk_env[f"LDFLAGS_{target_underscored}"] = f"--sysroot={ndk_sysroot}"
+                ndk_env[f"LDFLAGS_{target_underscored}"] = (
+                    f"--sysroot={ndk_sysroot} -Wl,-z,max-page-size=16384")
                 self.log(f"  · NDK env: ANDROID_NDK_HOME={ndk_home}")
                 self.log(f"  · sysroot for {target}: {ndk_sysroot}")
+            # Stale Darwin-ar libsodium.a will keep failing until rebuilt.
+            if self._is_macos_host():
+                self.run(["cargo", "clean", "-p", "libsodium-sys",
+                          "--target", target],
+                         cwd=self.src_dir, check=False,
+                         env=ndk_env or None)
             if bash or self.dry_run:
                 self.run([bash or "bash", script], cwd=self.src_dir, check=False,
                          env=ndk_env if ndk_env else None)
@@ -2667,28 +2902,20 @@ class Build:
                     shutil.copy2(cpp_shared, os.path.join(jni, "libc++_shared.so"))
                     self.log(f"  ✓ copied libc++_shared.so → jniLibs/{abi}/")
 
-            # Gradle env with JDK 17 to avoid JVM-target mismatch
-            gradle_env = {}
-            if jdk17:
-                gradle_env["JAVA_HOME"] = jdk17
-                gradle_env["PATH"] = os.path.join(jdk17, "bin") + ":" + os.environ.get("PATH", "")
+            gradle_env = self._android_gradle_env(jdk17)
             if not universal:
                 self.run(["flutter", "build", "apk", "--release",
                           "--target-platform", ftarget, "--split-per-abi"],
                          cwd=os.path.join(self.src_dir, "flutter"), check=False,
-                         env=gradle_env if gradle_env else None)
+                         env=gradle_env or None)
         if universal:
             self.log("\n-- Android universal (all ABIs) --")
-            gradle_env = {}
-            if jdk17:
-                gradle_env["JAVA_HOME"] = jdk17
-                gradle_env["PATH"] = os.path.join(jdk17, "bin") + ":" + os.environ.get("PATH", "")
+            gradle_env = self._android_gradle_env(jdk17)
             self.run(["flutter", "build", "apk", "--release"],
                      cwd=os.path.join(self.src_dir, "flutter"), check=False,
-                     env=gradle_env if gradle_env else None)
-        apk_dir = os.path.join(self.src_dir, "flutter", "build", "app",
-                               "outputs", "flutter-apk")
-        self._collect(apk_dir, (".apk",), "android")
+                     env=gradle_env or None)
+        self._collect(apk_dir, (".apk",), "android",
+                      names=self._android_expected_apk_names())
 
     def build_macos(self):
         self.log("\n=== Build macOS ===")
@@ -3317,7 +3544,38 @@ class Build:
             self.log(f"  ✓ created {dmg_name}")
 
     # ---- artifact collection ---------------------------------------------
-    def _collect(self, root, exts, platform):
+    def _clear_files(self, directory, exts):
+        """Delete files with the given extensions in directory (not recursive)."""
+        if self.dry_run or not os.path.isdir(directory):
+            return
+        removed = 0
+        try:
+            for name in os.listdir(directory):
+                if not any(name.endswith(e) for e in exts):
+                    continue
+                path = os.path.join(directory, name)
+                if os.path.isfile(path):
+                    os.remove(path)
+                    removed += 1
+        except OSError:
+            return
+        if removed:
+            self.log(f"  · cleared {removed} stale {', '.join(exts)} from {directory}")
+
+    def _android_expected_apk_names(self):
+        """Flutter APK filenames this run should produce (not leftovers)."""
+        names = set()
+        if "android-arm64" in self.target_ids:
+            names.add("app-arm64-v8a-release.apk")
+        if "android-armv7" in self.target_ids:
+            names.add("app-armeabi-v7a-release.apk")
+        if "android-x86_64" in self.target_ids:
+            names.add("app-x86_64-release.apk")
+        if "android-universal" in self.target_ids:
+            names.add("app-release.apk")
+        return names
+
+    def _collect(self, root, exts, platform, names=None):
         os.makedirs(self.out_dir, exist_ok=True)
         if self.dry_run or not os.path.isdir(root):
             self.log(f"  (would collect {'/'.join(exts)} from {root})")
@@ -3340,6 +3598,8 @@ class Build:
             dirnames[:] = [d for d in dirnames if d not in skip_dirs]
             for f in files:
                 if not any(f.endswith(e) for e in exts):
+                    continue
+                if names is not None and f not in names:
                     continue
                 if not f.lower().startswith(prefixes):
                     continue
