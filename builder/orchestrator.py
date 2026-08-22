@@ -194,7 +194,11 @@ class Build:
         full_env = os.environ.copy()
         full_env["PATH"] = self._effective_path()
         if env:
-            full_env.update(env)
+            for k, v in env.items():
+                if v is None:
+                    full_env.pop(k, None)
+                else:
+                    full_env[k] = v
 
         # Resolve the executable so Windows finds .exe/.bat/.cmd (via PATHEXT)
         # and tools in ~/.cargo/bin — a bare name otherwise raises WinError 2.
@@ -1313,9 +1317,65 @@ class Build:
         # ffmpeg headers land in the static triplet directory.
         env = dict(os.environ)
         env["VCPKG_DEFAULT_HOST_TRIPLET"] = triplet
-        self.run([vcpkg_exe, "install", "--triplet", triplet,
-                  f"--x-install-root={os.path.join(root, 'installed')}"],
-                 cwd=self.src_dir, check=True, env=env)
+        # Manifest-mode `vcpkg install --triplet X` into a shared installed/
+        # root *prunes every other triplet*. Universal macOS installs
+        # arm64-osx then x64-osx and the second pass deletes arm64-osx —
+        # then cargo --target aarch64-apple-darwin cannot find
+        # libavcodec/avcodec.h. Isolate each triplet, then symlink it back
+        # to installed/{triplet} where scrap/hwcodec look.
+        install_root, pkg_dir = self._vcpkg_isolate_triplet(root, triplet)
+        marker = os.path.join(pkg_dir, "include", "libavcodec", "avcodec.h")
+        if os.path.isfile(marker):
+            self.log(f"  · {triplet} ffmpeg headers already present — skip install")
+        else:
+            self.run([vcpkg_exe, "install", "--triplet", triplet,
+                      f"--x-install-root={install_root}"],
+                     cwd=self.src_dir, check=True, env=env)
+        self._vcpkg_publish_triplet(root, triplet, pkg_dir)
+
+    def _vcpkg_isolate_triplet(self, vcpkg_root, triplet):
+        """Return (x-install-root, {root}/{triplet} package dir) for isolation."""
+        iso_parent = os.path.join(vcpkg_root, "installed-triplets", triplet)
+        pkg = os.path.join(iso_parent, triplet)
+        combined_pkg = os.path.join(vcpkg_root, "installed", triplet)
+        os.makedirs(iso_parent, exist_ok=True)
+        # One-time migrate: previous combined tree → isolated (keep ffmpeg).
+        if (os.path.isdir(combined_pkg) and not os.path.islink(combined_pkg)
+                and not os.path.isdir(pkg)):
+            try:
+                shutil.move(combined_pkg, pkg)
+                self.log(f"  · moved installed/{triplet} → "
+                         f"installed-triplets/{triplet}/{triplet}")
+            except OSError as e:
+                self.log(f"  ! could not migrate installed/{triplet}: {e}")
+        return iso_parent, pkg
+
+    def _vcpkg_publish_triplet(self, vcpkg_root, triplet, pkg_dir):
+        """Make VCPKG_ROOT/installed/{triplet} point at the isolated package."""
+        combined = os.path.join(vcpkg_root, "installed")
+        dest = os.path.join(combined, triplet)
+        if not os.path.isdir(pkg_dir):
+            self.log(f"  ! vcpkg did not create {pkg_dir}")
+            return
+        os.makedirs(combined, exist_ok=True)
+        try:
+            if os.path.islink(dest) or os.path.isfile(dest):
+                os.remove(dest)
+            elif os.path.isdir(dest) and not os.path.samefile(dest, pkg_dir):
+                shutil.rmtree(dest, ignore_errors=True)
+        except OSError:
+            pass
+        if os.path.exists(dest):
+            return
+        try:
+            os.symlink(pkg_dir, dest)
+            self.log(f"  · installed/{triplet} → {pkg_dir}")
+        except OSError as e:
+            self.log(f"  ! symlink installed/{triplet} failed ({e}); copying")
+            try:
+                shutil.copytree(pkg_dir, dest, symlinks=True)
+            except OSError as e2:
+                self.log(f"  ! copy installed/{triplet} failed: {e2}")
 
     # ---- per-platform builds ---------------------------------------------
     def _find_msbuild(self):
@@ -2639,48 +2699,38 @@ class Build:
         # NAS-flattened Flutter framework symlinks + macos_assemble.sh +x.
         self._repair_flutter_xcode_scripts()
         self.customize_for("macos")
-        # Install native vcpkg deps (opus, libyuv, libvpx, ffmpeg) for macOS
-        # before cargo runs, otherwise magnum-opus/scrap/hwcodec fail on
-        # missing headers and libraries.
-        self.setup_vcpkg("arm64-osx")
-        # Official CI pins Rust 1.81 for macOS (1.75 is for Windows/Linux).
-        # M1 builds fail with 1.78+ i128 ABI changes, and 1.81 is the macOS pin.
-        # Toolchain host triple must match this machine; cross targets are separate.
+        specs = self._macos_build_specs()
+        if not specs:
+            raise RuntimeError("no macOS targets selected")
+        self.log("  · arches: " + ", ".join(
+            f"{s['suffix']} (Flutter {s['flutter']})" for s in specs))
+
+        triplets = []
+        for s in specs:
+            for t in s["vcpkg"]:
+                if t not in triplets:
+                    triplets.append(t)
+        for triplet in triplets:
+            self.setup_vcpkg(triplet)
+
         host_triple = self._host_rust_triple()
         toolchain = f"{MAC_RUST_VERSION}-{host_triple}"
         self.run(["rustup", "toolchain", "install", toolchain], check=False)
-        mac_targets = {self._mac_target(), host_triple}
-        if any("universal" in t for t in self.target_ids):
-            mac_targets.update({"aarch64-apple-darwin", "x86_64-apple-darwin"})
-        for target in sorted(mac_targets):
+        rust_targets = {host_triple}
+        for s in specs:
+            rust_targets.update(s["rust"])
+        for target in sorted(rust_targets):
             self.run(["rustup", "target", "add", target,
                       "--toolchain", toolchain], check=False)
         self.run(["rustup", "default", toolchain], check=False)
         self._patch_macos_podfile()
         self._patch_macos_build_py()
+        self._patch_macos_build_py_arch_env()
         self._patch_macos_generated_bridge()
-        rc = self.run([self._py(), "build.py", "--flutter", "--hwcodec"],
-                      cwd=self.src_dir, check=False)
-        app_name = self.config.get("appname", "RustDesk") or "RustDesk"
-        app_dir = os.path.join(self.src_dir, "flutter", "build", "macos",
-                               "Build", "Products", "Release")
-        app_bundle = os.path.join(app_dir, f"{app_name}.app")
-        if not self._macos_app_complete(app_bundle):
-            raise RuntimeError(
-                f"macOS Flutter build did not produce a complete {app_name}.app "
-                f"(flutter/build.py exit {rc}). Not packaging a stub DMG.")
-        env = self._env()
-        if os.path.isdir(app_dir):
-            # Write custom_.txt next to the .app (Category B — runtime pickup)
-            customize.write_custom_txt(app_dir, env, log=self.log)
-        if os.path.isdir(app_bundle):
-            # Also write custom_.txt INSIDE the app bundle's Contents/Resources/
-            # so it travels with the .app inside the DMG (matches VenimK workflow).
-            resources_dir = os.path.join(app_bundle, "Contents", "Resources")
-            os.makedirs(resources_dir, exist_ok=True)
-            customize.write_custom_txt(resources_dir, env, log=self.log)
-        self._codesign_macos_app(app_bundle)
-        self._create_macos_dmg()
+
+        for spec in specs:
+            self._build_one_macos(spec)
+
         self._collect(self.src_dir, (".dmg",), "macos")
 
     def _flutter_sdk_roots(self):
@@ -2831,6 +2881,218 @@ class Build:
                     f.write(content)
                 self.log(f"  · patched {path}: @import FMDB;")
 
+    def _macos_build_specs(self):
+        """One spec per selected macOS artifact (arm64, x86_64, and/or universal)."""
+        catalog = {
+            "macos-arm64-dmg": {
+                "rust": ["aarch64-apple-darwin"],
+                "flutter": "arm64",
+                "only_active": True,
+                "vcpkg": ["arm64-osx"],
+                "suffix": "aarch64",
+            },
+            "macos-x86_64-dmg": {
+                "rust": ["x86_64-apple-darwin"],
+                "flutter": "x86_64",
+                "only_active": True,
+                "vcpkg": ["x64-osx"],
+                "suffix": "x86_64",
+            },
+            "macos-universal-dmg": {
+                "rust": ["aarch64-apple-darwin", "x86_64-apple-darwin"],
+                "flutter": "arm64 x86_64",
+                "only_active": False,
+                "vcpkg": ["arm64-osx", "x64-osx"],
+                "suffix": "universal",
+            },
+        }
+        specs = [catalog[tid] for tid in self.target_ids if tid in catalog]
+        if specs:
+            return specs
+        # Unknown macos-* id: host arch only (same as the old single-cell board).
+        host = self._mac_target()
+        if host.startswith("x86_64"):
+            return [catalog["macos-x86_64-dmg"]]
+        return [catalog["macos-arm64-dmg"]]
+
+    def _build_one_macos(self, spec):
+        """Cargo (+ lipo) for spec['rust'], then Flutter Xcode for spec['flutter']."""
+        self.log(f"\n-- macOS {spec['suffix']} --")
+        features = "hwcodec,flutter"
+        host = self._host_rust_triple()
+        cargo_dir = self._ensure_macos_cargo_dir()
+        cargo_env = {
+            "MACOSX_DEPLOYMENT_TARGET": "10.14",
+            "CARGO_INCREMENTAL": "0",
+            "CARGO_TARGET_DIR": cargo_dir,
+        }
+        for triple in spec["rust"]:
+            cmd = ["cargo", "build", "--locked", "--features", features,
+                   "--release", "--target", triple]
+            self.log(f"  · cargo --target {triple}")
+            env = dict(cargo_env)
+            if triple != host:
+                # sccache + rustc --target on a NAS volume often dies with
+                # "failed to create encoded metadata from file (os error 2)"
+                # (seen on minimal-lexical when crossing ARM → Intel).
+                env["RUSTC_WRAPPER"] = None
+                self.log("  · sccache off for cross-target cargo")
+            rc = self.run(cmd, cwd=self.src_dir, check=False, env=env)
+            if rc != 0:
+                self.log("  ! cargo failed — retry once (no sccache, jobs=1, "
+                         "fresh target dir)")
+                env["RUSTC_WRAPPER"] = None
+                env["CARGO_BUILD_JOBS"] = "1"
+                tdir = os.path.join(cargo_dir, triple)
+                if os.path.isdir(tdir) and not self.dry_run:
+                    self.log(f"  · wiping {tdir}")
+                    _force_rmtree(tdir)
+                rc = self.run(cmd, cwd=self.src_dir, check=False, env=env)
+            if rc != 0:
+                raise RuntimeError(
+                    f"command failed (exit {rc}): cargo build --locked "
+                    f"--features {features} --release --target {triple}")
+        self._stage_macos_binaries(spec["rust"], cargo_dir)
+
+        flutter_macos_build = os.path.join(self.src_dir, "flutter", "build", "macos")
+        if os.path.isdir(flutter_macos_build) and not self.dry_run:
+            self.log("  · cleaning flutter/build/macos (arch switch)")
+            _force_rmtree(flutter_macos_build)
+
+        # Run flutter ourselves. build.py interpolates ARCHS into an
+        # unquoted `os.system(...)` string, so
+        # FLUTTER_XCODE_ARCHS=arm64 x86_64 splits into two shell words
+        # and the universal build dies immediately (exit 255).
+        flutter_dir = os.path.join(self.src_dir, "flutter")
+        flutter_env = {
+            "FLUTTER_XCODE_ARCHS": spec["flutter"],
+            "FLUTTER_XCODE_ONLY_ACTIVE_ARCH":
+                "YES" if spec["only_active"] else "NO",
+            "MACOSX_DEPLOYMENT_TARGET": "10.14",
+        }
+        self.log(f"  · Flutter ARCHS={spec['flutter']!r} "
+                 f"ONLY_ACTIVE_ARCH={flutter_env['FLUTTER_XCODE_ONLY_ACTIVE_ARCH']}")
+        rc = self.run(
+            ["flutter", "build", "macos", "--release"],
+            cwd=flutter_dir, check=False, env=flutter_env)
+        if self.dry_run:
+            self.log("  (dry run — skip app completeness check / dmg)")
+            return
+
+        app_name = self.config.get("appname", "RustDesk") or "RustDesk"
+        app_dir = os.path.join(self.src_dir, "flutter", "build", "macos",
+                               "Build", "Products", "Release")
+        app_bundle = self._find_macos_app(app_dir, app_name)
+        if not self._macos_app_complete(app_bundle):
+            self._log_macos_app_debug(app_dir, app_bundle)
+            raise RuntimeError(
+                f"macOS {spec['suffix']} Flutter build did not produce a complete "
+                f"{app_name}.app (flutter exit {rc}). Not packaging a stub DMG.")
+        env = self._env()
+        customize.write_custom_txt(app_dir, env, log=self.log)
+        resources_dir = os.path.join(app_bundle, "Contents", "Resources")
+        os.makedirs(resources_dir, exist_ok=True)
+        customize.write_custom_txt(resources_dir, env, log=self.log)
+        # build.py used to copy target/release/service into the .app
+        service = os.path.join(self.src_dir, "target", "release", "service")
+        macos_bin = os.path.join(app_bundle, "Contents", "MacOS")
+        if os.path.isfile(service) and os.path.isdir(macos_bin):
+            shutil.copy2(service, macos_bin)
+            self.log("  · copied service → Contents/MacOS/")
+        exe = os.path.join(macos_bin, app_name)
+        if os.path.isfile(exe):
+            self.run(["lipo", "-info", exe], check=False)
+        self._codesign_macos_app(app_bundle)
+        self._create_macos_dmg(suffix=spec["suffix"])
+
+    def _ensure_macos_cargo_dir(self):
+        """Where cargo writes artifacts.
+
+        rustc rmeta encode (`failed to create encoded metadata from file`)
+        is unreliable on /Volumes NAS shares, especially for
+        --target x86_64-apple-darwin. Keep the target dir on the boot disk.
+        Xcode still links src/target/release/ — _stage_macos_binaries copies
+        the dylibs there.
+        """
+        src = os.path.abspath(self.src_dir)
+        if src.startswith("/Volumes/"):
+            d = os.path.join(os.path.expanduser("~"), "Library", "Caches",
+                             "dvforge", "cargo-target", self.version)
+            os.makedirs(d, exist_ok=True)
+            self.log(f"  · CARGO_TARGET_DIR = {d} (source is on /Volumes)")
+            return d
+        return os.path.join(self.src_dir, "target")
+
+    def _stage_macos_binaries(self, rust_targets, cargo_dir=None):
+        """Copy (or lipo) cargo output into target/release/ where Xcode links it."""
+        if self.dry_run:
+            self.log(f"  (would stage dylibs for {', '.join(rust_targets)})")
+            return
+        cargo_dir = cargo_dir or os.path.join(self.src_dir, "target")
+        rel = os.path.join(self.src_dir, "target", "release")
+        os.makedirs(rel, exist_ok=True)
+        for name in ("liblibrustdesk.dylib", "service"):
+            srcs = [os.path.join(cargo_dir, t, "release", name)
+                    for t in rust_targets]
+            missing = [s for s in srcs if not os.path.isfile(s)]
+            if missing:
+                raise RuntimeError(
+                    "cargo did not produce " + ", ".join(missing))
+            dest = os.path.join(rel, name)
+            if len(srcs) == 1:
+                shutil.copy2(srcs[0], dest)
+            else:
+                self.run(["lipo", "-create"] + srcs + ["-output", dest],
+                         check=True)
+            if name == "liblibrustdesk.dylib":
+                shutil.copy2(dest, os.path.join(rel, "librustdesk.dylib"))
+            self.log(f"  · staged {name} ← {', '.join(rust_targets)}")
+            if len(srcs) > 1:
+                self.run(["lipo", "-info", dest], check=False)
+
+    def _patch_macos_build_py_arch_env(self):
+        """Let DVFORGE_MAC_ARCH / DVFORGE_ONLY_ACTIVE override host-arch Flutter.
+
+        Upstream build.py always uses platform.machine(), so an Apple Silicon
+        Mac could never emit an Intel slice. After this patch, build.py reads
+        those env vars (set per spec in _build_one_macos).
+        """
+        if self.dry_run:
+            return
+        build_py = os.path.join(self.src_dir, "build.py")
+        if not os.path.isfile(build_py):
+            return
+        with open(build_py, "r", encoding="utf-8", errors="surrogateescape") as f:
+            text = f.read()
+        old = (
+            "mac_arch = 'arm64' if platform.machine().lower() "
+            "in ('arm64', 'aarch64') else 'x86_64'\n"
+            "    system2(\n"
+            "        f'FLUTTER_XCODE_ARCHS={mac_arch} "
+            "FLUTTER_XCODE_ONLY_ACTIVE_ARCH=YES flutter build macos --release')"
+        )
+        new = (
+            "mac_arch = os.environ.get('DVFORGE_MAC_ARCH') or "
+            "('arm64' if platform.machine().lower() "
+            "in ('arm64', 'aarch64') else 'x86_64')\n"
+            "    only_active = os.environ.get('DVFORGE_ONLY_ACTIVE') or 'YES'\n"
+            "    system2(\n"
+            "        f'FLUTTER_XCODE_ARCHS={mac_arch} "
+            "FLUTTER_XCODE_ONLY_ACTIVE_ARCH={only_active} "
+            "flutter build macos --release')"
+        )
+        if old not in text:
+            if "DVFORGE_MAC_ARCH" in text:
+                self.log("  · build.py already reads DVFORGE_MAC_ARCH")
+                return
+            self.log("  ! could not patch build.py Flutter ARCHS "
+                     "(upstream layout changed)")
+            return
+        text = text.replace(old, new, 1)
+        with open(build_py, "w", encoding="utf-8", errors="surrogateescape") as f:
+            f.write(text)
+        self.log("  · patched build.py: Flutter ARCHS from DVFORGE_MAC_ARCH")
+
     def _mac_target(self):
         """Rust target triple for the requested macOS build.
 
@@ -2913,8 +3175,47 @@ class Build:
                 f.write(text)
             self.log("  · patched generated_bridge.dart: ptr type + Bool->Uint8")
 
+    def _find_macos_app(self, app_dir, app_name):
+        """Prefer {app_name}.app; otherwise any .app in Release."""
+        named = os.path.join(app_dir, f"{app_name}.app")
+        if self._macos_app_complete(named):
+            return named
+        if os.path.isdir(app_dir):
+            try:
+                for name in sorted(os.listdir(app_dir)):
+                    if name.endswith(".app"):
+                        cand = os.path.join(app_dir, name)
+                        if self._macos_app_complete(cand):
+                            self.log(f"  · using {name} (PRODUCT_NAME mismatch)")
+                            return cand
+            except OSError:
+                pass
+        return named
+
+    def _log_macos_app_debug(self, app_dir, app_bundle):
+        self.log(f"  ! expected app: {app_bundle}")
+        macos = os.path.join(app_bundle or "", "Contents", "MacOS")
+        if os.path.isdir(macos):
+            try:
+                for name in os.listdir(macos):
+                    p = os.path.join(macos, name)
+                    sz = os.path.getsize(p) if os.path.isfile(p) else 0
+                    self.log(f"    Contents/MacOS/{name}  {sz} bytes")
+            except OSError:
+                pass
+        elif os.path.isdir(app_dir):
+            try:
+                self.log("  ! Release contains: " + ", ".join(os.listdir(app_dir)[:20]))
+            except OSError:
+                pass
+
     def _macos_app_complete(self, app):
-        """True when the .app has a real Mach-O in Contents/MacOS (not a stub)."""
+        """True when Contents/MacOS has a real runner (not an empty stub).
+
+        The Flutter *runner* is a thin Swift wrapper (~200–400 KB). The
+        megabytes live in App.framework. A 1 MB floor on the runner
+        rejected a complete universal MacOSUNi.app (295 KB, arm64+x86_64).
+        """
         macos = os.path.join(app or "", "Contents", "MacOS")
         if not os.path.isdir(macos):
             return False
@@ -2922,14 +3223,26 @@ class Build:
             names = os.listdir(macos)
         except OSError:
             return False
+        has_runner = False
         for name in names:
             p = os.path.join(macos, name)
             try:
-                if os.path.isfile(p) and os.path.getsize(p) > 1_000_000:
-                    return True
+                if os.path.isfile(p) and os.path.getsize(p) > 16_384:
+                    has_runner = True
+                    break
             except OSError:
                 continue
-        return False
+        if not has_runner:
+            return False
+        frameworks = os.path.join(app, "Contents", "Frameworks")
+        if os.path.isdir(frameworks):
+            try:
+                if any(n.endswith(".framework") or n.endswith(".dylib")
+                       for n in os.listdir(frameworks)):
+                    return True
+            except OSError:
+                pass
+        return has_runner
 
     def _codesign_macos_app(self, app_bundle):
         """Ad-hoc sign the .app so macOS doesn't kill it on launch.
@@ -2954,11 +3267,13 @@ class Build:
         else:
             self.log("  ! codesign verification failed — app may be killed on launch")
 
-    def _create_macos_dmg(self):
+    def _create_macos_dmg(self, suffix=None):
         """Create a .dmg from the built RustDesk.app using create-dmg.
 
         build.py has the create-dmg step commented out, so the orchestrator
         handles DMG packaging after the Flutter build completes.
+        `suffix` is aarch64 / x86_64 / universal so Intel and ARM artifacts
+        do not overwrite each other.
         """
         if self.dry_run:
             self.log("  (would create .dmg)")
@@ -2975,9 +3290,14 @@ class Build:
         if not create_dmg:
             self.log("  ! create-dmg not found — skipping DMG creation")
             return
-        version = self.config.get("version", "")
+        version = self.config.get("version", "") or self.version
         basename = self._output_basename()
-        dmg_name = f"{basename}-{version}.dmg" if version else f"{basename}.dmg"
+        parts = [basename]
+        if version:
+            parts.append(str(version).lstrip("v"))
+        if suffix:
+            parts.append(suffix)
+        dmg_name = "-".join(parts) + ".dmg"
         dmg_path = os.path.join(self.src_dir, dmg_name)
         flutter_dir = os.path.join(self.src_dir, "flutter")
         tmp_dmg = os.path.join(flutter_dir, f"{basename}.dmg")

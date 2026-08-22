@@ -207,9 +207,18 @@ TARGETS = [
      "note": "One APK for every device — recommended. Reuses the per-arch native libs."},
 
     # ---- macOS (Xcode) -> macOS host only ----
+    # Intel is native on Intel Macs and cross-compiled from Apple Silicon
+    # (rustup target x86_64-apple-darwin + FLUTTER_XCODE_ARCHS=x86_64).
+    {"id": "macos-arm64-dmg", "platform": "macos", "arch": "aarch64",
+     "label": "macOS Apple Silicon — .dmg", "ext": "dmg", "host_os": ["macOS"],
+     "note": "arm64. Native on M1/M2/M3. Needs Xcode + create-dmg."},
+    {"id": "macos-x86_64-dmg", "platform": "macos", "arch": "x86_64",
+     "label": "macOS Intel — .dmg", "ext": "dmg", "host_os": ["macOS"],
+     "note": "x86_64. Native on Intel Macs; Apple Silicon cross-compiles. Needs Xcode + create-dmg."},
     {"id": "macos-universal-dmg", "platform": "macos", "arch": "universal",
-     "label": "macOS — .dmg", "ext": "dmg", "host_os": ["macOS"],
-     "note": "Needs Xcode command-line tools + create-dmg."},
+     "label": "macOS universal (Intel + Apple Silicon) — .dmg", "ext": "dmg",
+     "host_os": ["macOS"],
+     "note": "lipo of arm64 + x86_64. Needs Xcode + create-dmg. Slower than a single-arch build."},
 ]
 
 

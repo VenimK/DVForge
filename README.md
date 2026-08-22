@@ -11,7 +11,7 @@ It has a browser GUI (served by a tiny Python backend) that:
 - reads your **hardware and OS**, and shows a **capability board** of exactly
   which targets this machine can build right now;
 - lets you edit the **baked-in config** (server, key, password, permissions,
-  tweaks) with a live preview of the `custom_.txt` payload;
+  connection direction, tweaks) with a live preview of the `custom_.txt` payload;
 - runs the build locally and **streams the log** into a console, then lists the
   artifacts it produced.
 
@@ -26,8 +26,8 @@ install it once). Everything else — Flutter, LLVM, the NDK, the JDK, vcpkg —
 app can download for you into a local `.toolchains/` folder.
 
 The capability board then shows what *that* machine can build: a Windows PC
-builds Windows + Android, a Mac builds macOS + Android, a Linux box builds
-Linux + Android. Same app, different lit cells.
+builds Windows, a Mac builds macOS (Apple Silicon, Intel, or universal), a
+Linux box builds Linux + Android. Same app, different lit cells.
 
 ---
 
@@ -60,14 +60,32 @@ no cross-OS desktop builds):
 | Target                         | Build host        |
 |--------------------------------|-------------------|
 | Windows `.exe` / `.msi`        | Windows only      |
-| macOS `.dmg`                   | macOS only        |
+| macOS Apple Silicon `.dmg`     | macOS (native on ARM) |
+| macOS Intel `.dmg`             | macOS (native on Intel; ARM Macs cross-compile x86_64) |
+| macOS universal `.dmg`         | macOS (lipo of both slices) |
 | Linux `.deb`/`.rpm`/`.AppImage`| Linux only        |
-| **Android APKs** (all ABIs)    | **any host** (NDK is cross-platform) |
+| **Android APKs** (all ABIs)    | **Linux host** |
 
-So: a Windows PC builds Windows (+ Android); a Linux box builds Linux + Android;
-a Mac builds macOS (+ Android). The capability board shows this automatically —
-lit (amber) cells are ready, outlined (steel) cells need a toolchain, hatched
-cells need a different host OS.
+So: a Windows PC builds Windows; a Linux box builds Linux + Android; a Mac
+builds macOS. The capability board shows this automatically — lit (amber) cells
+are ready, outlined (steel) cells need a toolchain, hatched cells need a
+different host OS.
+
+### macOS targets (Intel, Apple Silicon, universal)
+
+Any Mac can select any of these three cells (Xcode + create-dmg required):
+
+| Board cell | Artifact suffix | What it is |
+|------------|-----------------|------------|
+| macOS Apple Silicon — .dmg | `-aarch64` | Native arm64. Fast on M1/M2/M3. |
+| macOS Intel — .dmg | `-x86_64` | Native on Intel Macs. **Apple Silicon cross-compiles** `x86_64-apple-darwin` (cargo `--target` + `FLUTTER_XCODE_ARCHS=x86_64`). |
+| macOS universal (Intel + Apple Silicon) — .dmg | `-universal` | `lipo` of both Rust dylibs + a fat Flutter runner (`ARCHS=arm64 x86_64`). Slower; needs **both** vcpkg triplets. |
+
+Examples: `MyApp-1.4.9-aarch64.dmg`, `MyApp-1.4.9-x86_64.dmg`, `MyApp-1.4.9-universal.dmg`.
+
+Universal installs `arm64-osx` and `x64-osx` into **isolated** vcpkg roots so the second triplet does not delete the first (manifest-mode vcpkg otherwise prunes `installed/arm64-osx` and FFmpeg headers vanish). Cross-target cargo on a `/Volumes` NAS uses `~/Library/Caches/dvforge/cargo-target/` and turns sccache off — rustc rmeta encode is unreliable on network volumes.
+
+**Connection direction** (Config → Tweaks): `both`, `incoming` (host-only), or `outgoing` (client-only). Written as `conn-type` in `custom_.txt`.
 
 ---
 
@@ -98,7 +116,7 @@ Versions mirror the workflows:
 | vcpkg           | pinned  | native deps (ffmpeg, hwcodec)  |
 | MSBuild (VS)    | 2022    | Windows `.msi`                 |
 | Java (JDK)      | 17      | Android                        |
-| Android NDK     | r28c    | Android                        |
+| Android NDK     | r27c    | Android                        |
 | Xcode CLT       | —       | macOS                          |
 
 Point `VCPKG_ROOT` at your vcpkg checkout; the builder checks out the pinned
