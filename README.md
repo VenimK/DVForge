@@ -1,4 +1,5 @@
 [![PayPal](https://img.shields.io/badge/Donate-PayPal-00457C?logo=paypal&logoColor=white)](https://paypal.me/VenimK)
+[![Discord](https://img.shields.io/badge/Discord-Join%20the%20server-5865F2?logo=discord&logoColor=white)](https://discord.gg/de2srV6sx)
 [![Python](https://img.shields.io/badge/Python-3.8%2B-3776AB?logo=python&logoColor=white)](#quick-start)
 [![Platforms](https://img.shields.io/badge/Windows%20%7C%20macOS%20%7C%20Linux-black)](#who-can-build-what)
 [![RustDesk](https://img.shields.io/badge/RustDesk-1.4.9-orange)](#)
@@ -188,4 +189,4 @@ dvforge/
 
 Built for people who self-host RustDesk and want a client that already knows their server.
 
-[paypal.me/VenimK](https://paypal.me/VenimK)
+**Discord:** [discord.gg/de2srV6sx](https://discord.gg/de2srV6sx) · **Donate:** [paypal.me/VenimK](https://paypal.me/VenimK)
