@@ -274,6 +274,8 @@ function fillConfig(cfg) {
   if (!String(cfg.androidappid || "").trim()) {
     cfg.androidappid = deriveAndroidAppId(cfg.appname, cfg.compname);
   }
+  if (!cfg.installation) cfg.installation = "installationY";
+  if (!cfg.settings) cfg.settings = "settingsY";
   $$("[data-key]").forEach(el => {
     const k = el.dataset.key;
     if (!(k in cfg)) return;
@@ -325,7 +327,9 @@ async function refreshPreview() {
     `id/me  : ${e.CUSTOM_THEME_ME_COLOR || "(stock green)"}\n` +
     `flags  : delayFix=${e.CUSTOM_DELAY_FIX} hidecm=${e.CUSTOM_HIDE_CM} ` +
     `xOffline=${e.CUSTOM_X_OFFLINE}\n` +
-    `dir    : ${cfg.direction || "both"}`;
+    `dir    : ${cfg.direction || "both"}\n` +
+    `lock   : install=${cfg.installation === "installationN" ? "disabled" : "allowed"} ` +
+    `settings=${cfg.settings === "settingsN" ? "disabled" : "allowed"}`;
 }
 
 $("#btn-save-config").addEventListener("click", async () => {

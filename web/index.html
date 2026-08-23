@@ -248,6 +248,19 @@
                 <option value="outgoing">Outgoing only — this PC can connect out, cannot be controlled</option>
               </select>
             </label>
+            <label>In-app installer
+              <select data-key="installation">
+                <option value="installationY">Allowed — user can install from inside the client</option>
+                <option value="installationN">Disabled — hide installation (writes disable-installation)</option>
+              </select>
+            </label>
+            <label>Settings page
+              <select data-key="settings">
+                <option value="settingsY">Allowed — user can open Settings</option>
+                <option value="settingsN">Disabled — lock Settings (writes disable-settings)</option>
+              </select>
+            </label>
+            <p class="theme-live-hint">Both land in <code>custom_.txt</code> at build time. Disabling Settings also hides the gear on desktop; disabling the installer removes the in-app install flow (the <code>.msi</code> / <code>.deb</code> you built still works).</p>
             <div class="toggles" id="flag-toggles"></div>
           </fieldset>
 
