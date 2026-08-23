@@ -26,7 +26,7 @@ import time
 import zipfile
 import platform as _platform
 
-from . import customize, detect, prereqs, toolchains
+from . import customize, detect, prereqs, signing, toolchains
 
 RUSTDESK_REPO = "https://github.com/rustdesk/rustdesk.git"
 WINDOWS_FLUTTER_ENGINE_URL = (
@@ -3609,12 +3609,63 @@ class Build:
                  f"alias {alias})")
         return True
 
-    def _codesign_macos_app(self, app_bundle):
-        """Sign the .app: Developer ID when configured, otherwise ad-hoc.
+    def _macos_is_developer_id(self, identity):
+        return "developer id" in (identity or "").lower()
 
-        Without any signature, Gatekeeper terminates the app immediately
-        (the classic "opens and flashes" symptom). Ad-hoc signing (-s -)
-        is enough on this Mac. A Developer ID identity is required to ship.
+    def _macos_import_p12(self, p12, password):
+        """Import a self-signed PKCS12 into the login keychain (this Mac only)."""
+        cmd = ["security", "import", p12, "-P", password or "",
+               "-A", "-T", "/usr/bin/codesign", "-T", "/usr/bin/security"]
+        logged = list(cmd)
+        logged[logged.index("-P") + 1] = "***"
+        rc = self.run(cmd, check=False, log_as=" ".join(logged))
+        if rc == 0:
+            return True
+        # Windows/OpenSSL 3 PKCS12 often uses an AES MAC that macOS rejects
+        # ("MAC verification failed / wrong password?"). Re-export 3DES/SHA1.
+        openssl = shutil.which("openssl", path=self._effective_path())
+        if openssl and password:
+            legacy = p12 + ".legacy.p12"
+            self.log("  · re-export p12 with macOS-compatible 3DES/SHA1 MAC")
+            r1 = self.run(
+                [openssl, "pkcs12", "-in", p12, "-passin", f"pass:{password}",
+                 "-nodes", "-out", p12 + ".pem.tmp"],
+                check=False,
+                log_as=f"{openssl} pkcs12 -in {p12} -passin pass:*** -nodes …")
+            r2 = 1
+            if r1 == 0:
+                r2 = self.run(
+                    [openssl, "pkcs12", "-export", "-in", p12 + ".pem.tmp",
+                     "-out", legacy, "-passout", f"pass:{password}",
+                     "-keypbe", "PBE-SHA1-3DES", "-certpbe", "PBE-SHA1-3DES",
+                     "-macalg", "sha1"],
+                    check=False,
+                    log_as=f"{openssl} pkcs12 -export -out {legacy} -passout pass:***")
+            try:
+                os.remove(p12 + ".pem.tmp")
+            except OSError:
+                pass
+            if r2 == 0 and os.path.isfile(legacy):
+                cmd2 = ["security", "import", legacy, "-P", password,
+                        "-A", "-T", "/usr/bin/codesign", "-T", "/usr/bin/security"]
+                logged2 = list(cmd2)
+                logged2[logged2.index("-P") + 1] = "***"
+                rc = self.run(cmd2, check=False, log_as=" ".join(logged2))
+                try:
+                    os.remove(legacy)
+                except OSError:
+                    pass
+                if rc == 0:
+                    return True
+        self.log("  ! security import failed — wrong password or PKCS12 format")
+        return False
+
+    def _codesign_macos_app(self, app_bundle):
+        """Sign the .app: Developer ID, else self-signed p12, else ad-hoc.
+
+        Ad-hoc (`codesign -s -`) always remains the fallback when nothing is
+        configured — enough to launch on this Mac. A homemade p12 does not
+        pass Gatekeeper elsewhere; Developer ID is required to ship.
         """
         if self.dry_run:
             self.log("  (would codesign)")
@@ -3622,14 +3673,38 @@ class Build:
         if not os.path.isdir(app_bundle):
             return
         identity = (self.config.get("signMacIdentity") or "").strip()
+        p12 = self._cfg_file("signMacP12")
+        use_dev_id = self._macos_is_developer_id(identity)
+        if p12 and not use_dev_id:
+            pw = self.config.get("signMacP12Password") or ""
+            self.log(f"  · import self-signed {os.path.basename(p12)}")
+            imported = self._macos_import_p12(p12, pw)
+            if not imported:
+                self.log("  · p12 import failed (wrong password or PKCS12 not "
+                         "accepted by Keychain) — ad-hoc instead")
+                identity = ""
+            elif not identity:
+                identity = signing._cn(
+                    self.config.get("appname") or self._output_basename())
+        named_ok = False
         if identity:
-            self.log(f"  · codesign Developer ID ({identity})")
-            self.run(["codesign", "--force", "--deep", "--options", "runtime",
-                      "--timestamp", "--sign", identity, app_bundle],
-                     check=False)
-        else:
-            self.log(f"  · ad-hoc codesigning {os.path.basename(app_bundle)} "
-                     "(set a Developer ID identity to distribute)")
+            if use_dev_id:
+                self.log(f"  · codesign Developer ID ({identity})")
+                rc = self.run(
+                    ["codesign", "--force", "--deep", "--options", "runtime",
+                     "--timestamp", "--sign", identity, app_bundle],
+                    check=False)
+            else:
+                self.log(f"  · codesign self-signed ({identity}) — "
+                         "Gatekeeper will still block other Macs")
+                rc = self.run(
+                    ["codesign", "--force", "--deep", "--sign", identity,
+                     app_bundle], check=False)
+            named_ok = rc == 0
+            if not named_ok:
+                self.log("  · named identity failed — ad-hoc fallback")
+        if not named_ok:
+            self.log(f"  · ad-hoc codesigning {os.path.basename(app_bundle)}")
             self.run(["codesign", "--force", "--deep", "--sign", "-",
                       app_bundle], check=False)
         rc = self.run(["codesign", "--verify", "--verbose=1",
@@ -3641,12 +3716,19 @@ class Build:
 
     def _sign_macos_dmg(self, dmg_path):
         identity = (self.config.get("signMacIdentity") or "").strip()
+        if not identity and self._cfg_file("signMacP12"):
+            identity = signing._cn(
+                self.config.get("appname") or self._output_basename())
         if not identity or not os.path.isfile(dmg_path):
             return
         self.log(f"  · codesign {os.path.basename(dmg_path)}")
-        self.run(["codesign", "--force", "--sign", identity,
-                  "--timestamp", dmg_path], check=False)
-        self._notarize_macos(dmg_path)
+        if self._macos_is_developer_id(identity):
+            self.run(["codesign", "--force", "--timestamp", "--sign",
+                      identity, dmg_path], check=False)
+            self._notarize_macos(dmg_path)
+        else:
+            self.run(["codesign", "--force", "--sign", identity, dmg_path],
+                     check=False)
 
     def _notarize_macos(self, dmg_path):
         """Submit to Apple notary if API key fields are set. Non-fatal."""
@@ -3736,10 +3818,38 @@ class Build:
             "--hide-extension", app_basename,
             tmp_dmg, app,
         ], cwd=flutter_dir, check=False)
-        if os.path.isfile(tmp_dmg):
-            shutil.move(tmp_dmg, dmg_path)
+        produced = tmp_dmg if os.path.isfile(tmp_dmg) else ""
+        if not produced:
+            try:
+                newest = None
+                newest_mtime = 0
+                for name in os.listdir(flutter_dir):
+                    if not name.endswith(".dmg"):
+                        continue
+                    p = os.path.join(flutter_dir, name)
+                    try:
+                        st = os.stat(p)
+                    except OSError:
+                        continue
+                    if st.st_size > 1_000_000 and st.st_mtime >= newest_mtime:
+                        newest, newest_mtime = p, st.st_mtime
+                produced = newest or ""
+            except OSError:
+                produced = ""
+        if not produced:
+            self.log("  · create-dmg did not finish a .dmg — hdiutil fallback")
+            self.run([
+                "hdiutil", "create", "-volname", f"{app_name} Installer",
+                "-srcfolder", app, "-ov", "-format", "UDZO", dmg_path,
+            ], check=False)
+            produced = dmg_path if os.path.isfile(dmg_path) else ""
+        if produced and os.path.abspath(produced) != os.path.abspath(dmg_path):
+            shutil.move(produced, dmg_path)
+        if os.path.isfile(dmg_path):
             self.log(f"  ✓ created {dmg_name}")
             self._sign_macos_dmg(dmg_path)
+        else:
+            self.log("  ! no .dmg produced after create-dmg/hdiutil")
 
     # ---- artifact collection ---------------------------------------------
     def _clear_files(self, directory, exts):

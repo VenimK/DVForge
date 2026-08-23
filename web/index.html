@@ -314,7 +314,18 @@
                 <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M12.2 8.5c0-1.7 1.4-2.5 1.5-2.6-.8-1.2-2.1-1.3-2.5-1.4-1.1-.1-2.1.6-2.6.6-.6 0-1.4-.6-2.4-.6-1.2 0-2.3.7-3 1.8-1.2 2.2-.3 5.4.9 7.2.6.9 1.3 1.8 2.1 1.8.8 0 1.2-.6 2.2-.6s1.3.6 2.2.6c.9 0 1.5-.9 2-.1.8.5 1.1.8 1.9-.2-1.6-.7-1.9-3.2-1.3-4.6zm-1.6-4.7c.4-.5.7-1.3.6-2-1.4.1-2.5 1-2.9 1.8-.4.5-.7 1.3-.6 2 1.5 0 2.4-.8 2.9-1.8z"/></svg>
                 macOS
               </h3>
-              <label>Signing identity<input data-key="signMacIdentity" placeholder="Developer ID Application: Your Name (TEAMID)" spellcheck="false"></label>
+              <label>Signing identity (Developer ID wins if set)<input data-key="signMacIdentity" placeholder="Developer ID Application: Your Name (TEAMID)" spellcheck="false"></label>
+              <label>Self-signed certificate (.p12)
+                <input type="file" id="macp12-file" accept=".p12,.pfx">
+              </label>
+              <div class="upload-preview" id="macp12-preview"></div>
+              <div class="sign-actions">
+                <button type="button" class="mini" id="macp12-selfsigned" title="Create a local code-signing p12 named after the app">Create self-signed p12</button>
+                <button type="button" class="mini" id="macp12-clear" hidden>remove</button>
+              </div>
+              <p class="theme-live-hint" id="macp12-selfsigned-note">Creates a <code>.p12</code> named after the app in <code>workspace/signing/</code>. Used only on a Mac build. If this is empty, DVForge keeps <strong>ad-hoc</strong> signing so the app still launches on this Mac. Self-signed does not pass Gatekeeper on other Macs. A <em>Developer ID</em> in the identity field always wins.</p>
+              <input type="hidden" data-key="signMacP12" id="macp12-file-path">
+              <label>P12 password<input data-key="signMacP12Password" type="password" autocomplete="off"></label>
               <label>Notary API key (.p8 or json)
                 <input type="file" id="macnotary-file" accept=".p8,.json">
               </label>

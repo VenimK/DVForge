@@ -340,7 +340,7 @@ async function refreshPreview() {
     `settings=${cfg.settings === "settingsN" ? "disabled" : "allowed"}\n` +
     `sign   : win=${cfg.signWinPfx ? "Authenticode" : "unsigned"} ` +
     `android=${cfg.signAndroidKeystore ? "keystore" : "debug"} ` +
-    `mac=${cfg.signMacIdentity ? "Developer ID" : "ad-hoc"}`;
+    `mac=${/developer id/i.test(cfg.signMacIdentity || "") ? "Developer ID" : (cfg.signMacP12 || cfg.signMacIdentity ? "self-signed" : "ad-hoc")}`;
 }
 
 $("#btn-save-config").addEventListener("click", async () => {
@@ -406,6 +406,7 @@ $("#logo-clear").addEventListener("click", () => clearBranding("logo"));
 const SIGNING_UPLOADS = [
   { type: "winpfx", key: "signWinPfx", file: "winpfx-file", preview: "winpfx-preview", clear: "winpfx-clear", path: "winpfx-file-path" },
   { type: "androidks", key: "signAndroidKeystore", file: "androidks-file", preview: "androidks-preview", clear: "androidks-clear", path: "androidks-file-path" },
+  { type: "macp12", key: "signMacP12", file: "macp12-file", preview: "macp12-preview", clear: "macp12-clear", path: "macp12-file-path" },
   { type: "macnotary", key: "signMacNotaryKey", file: "macnotary-file", preview: "macnotary-preview", clear: "macnotary-clear", path: "macnotary-file-path" },
 ];
 
@@ -548,6 +549,58 @@ if (androidKsBtn) {
       if (note) note.textContent = "error: " + (e.message || e);
     } finally {
       androidKsBtn.disabled = false;
+    }
+  });
+}
+
+const macP12Btn = $("#macp12-selfsigned");
+if (macP12Btn) {
+  macP12Btn.addEventListener("click", async () => {
+    const note = $("#macp12-selfsigned-note");
+    const cfg = collectConfig();
+    const appname = (cfg.appname || cfg.exename || "app").trim() || "app";
+    macP12Btn.disabled = true;
+    if (note) note.textContent = `Creating ${appname}.p12…`;
+    try {
+      const r = await api("/api/signing/macos-self-signed", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          appname,
+          password: cfg.signMacP12Password || "",
+        }),
+      });
+      if (!r.ok) {
+        if (note) note.textContent = "error: " + (r.error || "failed");
+        return;
+      }
+      const spec = SIGNING_UPLOADS.find(s => s.type === "macp12");
+      if (spec) {
+        $(`#${spec.preview}`).innerHTML =
+          `<span class="up-name">${esc(r.filename)}</span>`;
+        $(`#${spec.clear}`).hidden = false;
+        $(`#${spec.path}`).value = r.path;
+      }
+      const pw = $("[data-key=signMacP12Password]");
+      if (pw && r.password) pw.value = r.password;
+      const ident = $("[data-key=signMacIdentity]");
+      if (ident && r.identity && !/developer id/i.test(ident.value || "")) {
+        ident.value = r.identity;
+      }
+      const saved = collectConfig();
+      await api("/api/config", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(saved),
+      });
+      state.config = saved;
+      refreshPreview();
+      const bits = [`created ${r.filename}`];
+      bits.push("unused = ad-hoc; Gatekeeper still blocks other Macs");
+      if (r.passwordGenerated) bits.push("password filled in — Save already ran");
+      if (note) note.textContent = bits.join(" · ");
+    } catch (e) {
+      if (note) note.textContent = "error: " + (e.message || e);
+    } finally {
+      macP12Btn.disabled = false;
     }
   });
 }

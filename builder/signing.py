@@ -53,6 +53,37 @@ def create_self_signed_pfx(dest_dir, appname, password, years=5):
     }
 
 
+def create_self_signed_mac_p12(dest_dir, appname, password, years=5):
+    """Create a code-signing PKCS12 named {appname}.p12 for local macOS tests.
+
+    Gatekeeper on other Macs still blocks this. Empty Config → ad-hoc signing.
+    """
+    os.makedirs(dest_dir, exist_ok=True)
+    stem = pfx_stem(appname)
+    cn = _cn(appname)
+    p12_path = os.path.join(dest_dir, f"{stem}.p12")
+    cer_path = os.path.join(dest_dir, f"{stem}-macos.cer")
+    if not password:
+        raise ValueError("P12 password is required")
+    # Prefer openssl with 3DES/SHA1 MAC so `security import` on macOS accepts
+    # the file (modern PKCS12 AES-MAC → "MAC verification failed").
+    if shutil.which("openssl"):
+        _create_openssl(p12_path, cer_path, cn, password, years)
+    elif os.name == "nt":
+        _create_windows(p12_path, cer_path, cn, password, years)
+    else:
+        _create_openssl(p12_path, cer_path, cn, password, years)
+    if not os.path.isfile(p12_path) or os.path.getsize(p12_path) < 64:
+        raise RuntimeError("P12 was not created")
+    return {
+        "ok": True,
+        "path": p12_path,
+        "filename": f"{stem}.p12",
+        "cn": cn,
+        "identity": cn,
+    }
+
+
 def _create_windows(pfx_path, cer_path, cn, password, years):
     script = r"""
 $ErrorActionPreference = 'Stop'
@@ -146,13 +177,26 @@ def _create_openssl(pfx_path, cer_path, cn, password, years):
             r = subprocess.run(req, capture_output=True, text=True, timeout=30)
         if r.returncode != 0:
             raise RuntimeError((r.stderr or r.stdout or "openssl req failed")[:400])
-        r = subprocess.run(
+        passout = f"pass:{password}"
+        exports = [
             [openssl, "pkcs12", "-export", "-out", pfx_path,
-             "-inkey", key_path, "-in", cer_path, "-passout", f"pass:{password}"],
-            capture_output=True, text=True, timeout=30,
-        )
-        if r.returncode != 0:
-            raise RuntimeError((r.stderr or r.stdout or "openssl pkcs12 failed")[:400])
+             "-inkey", key_path, "-in", cer_path, "-passout", passout,
+             "-keypbe", "PBE-SHA1-3DES", "-certpbe", "PBE-SHA1-3DES",
+             "-macalg", "sha1"],
+            [openssl, "pkcs12", "-export", "-out", pfx_path,
+             "-inkey", key_path, "-in", cer_path, "-passout", passout,
+             "-legacy"],
+            [openssl, "pkcs12", "-export", "-out", pfx_path,
+             "-inkey", key_path, "-in", cer_path, "-passout", passout],
+        ]
+        r = None
+        for cmd in exports:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            if r.returncode == 0:
+                break
+        if r is None or r.returncode != 0:
+            raise RuntimeError((r.stderr or r.stdout or "openssl pkcs12 failed")[:400]
+                               if r else "openssl pkcs12 failed")
     finally:
         try:
             os.remove(key_path)

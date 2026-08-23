@@ -512,6 +512,35 @@ class Handler(BaseHTTPRequestHandler):
                 "passwordGenerated": generated,
                 "cn": res.get("cn") or appname,
             })
+
+        if path == "/api/signing/macos-self-signed":
+            try:
+                cfg = config_gen.load_config(CONFIG_PATH)
+            except Exception:
+                cfg = {}
+            appname = (data.get("appname") or cfg.get("appname")
+                       or cfg.get("exename") or "app")
+            password = (data.get("password") or cfg.get("signMacP12Password")
+                        or "").strip()
+            generated = False
+            if not password:
+                password = secrets.token_urlsafe(12)
+                generated = True
+            try:
+                res = signing.create_self_signed_mac_p12(
+                    SIGNING_DIR, appname, password)
+            except Exception as e:
+                return self._send_json({"error": str(e)}, 500)
+            rel = os.path.relpath(res["path"], ROOT).replace("\\", "/")
+            return self._send_json({
+                "ok": True,
+                "path": rel,
+                "filename": res["filename"],
+                "password": password,
+                "passwordGenerated": generated,
+                "identity": res.get("identity") or res.get("cn") or appname,
+                "cn": res.get("cn") or appname,
+            })
         
         if path == "/api/open-folder":
             # Reveal a build-output folder in the OS file manager. Accepts an
@@ -597,7 +626,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send_json(
                         {"error": f"{file_type} must be one of {sorted(allowed)}"},
                         400)
-                if file_type in ("winpfx", "androidks"):
+                if file_type in ("winpfx", "androidks", "macp12"):
                     try:
                         cfg = config_gen.load_config(CONFIG_PATH)
                     except Exception:
