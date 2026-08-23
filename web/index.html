@@ -118,7 +118,10 @@
             <label>File name<input data-key="exename" placeholder="RustDesk"></label>
             <label>Company<input data-key="compname"></label>
             <label>Slogan<input data-key="slogan" placeholder="blank = Powered by {appname}"></label>
-            <label>Android app id<input data-key="androidappid" placeholder="blank = default"></label>
+            <label>Android app id<input data-key="androidappid" placeholder="com.yourbrand.client" spellcheck="false"></label>
+            <p class="theme-live-hint">Installed identity on the phone. Must not be
+              <code>com.carriez.flutter_hbb</code> or this APK cannot sit beside official
+              RustDesk. Blank is filled from app + company name on save/build.</p>
           </fieldset>
 
           <fieldset>

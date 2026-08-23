@@ -37,6 +37,53 @@ def _theme_doro(val):
     return v if v in ("default", "override") else "default"
 
 
+STOCK_ANDROID_APP_ID = "com.carriez.flutter_hbb"
+
+
+def _android_id_segment(s, fallback="app"):
+    """One applicationId segment: lowercase [a-z0-9], must start with a letter."""
+    s = re.sub(r"[^a-z0-9]", "", (s or "").strip().lower())
+    if not s:
+        return fallback
+    if s[0].isdigit():
+        s = "a" + s
+    return s
+
+
+def derive_android_app_id(appname, compname=""):
+    """Build a Play-safe id from brand so the APK does not collide with stock RustDesk.
+
+    App=company "Out" → com.out.client
+    App "Out", company "Acme" → com.acme.out
+    App "RustDesk" → stock com.carriez.flutter_hbb
+    """
+    app = _android_id_segment(appname, "client")
+    if app == "rustdesk":
+        return STOCK_ANDROID_APP_ID
+    comp = _android_id_segment(compname, "") if (compname or "").strip() else ""
+    if not comp or comp == app:
+        return f"com.{app}.client"
+    return f"com.{comp}.{app}"
+
+
+def resolve_android_app_id(raw, appname="", compname=""):
+    """Normalize a user-supplied id, or derive one when blank.
+
+    Hyphens are stripped (illegal in applicationId). A single segment is
+    expanded to com.<seg>.client so it always contains a dot.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return derive_android_app_id(appname, compname)
+    parts = [_android_id_segment(p, "") for p in raw.lower().replace("-", ".").split(".")]
+    parts = [p for p in parts if p]
+    if len(parts) == 1:
+        return f"com.{parts[0]}.client"
+    if len(parts) < 2:
+        return derive_android_app_id(appname, compname)
+    return ".".join(parts)
+
+
 def _project_root() -> str:
     """Repo root (parent of builder/)."""
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -97,7 +144,8 @@ def build_custom_env(cfg: dict) -> dict:
         api = f"https://{server}/"
     url_link = d.get("urlLink", "") or "https://rustdesk.com"
     download_link = d.get("downloadLink", "") or "https://rustdesk.com/download"
-    android_app_id = d.get("androidappid", "") or ""
+    android_app_id = resolve_android_app_id(
+        d.get("androidappid", "") or "", appname, compname)
     slogan = d.get("slogan", "") or ""
     icon_file = resolve_branding_path(d.get("iconFile", "") or "", "icon")
     logo_file = resolve_branding_path(d.get("logoFile", "") or "", "logo")

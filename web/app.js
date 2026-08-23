@@ -251,10 +251,28 @@ const THEME_DEFAULTS = {
   themeMeColor: "#21790B",
 };
 
+function androidIdSeg(s, fallback) {
+  s = String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (!s) return fallback;
+  if (/^\d/.test(s)) s = "a" + s;
+  return s;
+}
+
+function deriveAndroidAppId(appname, compname) {
+  const app = androidIdSeg(appname, "client");
+  if (app === "rustdesk") return "com.carriez.flutter_hbb";
+  const comp = androidIdSeg(compname, "");
+  if (!comp || comp === app) return `com.${app}.client`;
+  return `com.${comp}.${app}`;
+}
+
 function fillConfig(cfg) {
   state.config = cfg;
   for (const [k, v] of Object.entries(THEME_DEFAULTS)) {
     if (!cfg[k]) cfg[k] = v;
+  }
+  if (!String(cfg.androidappid || "").trim()) {
+    cfg.androidappid = deriveAndroidAppId(cfg.appname, cfg.compname);
   }
   $$("[data-key]").forEach(el => {
     const k = el.dataset.key;
@@ -275,6 +293,9 @@ function collectConfig() {
     if (el.type === "checkbox") cfg[k] = el.checked ? "on" : false;
     else cfg[k] = el.value;
   });
+  if (!String(cfg.androidappid || "").trim()) {
+    cfg.androidappid = deriveAndroidAppId(cfg.appname, cfg.compname);
+  }
   return cfg;
 }
 
@@ -293,6 +314,7 @@ async function refreshPreview() {
   $("#env-preview").textContent =
     `server : ${e.CUSTOM_SERVER}\nkey    : ${e.CUSTOM_KEY}\napi    : ${e.CUSTOM_API_SERVER}\n` +
     `app    : ${e.CUSTOM_APPNAME}\ncompany: ${e.CUSTOM_COMPNAME}\n` +
+    `android: ${e.CUSTOM_ANDROID_APP_ID || "(stock com.carriez.flutter_hbb)"}\n` +
     `slogan : ${e.CUSTOM_SLOGAN || "(default: Powered by " + e.CUSTOM_APPNAME + ")"}\n` +
     `icon   : ${e.CUSTOM_ICON_FILE ? e.CUSTOM_ICON_FILE.split("/").pop() : "(default)"}\n` +
     `logo   : ${e.CUSTOM_LOGO_FILE ? e.CUSTOM_LOGO_FILE.split("/").pop() : "(default)"}\n` +

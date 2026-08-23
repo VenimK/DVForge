@@ -590,14 +590,29 @@ def _apply_android_embed(src, env, log):
     if not (ok1 and ok2):
         log("    ! WARNING: one of the Android embed points was not found — "
             "password may not preset (see SKILL.md §4.2)")
-    # app id — Android requires at least one dot in the package name.
-    # Auto-prefix with "com." if the user-supplied id has no dot.
-    app_id = env.get("CUSTOM_ANDROID_APP_ID", "")
-    if app_id:
+    # applicationId is the installed identity (Play Store / "already installed").
+    # Leave the Kotlin package and manifest `package=` as com.carriez.flutter_hbb
+    # — that is source identity, and renaming it without moving .kt files breaks
+    # the build. Same approach as rdgen's generator-android.yml.
+    app_id = (env.get("CUSTOM_ANDROID_APP_ID", "") or "").strip()
+    stock_id = "com.carriez.flutter_hbb"
+    gradle = "flutter/android/app/build.gradle"
+    if app_id and app_id != stock_id:
         if "." not in app_id:
-            app_id = f"com.{app_id}"
+            app_id = f"com.{app_id}.client"
             log(f"    · android app id auto-prefixed → {app_id}")
-        sed(src, "flutter/android/app/build.gradle", "com.carriez.flutter_hbb", app_id, log)
+        ok = sed(src, gradle,
+                 f'applicationId "{stock_id}"',
+                 f'applicationId "{app_id}"', log)
+        if not ok:
+            ok = sed(src, gradle, stock_id, app_id, log)
+        if ok:
+            log(f"    · android applicationId → {app_id}")
+        else:
+            log(f"    ! WARNING: applicationId not found in {gradle}")
+    else:
+        log(f"    · android applicationId left as {stock_id} "
+            "(will collide with official RustDesk if both are installed)")
     # remove android scam warning
     sed_regex(src, "flutter/lib/mobile/pages/server_page.dart",
               r'bind\.mainGetLocalOption\(key:\s*"show-scam-warning"\)', '"N"', log)
