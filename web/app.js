@@ -276,6 +276,7 @@ function fillConfig(cfg) {
   }
   if (!cfg.installation) cfg.installation = "installationY";
   if (!cfg.settings) cfg.settings = "settingsY";
+  if (!cfg.signWinTimestamp) cfg.signWinTimestamp = "http://timestamp.digicert.com";
   $$("[data-key]").forEach(el => {
     const k = el.dataset.key;
     if (!(k in cfg)) return;
@@ -329,7 +330,10 @@ async function refreshPreview() {
     `xOffline=${e.CUSTOM_X_OFFLINE}\n` +
     `dir    : ${cfg.direction || "both"}\n` +
     `lock   : install=${cfg.installation === "installationN" ? "disabled" : "allowed"} ` +
-    `settings=${cfg.settings === "settingsN" ? "disabled" : "allowed"}`;
+    `settings=${cfg.settings === "settingsN" ? "disabled" : "allowed"}\n` +
+    `sign   : win=${cfg.signWinPfx ? "Authenticode" : "unsigned"} ` +
+    `android=${cfg.signAndroidKeystore ? "keystore" : "debug"} ` +
+    `mac=${cfg.signMacIdentity ? "Developer ID" : "ad-hoc"}`;
 }
 
 $("#btn-save-config").addEventListener("click", async () => {
@@ -392,6 +396,101 @@ $("#logo-file").addEventListener("change", e => {
 $("#icon-clear").addEventListener("click", () => clearBranding("icon"));
 $("#logo-clear").addEventListener("click", () => clearBranding("logo"));
 
+const SIGNING_UPLOADS = [
+  { type: "winpfx", key: "signWinPfx", file: "winpfx-file", preview: "winpfx-preview", clear: "winpfx-clear", path: "winpfx-file-path" },
+  { type: "androidks", key: "signAndroidKeystore", file: "androidks-file", preview: "androidks-preview", clear: "androidks-clear", path: "androidks-file-path" },
+  { type: "macnotary", key: "signMacNotaryKey", file: "macnotary-file", preview: "macnotary-preview", clear: "macnotary-clear", path: "macnotary-file-path" },
+];
+
+async function uploadSigning(file, spec) {
+  const reader = new FileReader();
+  reader.onload = async () => {
+    const b64 = reader.result.split(",")[1];
+    const r = await api("/api/upload", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: spec.type, data: b64, filename: file.name }),
+    });
+    if (r.ok) {
+      $(`#${spec.preview}`).innerHTML =
+        `<span class="up-name">${esc(r.filename)}</span>`;
+      $(`#${spec.clear}`).hidden = false;
+      $(`#${spec.path}`).value = r.path;
+      refreshPreview();
+    } else {
+      $(`#${spec.preview}`).innerHTML =
+        `<span class="up-name">error: ${esc(r.error || "?")}</span>`;
+    }
+  };
+  reader.readAsDataURL(file);
+}
+
+function clearSigning(spec) {
+  $(`#${spec.preview}`).innerHTML = "";
+  $(`#${spec.clear}`).hidden = true;
+  $(`#${spec.path}`).value = "";
+  $(`#${spec.file}`).value = "";
+  refreshPreview();
+}
+
+SIGNING_UPLOADS.forEach(spec => {
+  const fileEl = $(`#${spec.file}`);
+  const clearEl = $(`#${spec.clear}`);
+  if (fileEl) fileEl.addEventListener("change", e => {
+    if (e.target.files[0]) uploadSigning(e.target.files[0], spec);
+  });
+  if (clearEl) clearEl.addEventListener("click", () => clearSigning(spec));
+});
+
+const winPfxSelfBtn = $("#winpfx-selfsigned");
+if (winPfxSelfBtn) {
+  winPfxSelfBtn.addEventListener("click", async () => {
+    const note = $("#winpfx-selfsigned-note");
+    const cfg = collectConfig();
+    const appname = (cfg.appname || cfg.exename || "app").trim() || "app";
+    winPfxSelfBtn.disabled = true;
+    if (note) note.textContent = `Creating ${appname}.pfx…`;
+    try {
+      const r = await api("/api/signing/self-signed", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          appname,
+          password: cfg.signWinPassword || "",
+        }),
+      });
+      if (!r.ok) {
+        if (note) note.textContent = "error: " + (r.error || "failed");
+        return;
+      }
+      const spec = SIGNING_UPLOADS.find(s => s.type === "winpfx");
+      if (spec) {
+        $(`#${spec.preview}`).innerHTML =
+          `<span class="up-name">${esc(r.filename)}</span>`;
+        $(`#${spec.clear}`).hidden = false;
+        $(`#${spec.path}`).value = r.path;
+      }
+      const pw = $("[data-key=signWinPassword]");
+      if (pw && r.password) pw.value = r.password;
+      const saved = collectConfig();
+      await api("/api/config", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(saved),
+      });
+      state.config = saved;
+      refreshPreview();
+      const bits = [`created ${r.filename}`];
+      if (r.thumbprint) bits.push("thumbprint " + String(r.thumbprint).slice(0, 8) + "…");
+      if (r.trustedLocally) bits.push("trusted on this Windows user");
+      else bits.push("not added to Trusted Root (signature still applied)");
+      if (r.passwordGenerated) bits.push("password filled in — Save already ran");
+      if (note) note.textContent = bits.join(" · ");
+    } catch (e) {
+      if (note) note.textContent = "error: " + (e.message || e);
+    } finally {
+      winPfxSelfBtn.disabled = false;
+    }
+  });
+}
+
 function restoreBrandingPreview(cfg) {
   for (const type of ["icon", "logo"]) {
     const path = cfg[type + "File"];
@@ -407,6 +506,19 @@ function restoreBrandingPreview(cfg) {
       clear.hidden = true;
     }
   }
+  SIGNING_UPLOADS.forEach(spec => {
+    const path = cfg[spec.key];
+    const el = $(`#${spec.preview}`);
+    const clear = $(`#${spec.clear}`);
+    if (!el) return;
+    if (path) {
+      el.innerHTML = `<span class="up-name">${esc(String(path).split("/").pop())}</span>`;
+      if (clear) clear.hidden = false;
+    } else {
+      el.innerHTML = "";
+      if (clear) clear.hidden = true;
+    }
+  });
 }
 
 document.addEventListener("input", e => {

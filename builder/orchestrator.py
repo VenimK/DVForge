@@ -15,6 +15,7 @@ useful to preview a build, or to inspect it on a machine without the toolchains.
 """
 
 import glob as _glob
+import json
 import os
 import re
 import shutil
@@ -185,8 +186,9 @@ class Build:
             cmd = ["sed", "-i", expression, path]
         return self.run(cmd, cwd=cwd, check=check)
 
-    def run(self, cmd, cwd=None, env=None, shell=False, check=True):
-        pretty = cmd if isinstance(cmd, str) else " ".join(cmd)
+    def run(self, cmd, cwd=None, env=None, shell=False, check=True, log_as=None):
+        pretty = log_as if log_as is not None else (
+            cmd if isinstance(cmd, str) else " ".join(str(c) for c in cmd))
         self.log(f"$ {pretty}")
         if self.dry_run:
             return 0
@@ -1570,6 +1572,7 @@ class Build:
             os.makedirs(self.out_dir, exist_ok=True)
             msi_dest = os.path.join(self.out_dir, f"{basename}-{version}.msi")
             shutil.copy2(msi_src, msi_dest)
+            self._sign_windows_file(msi_dest)
             self.artifacts.append(msi_dest)
             self.log(f"  ✓ artifact: {msi_dest}")
         else:
@@ -2086,6 +2089,7 @@ class Build:
             customize.write_custom_txt(release, env, log=self.log)
             self._ensure_windows_printer_driver(release)
             self._install_open_printer_adapter(release)
+            self._sign_windows_binaries(release)
 
         basename = self._output_basename()
         version = self.version
@@ -2113,6 +2117,7 @@ class Build:
                 dest = os.path.join(
                     self.out_dir, f"{basename}-{version}-install.exe")
                 shutil.copy2(portable_exe, dest)
+                self._sign_windows_file(dest)
                 self.artifacts.append(dest)
                 self.log(f"  ✓ artifact: {dest}")
             else:
@@ -2787,8 +2792,13 @@ class Build:
         app_build_gradle = os.path.join(self.src_dir, "flutter", "android",
                                         "app", "build.gradle")
         if os.path.isfile(app_build_gradle):
-            self._sed_i("s/signingConfigs.release/signingConfigs.debug/g",
-                        app_build_gradle, check=False)
+            if self._write_android_key_properties():
+                self.log("  · Android release keystore configured "
+                         "(not switching to debug signing)")
+            else:
+                self._sed_i("s/signingConfigs.release/signingConfigs.debug/g",
+                            app_build_gradle, check=False)
+                self.log("  · no Android keystore — APK will be debug-signed")
 
         # Compute NDK sysroot + toolchain bin for bindgen and autotools.
         # cargo-ndk sets per-target CC_aarch64_linux_android etc. (for cc-rs),
@@ -3505,28 +3515,181 @@ class Build:
                 pass
         return has_runner
 
+    def _cfg_file(self, key):
+        """Resolve a config path (absolute or project-relative) to an existing file."""
+        raw = (self.config.get(key) or "").strip()
+        if not raw:
+            return ""
+        if os.path.isfile(raw):
+            return os.path.abspath(raw)
+        cand = os.path.join(self._project_root(), raw.replace("/", os.sep))
+        return os.path.abspath(cand) if os.path.isfile(cand) else ""
+
+    def _find_signtool(self):
+        found = shutil.which("signtool", path=self._effective_path())
+        if found:
+            return found
+        pf86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+        root = os.path.join(pf86, "Windows Kits", "10", "bin")
+        if not os.path.isdir(root):
+            return ""
+        cands = []
+        for dirpath, _, files in os.walk(root):
+            if "signtool.exe" in files and os.path.basename(dirpath).lower() == "x64":
+                cands.append(os.path.join(dirpath, "signtool.exe"))
+        cands.sort(reverse=True)
+        return cands[0] if cands else ""
+
+    def _sign_windows_binaries(self, release):
+        if not os.path.isdir(release):
+            return
+        want = {(self._output_basename() + ".exe").lower(), "rustdesk.exe"}
+        for name in os.listdir(release):
+            if name.lower() in want:
+                self._sign_windows_file(os.path.join(release, name))
+
+    def _sign_windows_file(self, path):
+        """Authenticode-sign one .exe/.msi with the configured PFX, or skip."""
+        pfx = self._cfg_file("signWinPfx")
+        if not pfx:
+            return
+        if self.dry_run:
+            self.log(f"  (would signtool {os.path.basename(path)})")
+            return
+        if not path or not os.path.isfile(path):
+            return
+        signtool = self._find_signtool()
+        if not signtool:
+            self.log("  ! signtool.exe not found — install the Windows SDK "
+                     "Signing Tools, or add signtool to PATH. Artifact left unsigned.")
+            return
+        password = self.config.get("signWinPassword") or ""
+        ts = (self.config.get("signWinTimestamp") or "").strip() or (
+            "http://timestamp.digicert.com")
+        cmd = [signtool, "sign", "/fd", "SHA256", "/td", "SHA256",
+               "/tr", ts, "/f", pfx, "/p", password, path]
+        logged = list(cmd)
+        logged[logged.index("/p") + 1] = "***"
+        self.log(f"  · Authenticode {os.path.basename(path)}")
+        rc = self.run(cmd, check=False, log_as=" ".join(logged))
+        if rc == 0:
+            self.log(f"  ✓ signed {os.path.basename(path)}")
+        else:
+            self.log(f"  ! signtool failed (exit {rc}) — "
+                     f"{os.path.basename(path)} is unsigned")
+
+    def _write_android_key_properties(self):
+        """Write flutter/android/key.properties for release signing.
+
+        Returns True when a real keystore is ready (caller must NOT switch
+        Gradle to debug signing). Passwords are not logged.
+        """
+        ks = self._cfg_file("signAndroidKeystore")
+        alias = (self.config.get("signAndroidAlias") or "").strip()
+        store_pw = self.config.get("signAndroidStorePassword") or ""
+        key_pw = self.config.get("signAndroidKeyPassword") or store_pw
+        if not ks or not alias or not store_pw:
+            return False
+        android_root = os.path.join(self.src_dir, "flutter", "android")
+        props = os.path.join(android_root, "key.properties")
+        store_file = ks.replace("\\", "/")
+        body = (
+            f"storePassword={store_pw}\n"
+            f"keyPassword={key_pw}\n"
+            f"keyAlias={alias}\n"
+            f"storeFile={store_file}\n"
+        )
+        if self.dry_run:
+            self.log("  (would write flutter/android/key.properties)")
+            return True
+        os.makedirs(android_root, exist_ok=True)
+        with open(props, "w", encoding="utf-8") as f:
+            f.write(body)
+        self.log(f"  · wrote key.properties (keystore {os.path.basename(ks)}, "
+                 f"alias {alias})")
+        return True
+
     def _codesign_macos_app(self, app_bundle):
-        """Ad-hoc sign the .app so macOS doesn't kill it on launch.
+        """Sign the .app: Developer ID when configured, otherwise ad-hoc.
 
         Without any signature, Gatekeeper terminates the app immediately
         (the classic "opens and flashes" symptom). Ad-hoc signing (-s -)
-        lets it run on the build machine and any machine that trusts the
-        developer. For distribution, replace with a Developer ID signature.
+        is enough on this Mac. A Developer ID identity is required to ship.
         """
         if self.dry_run:
             self.log("  (would codesign)")
             return
         if not os.path.isdir(app_bundle):
             return
-        self.log(f"  · ad-hoc codesigning {os.path.basename(app_bundle)}")
-        self.run(["codesign", "--force", "--deep", "--sign", "-",
-                  app_bundle], check=False)
+        identity = (self.config.get("signMacIdentity") or "").strip()
+        if identity:
+            self.log(f"  · codesign Developer ID ({identity})")
+            self.run(["codesign", "--force", "--deep", "--options", "runtime",
+                      "--timestamp", "--sign", identity, app_bundle],
+                     check=False)
+        else:
+            self.log(f"  · ad-hoc codesigning {os.path.basename(app_bundle)} "
+                     "(set a Developer ID identity to distribute)")
+            self.run(["codesign", "--force", "--deep", "--sign", "-",
+                      app_bundle], check=False)
         rc = self.run(["codesign", "--verify", "--verbose=1",
                        app_bundle], check=False)
         if rc == 0:
             self.log("  ✓ codesign verified")
         else:
             self.log("  ! codesign verification failed — app may be killed on launch")
+
+    def _sign_macos_dmg(self, dmg_path):
+        identity = (self.config.get("signMacIdentity") or "").strip()
+        if not identity or not os.path.isfile(dmg_path):
+            return
+        self.log(f"  · codesign {os.path.basename(dmg_path)}")
+        self.run(["codesign", "--force", "--sign", identity,
+                  "--timestamp", dmg_path], check=False)
+        self._notarize_macos(dmg_path)
+
+    def _notarize_macos(self, dmg_path):
+        """Submit to Apple notary if API key fields are set. Non-fatal."""
+        key_id = (self.config.get("signMacNotaryKeyId") or "").strip()
+        issuer = (self.config.get("signMacNotaryIssuer") or "").strip()
+        key_file = self._cfg_file("signMacNotaryKey")
+        if not (key_id and issuer and key_file):
+            if (self.config.get("signMacIdentity") or "").strip():
+                self.log("  · skipping notarize (need key id + issuer + .p8/.json)")
+            return
+        p8 = key_file
+        tmp_p8 = None
+        if key_file.lower().endswith(".json"):
+            try:
+                with open(key_file, encoding="utf-8") as f:
+                    blob = json.load(f)
+                pem = blob.get("private_key") or blob.get("p8") or ""
+                key_id = blob.get("key_id") or key_id
+                issuer = blob.get("issuer_id") or blob.get("issuer") or issuer
+                if pem:
+                    tmp_p8 = os.path.join(self.workspace, "signing",
+                                          "_notary_tmp.p8")
+                    os.makedirs(os.path.dirname(tmp_p8), exist_ok=True)
+                    with open(tmp_p8, "w", encoding="utf-8") as out:
+                        out.write(pem if "BEGIN" in pem else pem)
+                    p8 = tmp_p8
+            except Exception as e:
+                self.log(f"  ! could not read notary JSON ({e})")
+                return
+        self.log(f"  · notarytool submit {os.path.basename(dmg_path)}")
+        rc = self.run(["xcrun", "notarytool", "submit", dmg_path,
+                       "--key", p8, "--key-id", key_id, "--issuer", issuer,
+                       "--wait"], check=False)
+        if rc == 0:
+            self.run(["xcrun", "stapler", "staple", dmg_path], check=False)
+            self.log("  ✓ notarized + stapled")
+        else:
+            self.log(f"  ! notarytool failed (exit {rc})")
+        if tmp_p8:
+            try:
+                os.remove(tmp_p8)
+            except OSError:
+                pass
 
     def _create_macos_dmg(self, suffix=None):
         """Create a .dmg from the built RustDesk.app using create-dmg.
@@ -3576,6 +3739,7 @@ class Build:
         if os.path.isfile(tmp_dmg):
             shutil.move(tmp_dmg, dmg_path)
             self.log(f"  ✓ created {dmg_name}")
+            self._sign_macos_dmg(dmg_path)
 
     # ---- artifact collection ---------------------------------------------
     def _clear_files(self, directory, exts):

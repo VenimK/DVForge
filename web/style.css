@@ -389,6 +389,9 @@ legend { font-size: 11px; letter-spacing: .14em; text-transform: uppercase; colo
 .tg { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--ink); cursor: pointer; }
 .tg input { accent-color: var(--amber); width: 15px; height: 15px; }
 
+.sign-actions { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.sign-actions .mini { font-size: 12px; }
+
 .form-actions { display: flex; align-items: center; gap: 14px; }
 .save-note { font-size: 12.5px; color: var(--good); font-family: var(--mono); }
 

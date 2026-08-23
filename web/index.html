@@ -264,6 +264,46 @@
             <div class="toggles" id="flag-toggles"></div>
           </fieldset>
 
+          <fieldset>
+            <legend>Distribution signing</legend>
+            <p class="theme-live-hint">Optional. Leave empty to keep local/debug signing (this machine only).
+              Certificates are stored under <code>workspace/signing/</code> and are <strong>not</strong> compiled into the client.
+              Linux packages have no Authenticode step.</p>
+
+            <label>Windows Authenticode certificate (.pfx / .p12)
+              <input type="file" id="winpfx-file" accept=".pfx,.p12">
+            </label>
+            <div class="upload-preview" id="winpfx-preview"></div>
+            <div class="sign-actions">
+              <button type="button" class="mini" id="winpfx-selfsigned" title="Create a local code-signing PFX named after the app">Create self-signed PFX</button>
+              <button type="button" class="mini" id="winpfx-clear" hidden>remove</button>
+            </div>
+            <p class="theme-live-hint" id="winpfx-selfsigned-note">Creates a <code>.pfx</code> named after the app (e.g. <code>SIGNING.pfx</code>) in <code>workspace/signing/</code>. Trusted on this Windows user only — other PCs still see an unknown publisher.</p>
+            <input type="hidden" data-key="signWinPfx" id="winpfx-file-path">
+            <label>PFX password<input data-key="signWinPassword" type="password" autocomplete="off"></label>
+            <label>Timestamp server<input data-key="signWinTimestamp" placeholder="http://timestamp.digicert.com"></label>
+
+            <label>Android upload keystore (.jks / .keystore / .p12)
+              <input type="file" id="androidks-file" accept=".jks,.keystore,.p12">
+            </label>
+            <div class="upload-preview" id="androidks-preview"></div>
+            <button type="button" class="mini" id="androidks-clear" hidden>remove</button>
+            <input type="hidden" data-key="signAndroidKeystore" id="androidks-file-path">
+            <label>Key alias<input data-key="signAndroidAlias" placeholder="upload" spellcheck="false"></label>
+            <label>Keystore password<input data-key="signAndroidStorePassword" type="password" autocomplete="off"></label>
+            <label>Key password (blank = keystore password)<input data-key="signAndroidKeyPassword" type="password" autocomplete="off"></label>
+
+            <label>macOS signing identity<input data-key="signMacIdentity" placeholder="Developer ID Application: Your Name (TEAMID)" spellcheck="false"></label>
+            <label>Notary API key (.p8 or json)
+              <input type="file" id="macnotary-file" accept=".p8,.json">
+            </label>
+            <div class="upload-preview" id="macnotary-preview"></div>
+            <button type="button" class="mini" id="macnotary-clear" hidden>remove</button>
+            <input type="hidden" data-key="signMacNotaryKey" id="macnotary-file-path">
+            <label>Notary key id<input data-key="signMacNotaryKeyId" placeholder="ABC123XYZ" spellcheck="false"></label>
+            <label>Notary issuer UUID<input data-key="signMacNotaryIssuer" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" spellcheck="false"></label>
+          </fieldset>
+
           <div class="form-actions">
             <button class="btn primary" id="btn-save-config">Save config</button>
             <span class="save-note" id="save-note"></span>

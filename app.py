@@ -17,6 +17,7 @@ import json
 import os
 import platform
 import queue
+import secrets
 import sys
 import threading
 import time
@@ -25,13 +26,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from builder import detect, prereqs, config_gen, orchestrator, toolchains  # noqa: E402
+from builder import detect, prereqs, config_gen, orchestrator, toolchains, signing  # noqa: E402
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(ROOT, "web")
 CONFIG_PATH = os.path.join(ROOT, "configs", "RustDesk.json")
 WORKSPACE = os.path.join(ROOT, "workspace")
 BRANDING_DIR = os.path.join(WORKSPACE, "branding")
+SIGNING_DIR = os.path.join(WORKSPACE, "signing")
 
 # apply any locally-installed toolchains (.toolchains/env.json) so detection
 # below sees them — must run before the first prereqs scan.
@@ -443,6 +445,36 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/build/cancel":
             return self._send_json({"ok": SESSION.cancel()})
+
+        if path == "/api/signing/self-signed":
+            try:
+                cfg = config_gen.load_config(CONFIG_PATH)
+            except Exception:
+                cfg = {}
+            appname = (data.get("appname") or cfg.get("appname")
+                       or cfg.get("exename") or "app")
+            password = (data.get("password") or cfg.get("signWinPassword")
+                        or "").strip()
+            generated = False
+            if not password:
+                password = secrets.token_urlsafe(12)
+                generated = True
+            try:
+                res = signing.create_self_signed_pfx(
+                    SIGNING_DIR, appname, password)
+            except Exception as e:
+                return self._send_json({"error": str(e)}, 500)
+            rel = os.path.relpath(res["path"], ROOT).replace("\\", "/")
+            return self._send_json({
+                "ok": True,
+                "path": rel,
+                "filename": res["filename"],
+                "password": password,
+                "passwordGenerated": generated,
+                "thumbprint": res.get("thumbprint") or "",
+                "trustedLocally": bool(res.get("trusted_locally")),
+                "cn": res.get("cn") or appname,
+            })
         
         if path == "/api/open-folder":
             # Reveal a build-output folder in the OS file manager. Accepts an
@@ -510,16 +542,41 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send_json({"error": str(e)}, 500)
 
         if path == "/api/upload":
-            file_type = data.get("type", "")  # "icon" or "logo"
+            file_type = data.get("type", "")  # icon/logo or signing kinds
             file_data = data.get("data", "")  # base64-encoded file content
-            filename = data.get("filename", f"{file_type}.png")
+            filename = data.get("filename", f"{file_type}.bin")
             if not file_type or not file_data:
                 return self._send_json({"error": "missing type or data"}, 400)
-            os.makedirs(BRANDING_DIR, exist_ok=True)
-            # sanitize filename — only keep the extension
-            ext = os.path.splitext(filename)[1].lower() or ".png"
-            safe_name = f"{file_type}{ext}"
-            dst = os.path.join(BRANDING_DIR, safe_name)
+            ext = os.path.splitext(filename)[1].lower()
+            signing_kinds = {
+                "winpfx": (SIGNING_DIR, "windows", {".pfx", ".p12"}),
+                "androidks": (SIGNING_DIR, "android", {".jks", ".keystore", ".p12"}),
+                "macp12": (SIGNING_DIR, "macos", {".p12", ".pfx"}),
+                "macnotary": (SIGNING_DIR, "notary-api-key", {".json", ".p8"}),
+            }
+            if file_type in signing_kinds:
+                dest_dir, stem, allowed = signing_kinds[file_type]
+                if ext not in allowed:
+                    return self._send_json(
+                        {"error": f"{file_type} must be one of {sorted(allowed)}"},
+                        400)
+                if file_type == "winpfx":
+                    try:
+                        cfg = config_gen.load_config(CONFIG_PATH)
+                    except Exception:
+                        cfg = {}
+                    stem = signing.pfx_stem(
+                        cfg.get("appname") or cfg.get("exename") or "app")
+                os.makedirs(dest_dir, exist_ok=True)
+                safe_name = f"{stem}{ext}"
+                dst = os.path.join(dest_dir, safe_name)
+            elif file_type in ("icon", "logo"):
+                os.makedirs(BRANDING_DIR, exist_ok=True)
+                ext = ext or ".png"
+                safe_name = f"{file_type}{ext}"
+                dst = os.path.join(BRANDING_DIR, safe_name)
+            else:
+                return self._send_json({"error": f"unknown upload type {file_type}"}, 400)
             try:
                 with open(dst, "wb") as f:
                     f.write(base64.b64decode(file_data))
