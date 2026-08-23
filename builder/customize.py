@@ -153,6 +153,20 @@ def _sanitize_bundle_id(app):
     return re.sub(r"[^a-z0-9.-]", "", sanitized)
 
 
+def _linux_bin_name(filename, app="rustdesk"):
+    """On-disk Linux executable name (CMake BINARY_NAME / Exec=).
+
+    Spaces become hyphens. Anything outside [A-Za-z0-9._+-] is stripped so
+    the name is a valid UNIX filename and a CMake target.
+    """
+    raw = (filename or app or "rustdesk").strip()
+    if raw.lower().endswith(".exe"):
+        raw = raw[:-4]
+    raw = raw.replace(" ", "-")
+    raw = re.sub(r"[^A-Za-z0-9._+-]", "", raw).lstrip(".-")
+    return raw or "rustdesk"
+
+
 def _apply_appname(src, env, platform, log):
     app = env["CUSTOM_APPNAME"]
     if app.lower() == "rustdesk":
@@ -252,6 +266,95 @@ def _apply_appname(src, env, platform, log):
         # Cargo.toml — description (parity with windows/android)
         sed(src, "Cargo.toml", 'description = "RustDesk Remote Desktop"',
             f'description = "{app}"', log)
+    if platform == "linux":
+        _apply_linux_launcher(src, env, app, log)
+
+
+def _apply_linux_launcher(src, env, app, log):
+    """GNOME/KDE identity: .desktop Name= plus CMake BINARY_NAME + packaging.
+
+    Menu label comes from Name=. The on-disk binary, Exec=, Icon=, WM class,
+    /usr/bin symlink, systemd unit, rpm/deb/AppImage paths follow the file
+    name (same field Windows uses for BINARY_NAME). Icon files are installed
+    under that name so the themed icon lookup succeeds.
+    """
+    filename = env.get("CUSTOM_FILENAME", "") or app
+    bin_name = _linux_bin_name(filename, app)
+    gtk_id = (env.get("CUSTOM_ANDROID_APP_ID", "") or "").strip()
+    log(f"  Linux launcher -> Name={app} binary={bin_name}")
+
+    sed(src, "Cargo.toml", 'description = "RustDesk Remote Desktop"',
+        f'description = "{app}"', log)
+
+    if bin_name.lower() != "rustdesk":
+        sed(src, "flutter/linux/CMakeLists.txt",
+            'set(BINARY_NAME "rustdesk")',
+            f'set(BINARY_NAME "{bin_name}")', log)
+        if gtk_id and gtk_id != "com.carriez.flutter_hbb":
+            sed(src, "flutter/linux/CMakeLists.txt",
+                'set(APPLICATION_ID "com.carriez.flutter_hbb")',
+                f'set(APPLICATION_ID "{gtk_id}")', log)
+
+    for rel in ("res/rustdesk.desktop", "res/rustdesk-link.desktop"):
+        sed(src, rel, "Name=RustDesk", f"Name={app}", log)
+        if bin_name.lower() != "rustdesk":
+            sed(src, rel, "Exec=rustdesk", f"Exec={bin_name}", log)
+            sed(src, rel, "TryExec=rustdesk", f"TryExec={bin_name}", log)
+            sed(src, rel, "Icon=rustdesk", f"Icon={bin_name}", log)
+            sed(src, rel, "StartupWMClass=rustdesk",
+                f"StartupWMClass={bin_name}", log)
+
+    if bin_name.lower() == "rustdesk":
+        return
+
+    sed(src, "res/rustdesk.service", "Description=RustDesk",
+        f"Description={app}", log)
+    sed(src, "res/rustdesk.service",
+        "ExecStart=/usr/bin/rustdesk --service",
+        f"ExecStart=/usr/bin/{bin_name} --service", log)
+    sed(src, "res/rustdesk.service",
+        'ExecStop=pkill -f "rustdesk --"',
+        f'ExecStop=pkill -f "{bin_name} --"', log)
+
+    # .deb: symlink the renamed bundle binary; keep /usr/bin/rustdesk too so
+    # leftover scripts still resolve.
+    sed(src, "res/DEBIAN/postinst",
+        "\tln -f -s /usr/share/rustdesk/rustdesk /usr/bin/rustdesk",
+        f"\tln -f -s /usr/share/rustdesk/{bin_name} /usr/bin/{bin_name}\n"
+        f"\tln -f -s /usr/share/rustdesk/{bin_name} /usr/bin/rustdesk",
+        log)
+    sed(src, "res/DEBIAN/prerm",
+        "\t\trm -f /usr/bin/rustdesk",
+        f"\t\trm -f /usr/bin/{bin_name}\n"
+        f"\t\trm -f /usr/bin/rustdesk",
+        log)
+
+    for spec in ("res/rpm-flutter.spec", "res/rpm-flutter-suse.spec"):
+        sed(src, spec,
+            'ln -sf /usr/share/rustdesk/rustdesk /usr/bin/rustdesk',
+            f"ln -sf /usr/share/rustdesk/{bin_name} /usr/bin/{bin_name}\n"
+            f"ln -sf /usr/share/rustdesk/{bin_name} /usr/bin/rustdesk",
+            log)
+        sed(src, spec,
+            "rm /usr/bin/rustdesk || true",
+            f"rm /usr/bin/{bin_name} || true\n"
+            f"    rm /usr/bin/rustdesk || true",
+            log)
+        sed(src, spec, "apps/rustdesk.png", f"apps/{bin_name}.png", log)
+        sed(src, spec, "apps/rustdesk.svg", f"apps/{bin_name}.svg", log)
+
+    sed(src, "build.py", "apps/rustdesk.png", f"apps/{bin_name}.png", log)
+    sed(src, "build.py", "apps/rustdesk.svg", f"apps/{bin_name}.svg", log)
+
+    for yml in ("appimage/AppImageBuilder-x86_64.yml",
+                "appimage/AppImageBuilder-aarch64.yml"):
+        sed(src, yml, "    name: rustdesk", f"    name: {app}", log)
+        sed(src, yml, "    icon: rustdesk", f"    icon: {bin_name}", log)
+        sed(src, yml,
+            "    exec: usr/share/rustdesk/rustdesk",
+            f"    exec: usr/share/rustdesk/{bin_name}", log)
+        sed(src, yml, "apps/rustdesk.png", f"apps/{bin_name}.png", log)
+        sed(src, yml, "apps/rustdesk.svg", f"apps/{bin_name}.svg", log)
 
 
 def _apply_company(src, env, platform, log):

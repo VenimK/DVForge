@@ -1937,6 +1937,38 @@ class Build:
                     return os.path.splitext(name)[0]
         return ""
 
+    def _cached_linux_binary_name(self):
+        """Name of the executable already sitting in the Flutter Linux bundle."""
+        bundle = self._linux_bundle_dir()
+        if not bundle or not os.path.isdir(bundle):
+            return ""
+        for name in os.listdir(bundle):
+            if name.endswith(".so") or name.endswith(".dat"):
+                continue
+            path = os.path.join(bundle, name)
+            if os.path.isfile(path) and os.access(path, os.X_OK):
+                return name
+        return ""
+
+    def _invalidate_stale_flutter_linux(self):
+        """Drop flutter/build/linux when CMake BINARY_NAME changed."""
+        if self.dry_run:
+            return
+        want = customize._linux_bin_name(self._output_basename())
+        have = self._cached_linux_binary_name()
+        if not have:
+            return
+        if have == want:
+            self.log(f"  · flutter linux cache matches BINARY_NAME={want}")
+            return
+        flutter_linux = os.path.join(self.src_dir, "flutter", "build", "linux")
+        self.log(f"  · linux binary renamed ({have} -> {want}) — "
+                 "clearing flutter/build/linux (cargo cache kept)")
+        try:
+            _force_rmtree(flutter_linux)
+        except Exception as e:
+            self.log(f"  ! could not clear flutter linux cache: {e}")
+
     def _invalidate_stale_flutter_windows(self):
         """Drop flutter/build/windows when the CMake target name changed.
 
@@ -2183,6 +2215,8 @@ class Build:
         self.log("\n=== Build Linux ===")
         self.setup_vcpkg("x64-linux")
         self.customize_for("linux")
+        # BINARY_NAME change poisons CMakeCache the same way Windows does.
+        self._invalidate_stale_flutter_linux()
         # base64 custom_.txt staged for build.py + bundle (SKILL.md §4.4)
         if not self.dry_run:
             env = self._env()
