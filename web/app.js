@@ -2,7 +2,14 @@
 
 const $  = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
-const api = (p, opts) => fetch(p, opts).then(r => r.json());
+const api = (p, opts) => fetch(p, opts).then(async r => {
+  let data = {};
+  try { data = await r.json(); } catch { data = { error: r.statusText || "bad response" }; }
+  if (r.status === 404 && String(p).startsWith("/api/signing/")) {
+    data.error = "not found — restart DVForge (close the old window, then run.bat) so it loads the Create keystore / PFX API";
+  }
+  return data;
+});
 
 const state = {
   targets: [],          // matrix rows
@@ -487,6 +494,60 @@ if (winPfxSelfBtn) {
       if (note) note.textContent = "error: " + (e.message || e);
     } finally {
       winPfxSelfBtn.disabled = false;
+    }
+  });
+}
+
+const androidKsBtn = $("#androidks-create");
+if (androidKsBtn) {
+  androidKsBtn.addEventListener("click", async () => {
+    const note = $("#androidks-create-note");
+    const cfg = collectConfig();
+    const appname = (cfg.appname || cfg.exename || "app").trim() || "app";
+    androidKsBtn.disabled = true;
+    if (note) note.textContent = `Creating ${appname}.jks…`;
+    try {
+      const r = await api("/api/signing/android-keystore", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          appname,
+          password: cfg.signAndroidStorePassword || "",
+          alias: cfg.signAndroidAlias || "upload",
+          keyPassword: cfg.signAndroidKeyPassword || "",
+        }),
+      });
+      if (!r.ok) {
+        if (note) note.textContent = "error: " + (r.error || "failed");
+        return;
+      }
+      const spec = SIGNING_UPLOADS.find(s => s.type === "androidks");
+      if (spec) {
+        $(`#${spec.preview}`).innerHTML =
+          `<span class="up-name">${esc(r.filename)}</span>`;
+        $(`#${spec.clear}`).hidden = false;
+        $(`#${spec.path}`).value = r.path;
+      }
+      const aliasEl = $("[data-key=signAndroidAlias]");
+      if (aliasEl && r.alias) aliasEl.value = r.alias;
+      const storePw = $("[data-key=signAndroidStorePassword]");
+      if (storePw && r.password) storePw.value = r.password;
+      const keyPw = $("[data-key=signAndroidKeyPassword]");
+      if (keyPw && r.keyPassword) keyPw.value = r.keyPassword;
+      const saved = collectConfig();
+      await api("/api/config", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(saved),
+      });
+      state.config = saved;
+      refreshPreview();
+      const bits = [`created ${r.filename}`, `alias ${r.alias}`];
+      if (r.passwordGenerated) bits.push("password filled in — Save already ran");
+      bits.push("keep a backup of this file");
+      if (note) note.textContent = bits.join(" · ");
+    } catch (e) {
+      if (note) note.textContent = "error: " + (e.message || e);
+    } finally {
+      androidKsBtn.disabled = false;
     }
   });
 }

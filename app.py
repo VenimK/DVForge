@@ -475,6 +475,43 @@ class Handler(BaseHTTPRequestHandler):
                 "trustedLocally": bool(res.get("trusted_locally")),
                 "cn": res.get("cn") or appname,
             })
+
+        if path == "/api/signing/android-keystore":
+            try:
+                cfg = config_gen.load_config(CONFIG_PATH)
+            except Exception:
+                cfg = {}
+            appname = (data.get("appname") or cfg.get("appname")
+                       or cfg.get("exename") or "app")
+            password = (data.get("password")
+                        or cfg.get("signAndroidStorePassword")
+                        or "").strip()
+            generated = False
+            if not password:
+                password = secrets.token_urlsafe(12)
+                generated = True
+            alias = (data.get("alias") or cfg.get("signAndroidAlias")
+                     or "upload").strip() or "upload"
+            key_password = (data.get("keyPassword")
+                            or cfg.get("signAndroidKeyPassword")
+                            or password).strip()
+            try:
+                res = signing.create_android_keystore(
+                    SIGNING_DIR, appname, password,
+                    alias=alias, key_password=key_password)
+            except Exception as e:
+                return self._send_json({"error": str(e)}, 500)
+            rel = os.path.relpath(res["path"], ROOT).replace("\\", "/")
+            return self._send_json({
+                "ok": True,
+                "path": rel,
+                "filename": res["filename"],
+                "alias": res.get("alias") or alias,
+                "password": password,
+                "keyPassword": key_password,
+                "passwordGenerated": generated,
+                "cn": res.get("cn") or appname,
+            })
         
         if path == "/api/open-folder":
             # Reveal a build-output folder in the OS file manager. Accepts an
@@ -560,7 +597,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send_json(
                         {"error": f"{file_type} must be one of {sorted(allowed)}"},
                         400)
-                if file_type == "winpfx":
+                if file_type in ("winpfx", "androidks"):
                     try:
                         cfg = config_gen.load_config(CONFIG_PATH)
                     except Exception:
@@ -588,7 +625,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json({"ok": True, "path": rel,
                                     "filename": safe_name})
 
-        return self._send_json({"error": "not found"}, 404)
+        return self._send_json({"error": f"unknown endpoint {path}"}, 404)
 
     # ---- SSE stream (shared by build + install) ----
     def _stream(self, session):

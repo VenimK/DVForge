@@ -287,7 +287,11 @@
               <input type="file" id="androidks-file" accept=".jks,.keystore,.p12">
             </label>
             <div class="upload-preview" id="androidks-preview"></div>
-            <button type="button" class="mini" id="androidks-clear" hidden>remove</button>
+            <div class="sign-actions">
+              <button type="button" class="mini" id="androidks-create" title="Create a local upload keystore named after the app">Create keystore</button>
+              <button type="button" class="mini" id="androidks-clear" hidden>remove</button>
+            </div>
+            <p class="theme-live-hint" id="androidks-create-note">Creates a free <code>.jks</code> named after the app (e.g. <code>SIGNING.jks</code>) in <code>workspace/signing/</code>. Back it up — losing it means you cannot update already-installed APKs. Play Store still needs a Play Console account.</p>
             <input type="hidden" data-key="signAndroidKeystore" id="androidks-file-path">
             <label>Key alias<input data-key="signAndroidAlias" placeholder="upload" spellcheck="false"></label>
             <label>Keystore password<input data-key="signAndroidStorePassword" type="password" autocomplete="off"></label>

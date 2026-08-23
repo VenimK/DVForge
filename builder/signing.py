@@ -159,3 +159,143 @@ def _create_openssl(pfx_path, cer_path, cn, password, years):
         except OSError:
             pass
     return ""
+
+
+def find_keytool():
+    """keytool.exe / keytool from PATH, JAVA_HOME, or DVForge .toolchains."""
+    for name in ("keytool", "keytool.exe"):
+        p = shutil.which(name)
+        if p:
+            return p
+    homes = []
+    for envk in ("JAVA_HOME", "JDK_HOME"):
+        v = os.environ.get(envk) or ""
+        if v:
+            homes.append(v)
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    homes.extend([
+        os.path.join(root, ".toolchains", "java", "Contents", "Home"),
+        os.path.join(root, ".toolchains", "java"),
+    ])
+    extra_roots = [
+        os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"),
+                     "Eclipse Adoptium"),
+        os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Java"),
+        os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"),
+                     "Microsoft"),
+        "/usr/lib/jvm",
+        "/Library/Java/JavaVirtualMachines",
+        "/opt/homebrew/opt/openjdk@17",
+        "/usr/local/opt/openjdk@17",
+    ]
+    for base in extra_roots:
+        if os.path.isdir(base):
+            try:
+                names = os.listdir(base)
+            except OSError:
+                names = []
+            if os.path.isfile(os.path.join(base, "bin", "keytool")) or \
+               os.path.isfile(os.path.join(base, "bin", "keytool.exe")):
+                homes.append(base)
+            for n in names:
+                homes.append(os.path.join(base, n))
+                homes.append(os.path.join(base, n, "Contents", "Home"))
+    seen = set()
+    for home in homes:
+        if not home or home in seen:
+            continue
+        seen.add(home)
+        nested = os.path.join(home, "Contents", "Home")
+        if os.path.isdir(os.path.join(nested, "bin")):
+            home = nested
+        for exe in ("keytool.exe", "keytool"):
+            p = os.path.join(home, "bin", exe)
+            if os.path.isfile(p):
+                return p
+    return ""
+
+
+def create_android_keystore(dest_dir, appname, password, alias="upload",
+                            key_password="", years=27):
+    """Create a PKCS12/JKS upload keystore named {appname}.jks.
+
+    Free, local, same idea as the Windows self-signed PFX. Keep a backup:
+    losing this file means you cannot update already-installed APKs.
+    """
+    os.makedirs(dest_dir, exist_ok=True)
+    stem = pfx_stem(appname)
+    cn = _cn(appname)
+    alias = (alias or "upload").strip() or "upload"
+    alias = re.sub(r"[^A-Za-z0-9._+-]+", "-", alias).strip(".-") or "upload"
+    key_password = (key_password or password or "").strip()
+    if not password:
+        raise ValueError("keystore password is required")
+    if len(password) < 6:
+        raise ValueError("keystore password must be at least 6 characters")
+    ks_path = os.path.join(dest_dir, f"{stem}.jks")
+    prefix, via_wsl = _keytool_prefix()
+    if not prefix:
+        raise RuntimeError(
+            "keytool not found. Install JDK 17 (Toolchain panel) and re-scan, "
+            "or install a JDK in WSL if you build Android there.")
+    if os.path.isfile(ks_path):
+        os.remove(ks_path)
+    validity = str(max(365, int(years) * 365))
+    dname = f"CN={cn}"
+    store = _wsl_path(ks_path) if via_wsl else ks_path
+    cmd = prefix + [
+        "-genkeypair", "-noprompt",
+        "-keystore", store,
+        "-storetype", "PKCS12",
+        "-keyalg", "RSA", "-keysize", "2048",
+        "-validity", validity,
+        "-alias", alias,
+        "-storepass", password,
+        "-keypass", key_password,
+        "-dname", dname,
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+    if r.returncode != 0:
+        if os.path.isfile(ks_path):
+            try:
+                os.remove(ks_path)
+            except OSError:
+                pass
+        cmd = [c for c in cmd if c != "-storetype" and c != "PKCS12"]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+    if r.returncode != 0:
+        err = (r.stderr or r.stdout or "keytool failed").strip()[:400]
+        raise RuntimeError(err)
+    if not os.path.isfile(ks_path) or os.path.getsize(ks_path) < 64:
+        raise RuntimeError("keystore was not created")
+    return {
+        "ok": True,
+        "path": ks_path,
+        "filename": f"{stem}.jks",
+        "alias": alias,
+        "cn": cn,
+        "keytool": " ".join(prefix),
+    }
+
+
+def _wsl_path(win_path):
+    ap = os.path.abspath(win_path)
+    drive, rest = os.path.splitdrive(ap)
+    if drive:
+        return "/mnt/" + drive[0].lower() + rest.replace("\\", "/")
+    return ap.replace("\\", "/")
+
+
+def _keytool_prefix():
+    """Return (argv_prefix, via_wsl). prefix is e.g. ['C:\\...\\keytool.exe'] or ['wsl','-e','keytool']."""
+    kt = find_keytool()
+    if kt:
+        return [kt], False
+    if os.name == "nt" and shutil.which("wsl"):
+        r = subprocess.run(
+            ["wsl", "-e", "bash", "-lc", "command -v keytool"],
+            capture_output=True, text=True, timeout=20,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            return ["wsl", "-e", r.stdout.strip()], True
+    return None, False
