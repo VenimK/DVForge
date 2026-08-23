@@ -270,42 +270,62 @@
               Certificates are stored under <code>workspace/signing/</code> and are <strong>not</strong> compiled into the client.
               Linux packages have no Authenticode step.</p>
 
-            <label>Windows Authenticode certificate (.pfx / .p12)
-              <input type="file" id="winpfx-file" accept=".pfx,.p12">
-            </label>
-            <div class="upload-preview" id="winpfx-preview"></div>
-            <div class="sign-actions">
-              <button type="button" class="mini" id="winpfx-selfsigned" title="Create a local code-signing PFX named after the app">Create self-signed PFX</button>
-              <button type="button" class="mini" id="winpfx-clear" hidden>remove</button>
+            <div class="sign-plat" data-os="windows">
+              <h3 class="sign-plat-title">
+                <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1 1h6.4v6.4H1V1zm7.6 0H15v6.4H8.6V1zM1 8.6h6.4V15H1V8.6zm7.6 0H15V15H8.6V8.6z"/></svg>
+                Windows
+              </h3>
+              <label>Authenticode certificate (.pfx / .p12)
+                <input type="file" id="winpfx-file" accept=".pfx,.p12">
+              </label>
+              <div class="upload-preview" id="winpfx-preview"></div>
+              <div class="sign-actions">
+                <button type="button" class="mini" id="winpfx-selfsigned" title="Create a local code-signing PFX named after the app">Create self-signed PFX</button>
+                <button type="button" class="mini" id="winpfx-clear" hidden>remove</button>
+              </div>
+              <p class="theme-live-hint" id="winpfx-selfsigned-note">Creates a <code>.pfx</code> named after the app (e.g. <code>SIGNING.pfx</code>) in <code>workspace/signing/</code>. Trusted on this Windows user only — other PCs still see an unknown publisher.</p>
+              <input type="hidden" data-key="signWinPfx" id="winpfx-file-path">
+              <label>PFX password<input data-key="signWinPassword" type="password" autocomplete="off"></label>
+              <label>Timestamp server<input data-key="signWinTimestamp" placeholder="http://timestamp.digicert.com"></label>
             </div>
-            <p class="theme-live-hint" id="winpfx-selfsigned-note">Creates a <code>.pfx</code> named after the app (e.g. <code>SIGNING.pfx</code>) in <code>workspace/signing/</code>. Trusted on this Windows user only — other PCs still see an unknown publisher.</p>
-            <input type="hidden" data-key="signWinPfx" id="winpfx-file-path">
-            <label>PFX password<input data-key="signWinPassword" type="password" autocomplete="off"></label>
-            <label>Timestamp server<input data-key="signWinTimestamp" placeholder="http://timestamp.digicert.com"></label>
 
-            <label>Android upload keystore (.jks / .keystore / .p12)
-              <input type="file" id="androidks-file" accept=".jks,.keystore,.p12">
-            </label>
-            <div class="upload-preview" id="androidks-preview"></div>
-            <div class="sign-actions">
-              <button type="button" class="mini" id="androidks-create" title="Create a local upload keystore named after the app">Create keystore</button>
-              <button type="button" class="mini" id="androidks-clear" hidden>remove</button>
+            <div class="sign-plat" data-os="android">
+              <h3 class="sign-plat-title">
+                <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5.1 1.2 4.4.2a.4.4 0 0 1 .7-.4l.8 1.1A5.2 5.2 0 0 1 8  .7c.8 0 1.5.1 2.1.4l.8-1.1a.4.4 0 0 1 .7.4l-.7 1A4.6 4.6 0 0 1 12.6 5H3.4a4.6 4.6 0 0 1 1.7-3.8zM5.2 3.1a.6.6 0 1 0 0-1.2.6.6 0 0 0 0 1.2zm5.6 0a.6.6 0 1 0 0-1.2.6.6 0 0 0 0 1.2zM2.2 6h11.6c.4 0 .7.3.7.7v6.6a1.5 1.5 0 0 1-1.5 1.5H3a1.5 1.5 0 0 1-1.5-1.5V6.7c0-.4.3-.7.7-.7zM1 7.4a.7.7 0 0 1 .7.7v4.2a.7.7 0 1 1-1.4 0V8.1c0-.4.3-.7.7-.7zm14 0c.4 0 .7.3.7.7v4.2a.7.7 0 1 1-1.4 0V8.1c0-.4.3-.7.7-.7z"/></svg>
+                Android
+              </h3>
+              <label>Upload keystore (.jks / .keystore / .p12)
+                <input type="file" id="androidks-file" accept=".jks,.keystore,.p12">
+              </label>
+              <div class="upload-preview" id="androidks-preview"></div>
+              <div class="sign-actions">
+                <button type="button" class="mini" id="androidks-create" title="Create a local upload keystore named after the app">Create keystore</button>
+                <button type="button" class="mini" id="androidks-clear" hidden>remove</button>
+              </div>
+              <p class="theme-live-hint" id="androidks-create-note">Creates a free <code>.jks</code> named after the app (e.g. <code>SIGNING.jks</code>) in <code>workspace/signing/</code>. Back it up — losing it means you cannot update already-installed APKs. Play Store still needs a Play Console account.</p>
+              <input type="hidden" data-key="signAndroidKeystore" id="androidks-file-path">
+              <label>Key alias<input data-key="signAndroidAlias" placeholder="upload" spellcheck="false"></label>
+              <label>Keystore password<input data-key="signAndroidStorePassword" type="password" autocomplete="off"></label>
+              <label>Key password (blank = keystore password)<input data-key="signAndroidKeyPassword" type="password" autocomplete="off"></label>
             </div>
-            <p class="theme-live-hint" id="androidks-create-note">Creates a free <code>.jks</code> named after the app (e.g. <code>SIGNING.jks</code>) in <code>workspace/signing/</code>. Back it up — losing it means you cannot update already-installed APKs. Play Store still needs a Play Console account.</p>
-            <input type="hidden" data-key="signAndroidKeystore" id="androidks-file-path">
-            <label>Key alias<input data-key="signAndroidAlias" placeholder="upload" spellcheck="false"></label>
-            <label>Keystore password<input data-key="signAndroidStorePassword" type="password" autocomplete="off"></label>
-            <label>Key password (blank = keystore password)<input data-key="signAndroidKeyPassword" type="password" autocomplete="off"></label>
 
-            <label>macOS signing identity<input data-key="signMacIdentity" placeholder="Developer ID Application: Your Name (TEAMID)" spellcheck="false"></label>
-            <label>Notary API key (.p8 or json)
-              <input type="file" id="macnotary-file" accept=".p8,.json">
-            </label>
-            <div class="upload-preview" id="macnotary-preview"></div>
-            <button type="button" class="mini" id="macnotary-clear" hidden>remove</button>
-            <input type="hidden" data-key="signMacNotaryKey" id="macnotary-file-path">
-            <label>Notary key id<input data-key="signMacNotaryKeyId" placeholder="ABC123XYZ" spellcheck="false"></label>
-            <label>Notary issuer UUID<input data-key="signMacNotaryIssuer" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" spellcheck="false"></label>
+            <div class="sign-plat" data-os="macos">
+              <h3 class="sign-plat-title">
+                <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M12.2 8.5c0-1.7 1.4-2.5 1.5-2.6-.8-1.2-2.1-1.3-2.5-1.4-1.1-.1-2.1.6-2.6.6-.6 0-1.4-.6-2.4-.6-1.2 0-2.3.7-3 1.8-1.2 2.2-.3 5.4.9 7.2.6.9 1.3 1.8 2.1 1.8.8 0 1.2-.6 2.2-.6s1.3.6 2.2.6c.9 0 1.5-.9 2-.1.8.5 1.1.8 1.9-.2-1.6-.7-1.9-3.2-1.3-4.6zm-1.6-4.7c.4-.5.7-1.3.6-2-1.4.1-2.5 1-2.9 1.8-.4.5-.7 1.3-.6 2 1.5 0 2.4-.8 2.9-1.8z"/></svg>
+                macOS
+              </h3>
+              <label>Signing identity<input data-key="signMacIdentity" placeholder="Developer ID Application: Your Name (TEAMID)" spellcheck="false"></label>
+              <label>Notary API key (.p8 or json)
+                <input type="file" id="macnotary-file" accept=".p8,.json">
+              </label>
+              <div class="upload-preview" id="macnotary-preview"></div>
+              <div class="sign-actions">
+                <button type="button" class="mini" id="macnotary-clear" hidden>remove</button>
+              </div>
+              <input type="hidden" data-key="signMacNotaryKey" id="macnotary-file-path">
+              <label>Notary key id<input data-key="signMacNotaryKeyId" placeholder="ABC123XYZ" spellcheck="false"></label>
+              <label>Notary issuer UUID<input data-key="signMacNotaryIssuer" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" spellcheck="false"></label>
+            </div>
           </fieldset>
 
           <div class="form-actions">

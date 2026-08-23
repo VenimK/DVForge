@@ -389,6 +389,34 @@ legend { font-size: 11px; letter-spacing: .14em; text-transform: uppercase; colo
 .tg { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--ink); cursor: pointer; }
 .tg input { accent-color: var(--amber); width: 15px; height: 15px; }
 
+.sign-plat {
+  margin-top: 16px;
+  padding: 12px 12px 14px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-sm);
+  background: var(--panel-2);
+}
+.sign-plat-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 2px;
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--ink);
+}
+.sign-plat-title svg {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  fill: currentColor;
+}
+.sign-plat[data-os="windows"] .sign-plat-title { color: var(--steel); }
+.sign-plat[data-os="android"] .sign-plat-title { color: var(--good); }
+.sign-plat[data-os="macos"] .sign-plat-title { color: var(--ink-dim); }
+
 .sign-actions { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
 .sign-actions .mini { font-size: 12px; }
 
