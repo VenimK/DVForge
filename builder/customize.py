@@ -153,6 +153,20 @@ def _sanitize_bundle_id(app):
     return re.sub(r"[^a-z0-9.-]", "", sanitized)
 
 
+def _macos_product_name(app):
+    """On-disk .app / PRODUCT_NAME: no spaces.
+
+    Xcode pbxproj `path = Foo.app` cannot contain unquoted spaces (CocoaPods
+    then dies with Dictionary missing ';' after key-value pair). Dock/menu
+    label stays the full app name via CFBundleDisplayName.
+    'IT Support Guy' -> 'ITSupportGuy'.
+    """
+    raw = (app or "RustDesk").strip()
+    raw = re.sub(r"\s+", "", raw)
+    raw = re.sub(r"[^A-Za-z0-9._-]", "", raw)
+    return raw or "RustDesk"
+
+
 def _linux_bin_name(filename, app="rustdesk"):
     """On-disk Linux executable name (CMake BINARY_NAME / Exec=).
 
@@ -237,32 +251,56 @@ def _apply_appname(src, env, platform, log):
         sed(src, "libs/hbb_common/src/config.rs", '"RustDesk"', f'"{app}"', log)
     if platform == "macos":
         bundle_id = f"com.carriez.{_sanitize_bundle_id(app)}"
+        product = _macos_product_name(app)
         log(f"  macOS bundle ID -> {bundle_id}")
-        # AppInfo.xcconfig — product name and bundle identifier
+        if product != app:
+            log(f"  macOS .app name -> {product}.app  (display name stays '{app}')")
+        # AppInfo.xcconfig — product name (no spaces) and bundle identifier
         sed(src, "flutter/macos/Runner/Configs/AppInfo.xcconfig",
-            "PRODUCT_NAME = RustDesk", f"PRODUCT_NAME = {app}", log)
+            "PRODUCT_NAME = RustDesk", f"PRODUCT_NAME = {product}", log)
         sed(src, "flutter/macos/Runner/Configs/AppInfo.xcconfig",
             "PRODUCT_BUNDLE_IDENTIFIER = com.carriez.flutterHbb",
             f"PRODUCT_BUNDLE_IDENTIFIER = {bundle_id}", log)
-        # Info.plist — bundle identifier, URL scheme, display name
+        # Info.plist — bundle identifier, URL scheme, display name (may have spaces)
         sed(src, "flutter/macos/Runner/Info.plist",
             "com.carriez.rustdesk", bundle_id, log)
         sed(src, "flutter/macos/Runner/Info.plist",
             "<string>rustdesk</string>", f"<string>{_sanitize_bundle_id(app)}</string>", log)
-        sed_regex(src, "flutter/macos/Runner/Info.plist",
-                  r"(<key>CFBundleDisplayName</key>\s*<string>).*?(</string>)",
+        # Finder/Dock use CFBundleDisplayName. Xcode rewrites CFBundleName
+        # from PRODUCT_NAME at build time, so DisplayName must be a real key.
+        plist = "flutter/macos/Runner/Info.plist"
+        sed_regex(src, plist,
+                  r"(<key>CFBundleName</key>\s*<string>).*?(</string>)",
                   rf"\g<1>{app}\g<2>", log)
+        plist_path = os.path.join(src, plist)
+        try:
+            text = open(plist_path, encoding="utf-8").read()
+        except OSError:
+            text = ""
+        if text and "CFBundleDisplayName" not in text:
+            text = text.replace(
+                "\t<key>CFBundleName</key>",
+                "\t<key>CFBundleDisplayName</key>\n"
+                f"\t<string>{app}</string>\n"
+                "\t<key>CFBundleName</key>",
+                1)
+            open(plist_path, "w", encoding="utf-8").write(text)
+            log("    · Info.plist: CFBundleDisplayName = " + app)
+        else:
+            sed_regex(src, plist,
+                      r"(<key>CFBundleDisplayName</key>\s*<string>).*?(</string>)",
+                      rf"\g<1>{app}\g<2>", log)
         sed_regex(src, "flutter/macos/Runner/Info.plist",
                   r"(<key>NSMicrophoneUsageDescription</key>\s*<string>).*?(</string>)",
                   rf"\g<1>{app} needs microphone access for audio sharing.\g<2>", log)
-        # project.pbxproj — bundle identifier (3 occurrences) and product name
+        # project.pbxproj — bundle identifier and space-free .app path
         sed(src, "flutter/macos/Runner.xcodeproj/project.pbxproj",
             "PRODUCT_BUNDLE_IDENTIFIER = com.carriez.rustdesk",
             f"PRODUCT_BUNDLE_IDENTIFIER = {bundle_id}", log)
         sed(src, "flutter/macos/Runner.xcodeproj/project.pbxproj",
-            'PRODUCT_NAME = "RustDesk"', f'PRODUCT_NAME = "{app}"', log)
+            'PRODUCT_NAME = "RustDesk"', f'PRODUCT_NAME = "{product}"', log)
         sed(src, "flutter/macos/Runner.xcodeproj/project.pbxproj",
-            "RustDesk.app", f"{app}.app", log)
+            "RustDesk.app", f"{product}.app", log)
         # Cargo.toml — description (parity with windows/android)
         sed(src, "Cargo.toml", 'description = "RustDesk Remote Desktop"',
             f'description = "{app}"', log)
@@ -374,6 +412,20 @@ def _apply_company(src, env, platform, log):
             "Purslane Tech Pte. Ltd.", comp, log)
         sed(src, "flutter/macos/Runner/Configs/AppInfo.xcconfig",
             "Purslane Ltd", comp, log)
+        # xcconfig splits on spaces unless the value is quoted.
+        xc = os.path.join(src, "flutter/macos/Runner/Configs/AppInfo.xcconfig")
+        try:
+            lines = open(xc, encoding="utf-8").read().splitlines(True)
+            out = []
+            for line in lines:
+                if line.startswith("PRODUCT_COPYRIGHT") and '"' not in line:
+                    _, _, rest = line.partition("=")
+                    out.append(f'PRODUCT_COPYRIGHT = "{rest.strip()}"\n')
+                else:
+                    out.append(line)
+            open(xc, "w", encoding="utf-8").writelines(out)
+        except OSError:
+            pass
 
 
 def _norm_hex6(color):

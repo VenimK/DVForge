@@ -2293,9 +2293,15 @@ class Build:
         """The custom file name for output artifacts (e.g. 'myapp-1.4.9').
 
         Falls back to 'rustdesk' when no custom exename is set, matching
-        the upstream build.py behaviour."""
+        the upstream build.py behaviour. Spaces become hyphens so DMG/APK
+        names stay one token."""
         filename = self.config.get("exename", "") or self.config.get("appname", "") or "rustdesk"
-        return filename
+        return (filename or "rustdesk").strip() or "rustdesk"
+
+    def _macos_product_name(self):
+        """On-disk .app basename (no spaces). Display name may still have them."""
+        app = self.config.get("appname", "RustDesk") or "RustDesk"
+        return customize._macos_product_name(app)
 
     def _package_linux_rpm(self):
         """Package the flutter bundle into .rpm files.
@@ -3251,14 +3257,16 @@ class Build:
             return
 
         app_name = self.config.get("appname", "RustDesk") or "RustDesk"
+        product = self._macos_product_name()
         app_dir = os.path.join(self.src_dir, "flutter", "build", "macos",
                                "Build", "Products", "Release")
-        app_bundle = self._find_macos_app(app_dir, app_name)
+        app_bundle = self._find_macos_app(app_dir, product)
         if not self._macos_app_complete(app_bundle):
             self._log_macos_app_debug(app_dir, app_bundle)
             raise RuntimeError(
                 f"macOS {spec['suffix']} Flutter build did not produce a complete "
-                f"{app_name}.app (flutter exit {rc}). Not packaging a stub DMG.")
+                f"{product}.app (flutter exit {rc}). Not packaging a stub DMG.")
+        self._stamp_macos_display_name(app_bundle)
         env = self._env()
         customize.write_custom_txt(app_dir, env, log=self.log)
         resources_dir = os.path.join(app_bundle, "Contents", "Resources")
@@ -3270,7 +3278,7 @@ class Build:
         if os.path.isfile(service) and os.path.isdir(macos_bin):
             shutil.copy2(service, macos_bin)
             self.log("  · copied service → Contents/MacOS/")
-        exe = os.path.join(macos_bin, app_name)
+        exe = os.path.join(macos_bin, product)
         if os.path.isfile(exe):
             self.run(["lipo", "-info", exe], check=False)
         self._codesign_macos_app(app_bundle)
@@ -3393,7 +3401,8 @@ class Build:
         if self.dry_run:
             return
         app_name = self.config.get("appname", "RustDesk") or "RustDesk"
-        if app_name == "RustDesk":
+        product = self._macos_product_name()
+        if product == "RustDesk":
             return
         build_py = os.path.join(self.src_dir, "build.py")
         if not os.path.isfile(build_py):
@@ -3402,10 +3411,10 @@ class Build:
             text = f.read()
         if "RustDesk.app" not in text:
             return
-        text = text.replace("RustDesk.app", f"{app_name}.app")
+        text = text.replace("RustDesk.app", f"{product}.app")
         with open(build_py, "w", encoding="utf-8", errors="surrogateescape") as f:
             f.write(text)
-        self.log(f"  · patched build.py: RustDesk.app -> {app_name}.app")
+        self.log(f"  · patched build.py: RustDesk.app -> {product}.app")
 
     def _patch_macos_generated_bridge(self):
         """Fix ffigen-generated Dart bindings that fail on macOS builds.
@@ -3445,6 +3454,30 @@ class Build:
             with open(dart_file, "w", encoding="utf-8") as f:
                 f.write(text)
             self.log("  · patched generated_bridge.dart: ptr type + Bool->Uint8")
+
+    def _stamp_macos_display_name(self, app_bundle):
+        """Write CFBundleDisplayName so Finder/Dock show names with spaces.
+
+        PRODUCT_NAME (and the .app folder) stay space-free for Xcode. Flutter
+        then copies PRODUCT_NAME into CFBundleName; DisplayName is what the
+        user sees.
+        """
+        app = (self.config.get("appname", "RustDesk") or "RustDesk").strip()
+        plist = os.path.join(app_bundle or "", "Contents", "Info.plist")
+        if self.dry_run or not os.path.isfile(plist):
+            return
+        plutil = shutil.which("plutil") or "/usr/bin/plutil"
+        for key in ("CFBundleDisplayName", "CFBundleName"):
+            r = subprocess.run(
+                [plutil, "-replace", key, "-string", app, plist],
+                check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                encoding="utf-8", errors="replace")
+            if r.returncode != 0:
+                subprocess.run(
+                    [plutil, "-insert", key, "-string", app, plist],
+                    check=False, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL)
+        self.log(f"  · Finder name -> {app}")
 
     def _find_macos_app(self, app_dir, app_name):
         """Prefer {app_name}.app; otherwise any .app in Release."""
@@ -3785,7 +3818,8 @@ class Build:
             self.log("  (would create .dmg)")
             return
         app_name = self.config.get("appname", "RustDesk") or "RustDesk"
-        app_basename = f"{app_name}.app"
+        product = self._macos_product_name()
+        app_basename = f"{product}.app"
         app = os.path.join(self.src_dir, "flutter", "build", "macos",
                            "Build", "Products", "Release", app_basename)
         if not self._macos_app_complete(app):
