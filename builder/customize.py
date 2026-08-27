@@ -205,25 +205,29 @@ def _apply_appname(src, env, platform, log):
                   rf'\g<1>\g<2> {app}\g<3>', log)
     if platform == "windows":
         filename = env.get("CUSTOM_FILENAME", "") or app
-        exe = filename if filename.lower().endswith(".exe") else f"{filename}.exe"
+        bin_name = _linux_bin_name(filename, app)
+        exe = f"{bin_name}.exe"
+        if bin_name != (filename[:-4] if filename.lower().endswith(".exe") else filename):
+            log(f"  Windows binary -> {bin_name} (CMake cannot use spaces; "
+                f"display name stays {app})")
         sed(src, "Cargo.toml", 'description = "RustDesk Remote Desktop"',
             f'description = "{app}"', log)
-        # Flutter runner VERSIONINFO — this is what Explorer Properties shows
-        # on the portable's extracted .exe (and on Release\{filename}.exe).
+        # Flutter runner VERSIONINFO — ProductName keeps spaces; InternalName
+        # / OriginalFilename / BINARY_NAME must be CMake-safe (no spaces).
         rc = "flutter/windows/runner/Runner.rc"
         sed(src, rc, '"RustDesk Remote Desktop"', f'"{app}"', log)
         sed(src, rc, 'VALUE "InternalName", "rustdesk"',
-            f'VALUE "InternalName", "{filename}"', log)
+            f'VALUE "InternalName", "{bin_name}"', log)
         sed(src, rc, 'VALUE "OriginalFilename", "rustdesk.exe"',
             f'VALUE "OriginalFilename", "{exe}"', log)
         sed(src, rc, 'VALUE "ProductName", "RustDesk"',
             f'VALUE "ProductName", "{app}"', log)
         # On-disk Flutter exe name. BINARY_NAME lives in the TOP-LEVEL
         # windows CMakeLists — runner/CMakeLists.txt has no "rustdesk" string.
-        if filename.lower() != "rustdesk":
+        if bin_name.lower() != "rustdesk":
             sed(src, "flutter/windows/CMakeLists.txt",
                 'set(BINARY_NAME "rustdesk")',
-                f'set(BINARY_NAME "{filename}")', log)
+                f'set(BINARY_NAME "{bin_name}")', log)
         # cargo winres for the rustc-built exe and the portable packer stub
         for rel in ("Cargo.toml", "libs/portable/Cargo.toml"):
             sed(src, rel, 'ProductName = "RustDesk"',
@@ -1201,6 +1205,30 @@ def _apply_logo(src, env, platform, log):
 # public entry point
 # ---------------------------------------------------------------------------
 
+def _force_windows_install_prefix(src, log):
+    """Always install the Flutter bundle next to the exe.
+
+    Stock CMakeLists only overrides CMAKE_INSTALL_PREFIX when
+    CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT is true. After the first
+    configure that flag is false, so a reused flutter/build cache keeps
+    C:/Program Files/<project>. INSTALL.vcxproj then runs cmake_install
+    without admin and fails MSB3073. FORCE on every configure so a
+    leftover Program Files prefix cannot survive.
+    """
+    rel = "flutter/windows/CMakeLists.txt"
+    old = (
+        'if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)\n'
+        '  set(CMAKE_INSTALL_PREFIX "${BUILD_BUNDLE_DIR}" CACHE PATH "..." FORCE)\n'
+        'endif()'
+    )
+    new = (
+        'set(CMAKE_INSTALL_PREFIX "${BUILD_BUNDLE_DIR}" CACHE PATH "..." FORCE)'
+    )
+    if sed(src, rel, old, new, log):
+        log("    · CMAKE_INSTALL_PREFIX always -> BUILD_BUNDLE_DIR "
+            "(avoids C:/Program Files)")
+
+
 def _apply_windows_build_fix(src, log):
     """Fix build.py's hardcoded 'python3' calls on Windows.
 
@@ -1328,6 +1356,7 @@ def apply(src_dir, platform, env, patches_dir, log=print):
     git_apply(src_dir, os.path.join(patches_dir, "removeSetupServerTip.diff"), log)
     if platform == "windows":
         _apply_windows_build_fix(src_dir, log)
+        _force_windows_install_prefix(src_dir, log)
     _apply_appname(src_dir, env, platform, log)
     if platform == "windows":
         _apply_printer_port(src_dir, env, log)

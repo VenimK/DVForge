@@ -1458,8 +1458,9 @@ class Build:
         if self.host["os"] != "Windows":
             raise RuntimeError("MSI build requires Windows + nuget + msbuild")
         app_name = self.config.get("appname", "RustDesk") or "RustDesk"
-        # MSI names can't have spaces — replace with underscores
-        msi_app = app_name.replace(" ", "_")
+        # Must match CMake BINARY_NAME (no spaces). WiX still shows app_name.
+        msi_app = customize._linux_bin_name(
+            self.config.get("exename", "") or app_name, app_name)
         release = os.path.join(self.src_dir, "flutter", "build", "windows",
                                "x64", "runner", "Release")
         msi_dir = os.path.join(self.src_dir, "res", "msi")
@@ -1915,14 +1916,31 @@ class Build:
         else:
             self.log("  ! printer_driver_adapter.dll not found in adapter zip")
 
-    def _cached_windows_binary_name(self):
-        """Exe/CMake target name baked into a previous flutter/build/windows."""
+    def _windows_cmake_cache_path(self):
         cache = os.path.join(self.src_dir, "flutter", "build", "windows",
                              "x64", "CMakeCache.txt")
-        if not os.path.isfile(cache):
-            cache = os.path.join(self.src_dir, "flutter", "build", "windows",
-                                 "CMakeCache.txt")
         if os.path.isfile(cache):
+            return cache
+        cache = os.path.join(self.src_dir, "flutter", "build", "windows",
+                             "CMakeCache.txt")
+        return cache if os.path.isfile(cache) else ""
+
+    def _cached_windows_install_prefix(self):
+        """CMAKE_INSTALL_PREFIX from a previous flutter/build/windows."""
+        cache = self._windows_cmake_cache_path()
+        if not cache:
+            return ""
+        try:
+            text = open(cache, encoding="utf-8", errors="replace").read()
+        except OSError:
+            return ""
+        m = re.search(r"^CMAKE_INSTALL_PREFIX:PATH=(.+)$", text, re.M)
+        return m.group(1).strip() if m else ""
+
+    def _cached_windows_binary_name(self):
+        """Exe/CMake target name baked into a previous flutter/build/windows."""
+        cache = self._windows_cmake_cache_path()
+        if cache:
             try:
                 text = open(cache, encoding="utf-8", errors="replace").read()
             except OSError:
@@ -1973,26 +1991,37 @@ class Build:
             self.log(f"  ! could not clear flutter linux cache: {e}")
 
     def _invalidate_stale_flutter_windows(self):
-        """Drop flutter/build/windows when the CMake target name changed.
+        """Drop flutter/build/windows when CMake cache cannot be reused.
 
-        Config fields like password/server still incrementally compile. Only
-        an app/exe rename (BINARY_NAME) poisons CMakeCache.txt:
-          $<TARGET_FILE_DIR:onmac>  with no target "onmac"
-        Cargo's target/ cache is left alone.
+        Config fields like password/server still incrementally compile. Two
+        CMakeCache.txt states require a wipe (cargo target/ is left alone):
+          1. BINARY_NAME changed: $<TARGET_FILE_DIR:onmac> with no such target
+          2. CMAKE_INSTALL_PREFIX stuck at C:/Program Files/<project>:
+             INSTALL.vcxproj then copies without admin and fails MSB3073
         """
         if self.dry_run:
             return
-        want = (self._output_basename() or "rustdesk").strip()
-        if want.lower().endswith(".exe"):
-            want = want[:-4]
+        want = customize._linux_bin_name(
+            self.config.get("exename", "") or self.config.get("appname", "")
+            or "rustdesk")
         have = self._cached_windows_binary_name()
-        if not have:
-            return
-        if have.lower() == want.lower():
-            self.log(f"  · flutter windows cache matches BINARY_NAME={want}")
+        prefix = self._cached_windows_install_prefix()
+        prefix_l = prefix.replace("\\", "/").lower()
+        bad_prefix = bool(prefix) and (
+            "program files" in prefix_l
+            or prefix_l.rstrip("/") in ("/usr/local", "c:/program files")
+        )
+        reasons = []
+        if have and have.lower() != want.lower():
+            reasons.append(f"exe name changed ({have} -> {want})")
+        if bad_prefix:
+            reasons.append(f"CMAKE_INSTALL_PREFIX={prefix} needs admin")
+        if not reasons:
+            if have:
+                self.log(f"  · flutter windows cache matches BINARY_NAME={want}")
             return
         flutter_win = os.path.join(self.src_dir, "flutter", "build", "windows")
-        self.log(f"  · exe name changed ({have} -> {want}) — "
+        self.log(f"  · {'; '.join(reasons)} — "
                  "clearing flutter/build/windows (cargo cache kept)")
         try:
             _force_rmtree(flutter_win)
@@ -2296,7 +2325,7 @@ class Build:
         the upstream build.py behaviour. Spaces become hyphens so DMG/APK
         names stay one token."""
         filename = self.config.get("exename", "") or self.config.get("appname", "") or "rustdesk"
-        return (filename or "rustdesk").strip() or "rustdesk"
+        return customize._linux_bin_name(filename)
 
     def _macos_product_name(self):
         """On-disk .app basename (no spaces). Display name may still have them."""
