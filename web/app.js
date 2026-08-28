@@ -293,6 +293,7 @@ function fillConfig(cfg) {
   syncAllColorPickers();
   updateThemeLive();
   restoreBrandingPreview(cfg);
+  renderAdvList();
   refreshPreview();
 }
 
@@ -310,6 +311,177 @@ function collectConfig() {
 }
 
 const truthy = v => v === true || v === "on";
+
+/* ── advanced keys catalog ────────────────────────────── */
+const ADV_PIN = "1.4.9";
+let advFilter = "all";
+let advTarget = "default";
+
+function advLines(which) {
+  const el = which === "override" ? $("#override-manual") : $("#default-manual");
+  const out = {};
+  for (const raw of String(el && el.value || "").split(/\r?\n/)) {
+    const line = raw.trim();
+    const eq = line.indexOf("=");
+    if (eq < 1) continue;
+    const k = line.slice(0, eq).trim();
+    if (k) out[k] = true;
+  }
+  return out;
+}
+
+function advVerNewer(min) {
+  if (!min) return false;
+  const a = String(min).split(".").map(n => parseInt(n, 10) || 0);
+  const b = ADV_PIN.split(".").map(n => parseInt(n, 10) || 0);
+  for (let i = 0; i < 3; i++) {
+    if ((a[i] || 0) > (b[i] || 0)) return true;
+    if ((a[i] || 0) < (b[i] || 0)) return false;
+  }
+  return false;
+}
+
+function advNote(msg, bad) {
+  const el = $("#adv-note");
+  if (!el) return;
+  el.textContent = msg || "";
+  el.style.color = bad ? "var(--bad)" : "";
+}
+
+function setAdvTarget(which) {
+  advTarget = which === "override" ? "override" : "default";
+  const hint = $("#adv-target-hint");
+  if (hint) {
+    hint.textContent = "Click Default or Override on a row. Last box used: "
+      + (advTarget === "override" ? "Override (locked)." : "Default.");
+  }
+}
+
+function insertAdvKey(item, into) {
+  const which = into === "override" ? "override" : "default";
+  const ta = which === "override" ? $("#override-manual") : $("#default-manual");
+  if (!ta) return;
+  setAdvTarget(which);
+  if (advVerNewer(item.min)) {
+    advNote(item.key + " needs RustDesk " + item.min + ". This build is "
+      + ADV_PIN + " — the client will ignore it.", true);
+  } else if (item.owned) {
+    advNote(item.key + " is already set by " + item.owned
+      + " above. Inserting here overwrites that value in "
+      + (which === "override" ? "override-settings" : "default-settings") + ".", false);
+  } else {
+    advNote("");
+  }
+  const sample = item.sample != null ? item.sample : "";
+  const line = item.key + "=" + sample;
+  const kept = [];
+  let found = false;
+  for (const raw of ta.value.split(/\r?\n/)) {
+    const t = raw.trim();
+    if (!t) continue;
+    if (t.slice(0, Math.max(0, t.indexOf("="))).trim() === item.key) {
+      kept.push(line);
+      found = true;
+    } else {
+      kept.push(raw.replace(/\s+$/, ""));
+    }
+  }
+  if (!found) kept.push(line);
+  ta.value = kept.join("\n") + (kept.length ? "\n" : "");
+  ta.dispatchEvent(new Event("input", { bubbles: true }));
+  ta.focus();
+}
+
+function renderAdvList() {
+  const host = $("#adv-list");
+  if (!host) return;
+  const keys = window.ADVANCED_KEYS || [];
+  const q = String(($("#adv-search") || {}).value || "").trim().toLowerCase();
+  const inDef = advLines("default");
+  const inOver = advLines("override");
+  const groups = [];
+  let last = "";
+  let n = 0;
+  for (const item of keys) {
+    if (advFilter === "useful" && !item.useful) continue;
+    if (advFilter === "owned" && !item.owned) continue;
+    if (q) {
+      const blob = [item.key, item.hint, item.group, item.values, item.owned || ""]
+        .join(" ").toLowerCase();
+      if (!blob.includes(q)) continue;
+    }
+    if (item.group !== last) {
+      groups.push(`<div class="adv-group">${esc(item.group)}</div>`);
+      last = item.group;
+    }
+    const future = advVerNewer(item.min);
+    const placed = inDef[item.key] ? "default" : (inOver[item.key] ? "override" : "");
+    const cls = [
+      "adv-row",
+      item.owned ? "is-owned" : "",
+      future ? "is-future" : "",
+      placed ? "is-in" : "",
+    ].filter(Boolean).join(" ");
+    const badges = [];
+    if (item.useful) badges.push('<span class="adv-badge useful">suggested</span>');
+    if (item.owned) badges.push(`<span class="adv-badge owned">${esc(item.owned)}</span>`);
+    if (item.pro) badges.push('<span class="adv-badge pro">Pro</span>');
+    if (future) badges.push(`<span class="adv-badge future">${esc(item.min)}+</span>`);
+    else if (item.min) badges.push(`<span class="adv-badge">since ${esc(item.min)}</span>`);
+    if (placed) badges.push(`<span class="adv-badge placed">in ${placed}</span>`);
+    groups.push(
+      `<div class="${cls}" data-adv-key="${esc(item.key)}" role="listitem">`
+      + `<span class="adv-k">${esc(item.key)}</span>`
+      + `<span class="adv-badges">${badges.join("")}</span>`
+      + `<span class="adv-meta">${esc(item.hint)}`
+      + ` <span class="adv-vals">${esc(item.values)}`
+      + (item.def ? ` · default ${esc(item.def)}` : "")
+      + `</span></span>`
+      + `<span class="adv-insert">`
+      + `<button type="button" class="mini" data-adv-into="default">Default</button>`
+      + `<button type="button" class="mini" data-adv-into="override">Override</button>`
+      + `</span></div>`
+    );
+    n++;
+  }
+  host.innerHTML = n
+    ? groups.join("")
+    : '<div class="adv-empty">No keys match that search.</div>';
+}
+
+function initAdvancedKeys() {
+  if (!Array.isArray(window.ADVANCED_KEYS)) {
+    console.warn("advanced-keys.js did not load");
+    return;
+  }
+  const search = $("#adv-search");
+  if (search) search.addEventListener("input", renderAdvList);
+  $$("[data-adv-filter]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      advFilter = btn.dataset.advFilter || "all";
+      $$("[data-adv-filter]").forEach(b => b.classList.toggle("is-on", b === btn));
+      renderAdvList();
+    });
+  });
+  const list = $("#adv-list");
+  if (list) {
+    list.addEventListener("click", e => {
+      const btn = e.target.closest("[data-adv-into]");
+      if (!btn) return;
+      const row = btn.closest("[data-adv-key]");
+      if (!row) return;
+      const item = (window.ADVANCED_KEYS || []).find(k => k.key === row.dataset.advKey);
+      if (item) insertAdvKey(item, btn.dataset.advInto);
+    });
+  }
+  ["default-manual", "override-manual"].forEach(id => {
+    const el = $("#" + id);
+    if (!el) return;
+    el.addEventListener("focus", () =>
+      setAdvTarget(id === "override-manual" ? "override" : "default"));
+  });
+  renderAdvList();
+}
 
 async function refreshPreview() {
   const cfg = collectConfig();
@@ -636,7 +808,9 @@ function restoreBrandingPreview(cfg) {
 }
 
 document.addEventListener("input", e => {
-  if (e.target.closest("#tab-config") && e.target.dataset.key) refreshPreview();
+  if (!e.target.closest("#tab-config") || !e.target.dataset.key) return;
+  if (e.target.id === "default-manual" || e.target.id === "override-manual") renderAdvList();
+  refreshPreview();
 });
 
 /* ── config presence banner ───────────────────────────── */
@@ -887,6 +1061,7 @@ async function loadMatrix() {
 
 async function boot() {
   buildToggles();
+  initAdvancedKeys();
   await loadToolchains();
   await Promise.all([
     loadMatrix(),

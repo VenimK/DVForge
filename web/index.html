@@ -265,6 +265,39 @@
           </fieldset>
 
           <fieldset>
+            <legend>Advanced keys</legend>
+            <p class="theme-live-hint">
+              Official RustDesk <code>key=value</code> lines.
+              <strong>Default</strong> = first-run, the user can still change it if Settings stay allowed.
+              <strong>Override</strong> = locked.
+              Search or click a key to insert a ready line.
+              Keys already set above are tagged so you don’t have to retype them.
+              <a href="https://rustdesk.com/docs/en/self-host/client-configuration/advanced-settings/" target="_blank" rel="noopener">Full docs</a>
+            </p>
+            <div class="adv-toolbar">
+              <input type="search" id="adv-search" placeholder="Search keys — tray, password, whitelist…" spellcheck="false" autocomplete="off">
+              <div class="adv-filters" role="group" aria-label="Filter keys">
+                <button type="button" class="mini is-on" data-adv-filter="all">All</button>
+                <button type="button" class="mini" data-adv-filter="useful">Suggested</button>
+                <button type="button" class="mini" data-adv-filter="owned">On this tab</button>
+              </div>
+            </div>
+            <p class="theme-live-hint" id="adv-target-hint">Click Default or Override on a row. Last box used: Default.</p>
+            <div class="adv-wrap">
+              <div class="adv-catalog" id="adv-list" role="list"></div>
+              <div class="adv-boxes">
+                <label>Default settings
+                  <textarea data-key="defaultManual" id="default-manual" rows="10" spellcheck="false" placeholder="enable-privacy-mode=N&#10;auto-disconnect-timeout=10"></textarea>
+                </label>
+                <label>Override settings (locked)
+                  <textarea data-key="overrideManual" id="override-manual" rows="10" spellcheck="false" placeholder="hide-stop-service=Y&#10;disable-change-permanent-password=Y"></textarea>
+                </label>
+              </div>
+            </div>
+            <p class="theme-live-hint" id="adv-note"></p>
+          </fieldset>
+
+          <fieldset>
             <legend>Distribution signing</legend>
             <p class="theme-live-hint">Optional. Leave empty to keep local/debug signing (this machine only).
               Certificates are stored under <code>workspace/signing/</code> and are <strong>not</strong> compiled into the client.
@@ -384,6 +417,7 @@
   </main>
 </div>
 
+<script src="advanced-keys.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

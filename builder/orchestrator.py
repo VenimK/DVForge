@@ -81,15 +81,31 @@ def _cargo_bin():
 
 
 def _force_rmtree(path):
-    """Remove a tree even if it has read-only files (Windows .git objects)."""
+    """Remove a tree even if it has read-only files (Windows .git objects).
+
+    On NFS a directory can end up mode 0200 (`d-w-------`) — write without
+    +x — so listdir/rmtree fails unless we restore u+rwx first.
+    """
     import stat
 
-    def _onerror(func, p, _exc):
+    def _unlock(p):
         try:
-            os.chmod(p, stat.S_IWRITE)
+            if os.path.isdir(p) and not os.path.islink(p):
+                os.chmod(p, stat.S_IRWXU)
+            else:
+                os.chmod(p, stat.S_IWRITE | stat.S_IREAD)
+        except Exception:
+            pass
+
+    def _onerror(func, p, _exc):
+        _unlock(p)
+        try:
             func(p)
         except Exception:
             pass
+
+    if os.path.isdir(path) and not os.path.islink(path):
+        _unlock(path)
     shutil.rmtree(path, onerror=_onerror)
 
 
@@ -3260,27 +3276,44 @@ class Build:
                     f"--features {features} --release --target {triple}")
         self._stage_macos_binaries(spec["rust"], cargo_dir)
 
-        flutter_macos_build = os.path.join(self.src_dir, "flutter", "build", "macos")
-        if os.path.isdir(flutter_macos_build) and not self.dry_run:
+        self._prepare_macos_flutter_derived_dir()
+        if not self.dry_run:
             self.log("  · cleaning flutter/build/macos (arch switch)")
-            _force_rmtree(flutter_macos_build)
+            self._wipe_macos_flutter_derived_dir()
 
         # Run flutter ourselves. build.py interpolates ARCHS into an
         # unquoted `os.system(...)` string, so
         # FLUTTER_XCODE_ARCHS=arm64 x86_64 splits into two shell words
         # and the universal build dies immediately (exit 255).
         flutter_dir = os.path.join(self.src_dir, "flutter")
+        module_cache = self._macos_boot_cache("clang-modules")
         flutter_env = {
             "FLUTTER_XCODE_ARCHS": spec["flutter"],
             "FLUTTER_XCODE_ONLY_ACTIVE_ARCH":
                 "YES" if spec["only_active"] else "NO",
             "MACOSX_DEPLOYMENT_TARGET": "10.14",
+            # Flutter forwards FLUTTER_XCODE_* as xcodebuild settings.
+            # Keep DerivedData in-tree (a symlink there makes Xcode 26
+            # miss FlutterMacOS.framework). Only the Swift module cache
+            # must leave NFS — that's the OSLog-*.swiftmodule rename race.
+            "FLUTTER_XCODE_MODULE_CACHE_DIR": module_cache,
+            "FLUTTER_XCODE_SWIFT_ENABLE_EXPLICIT_MODULES": "NO",
+            "FLUTTER_XCODE_CLANG_ENABLE_EXPLICIT_MODULES": "NO",
+            "COMPILER_INDEX_STORE_ENABLE": "NO",
         }
+        if self._src_on_volumes():
+            self.log(f"  · MODULE_CACHE_DIR = {module_cache} (boot disk)")
         self.log(f"  · Flutter ARCHS={spec['flutter']!r} "
                  f"ONLY_ACTIVE_ARCH={flutter_env['FLUTTER_XCODE_ONLY_ACTIVE_ARCH']}")
         rc = self.run(
             ["flutter", "build", "macos", "--release"],
             cwd=flutter_dir, check=False, env=flutter_env)
+        if rc != 0 and not self.dry_run:
+            self.log("  ! flutter macos failed — retry once (fresh derived data)")
+            self._wipe_macos_flutter_derived_dir()
+            rc = self.run(
+                ["flutter", "build", "macos", "--release"],
+                cwd=flutter_dir, check=False, env=flutter_env)
         if self.dry_run:
             self.log("  (dry run — skip app completeness check / dmg)")
             return
@@ -3313,6 +3346,15 @@ class Build:
         self._codesign_macos_app(app_bundle)
         self._create_macos_dmg(suffix=spec["suffix"])
 
+    def _src_on_volumes(self):
+        return os.path.abspath(self.src_dir).startswith("/Volumes/")
+
+    def _macos_boot_cache(self, name):
+        d = os.path.join(os.path.expanduser("~"), "Library", "Caches",
+                         "dvforge", name, self.version)
+        os.makedirs(d, exist_ok=True)
+        return d
+
     def _ensure_macos_cargo_dir(self):
         """Where cargo writes artifacts.
 
@@ -3322,14 +3364,86 @@ class Build:
         Xcode still links src/target/release/ — _stage_macos_binaries copies
         the dylibs there.
         """
-        src = os.path.abspath(self.src_dir)
-        if src.startswith("/Volumes/"):
-            d = os.path.join(os.path.expanduser("~"), "Library", "Caches",
-                             "dvforge", "cargo-target", self.version)
-            os.makedirs(d, exist_ok=True)
+        if self._src_on_volumes():
+            d = self._macos_boot_cache("cargo-target")
             self.log(f"  · CARGO_TARGET_DIR = {d} (source is on /Volumes)")
             return d
         return os.path.join(self.src_dir, "target")
+
+    def _macos_flutter_derived_link(self):
+        return os.path.join(self.src_dir, "flutter", "build", "macos")
+
+    def _move_aside(self, path):
+        """Rename path out of the way, then delete. NFS-safe.
+
+        rmtree needs +x on the directory. NFS leftovers from a crashed Xcode
+        can be mode 0200 (`d-w-------`), so listdir fails. rename() only
+        needs write on the parent and still works.
+        """
+        if not os.path.lexists(path):
+            return
+        bak = path.rstrip("/") + ".dvforge-old-" + str(int(time.time()))
+        try:
+            os.rename(path, bak)
+        except OSError as e:
+            self.log(f"  · rmtree {path} (rename failed: {e})")
+            try:
+                os.chmod(path, 0o777)
+            except OSError:
+                pass
+            if os.path.islink(path) or os.path.isfile(path):
+                os.unlink(path)
+                return
+            _force_rmtree(path)
+            if os.path.lexists(path):
+                subprocess.run(["rm", "-rf", path], check=False)
+            if os.path.lexists(path):
+                raise RuntimeError(
+                    f"could not remove {path} (NFS leftover, mode "
+                    f"{oct(os.stat(path).st_mode) if os.path.lexists(path) else '?'})")
+            return
+        self.log(f"  · moved aside {os.path.basename(path)}")
+        try:
+            _force_rmtree(bak)
+        except Exception:
+            subprocess.run(["rm", "-rf", bak], check=False)
+        if os.path.lexists(bak):
+            self.log(f"  ! leftover {bak} (safe to delete later)")
+
+    def _prepare_macos_flutter_derived_dir(self):
+        """Keep flutter/build/macos as a real directory, never a symlink.
+
+        Symlinking DerivedData onto the boot disk fixes the NFS Swift
+        module-cache rename, but Xcode 26 then auto-links against the
+        real path and misses FlutterMacOS.framework (undefined
+        FlutterAppDelegate / FlutterViewController). Module cache is
+        redirected with FLUTTER_XCODE_MODULE_CACHE_DIR instead.
+        """
+        link = self._macos_flutter_derived_link()
+        if self.dry_run:
+            return
+        if os.path.islink(link):
+            os.unlink(link)
+            self.log("  · removed flutter/build/macos symlink "
+                     "(Xcode 26 cannot auto-link FlutterMacOS through it)")
+        parent = os.path.dirname(link)
+        os.makedirs(parent, exist_ok=True)
+
+    def _wipe_macos_flutter_derived_dir(self):
+        """Empty in-tree DerivedData and the boot-disk module cache."""
+        link = self._macos_flutter_derived_link()
+        if self.dry_run:
+            return
+        self._prepare_macos_flutter_derived_dir()
+        if os.path.islink(link):
+            os.unlink(link)
+        elif os.path.isdir(link):
+            self._move_aside(link)
+        os.makedirs(link, exist_ok=True)
+        cache = self._macos_boot_cache("clang-modules")
+        if os.path.isdir(cache):
+            _force_rmtree(cache)
+        os.makedirs(cache, exist_ok=True)
 
     def _stage_macos_binaries(self, rust_targets, cargo_dir=None):
         """Copy (or lipo) cargo output into target/release/ where Xcode links it."""
