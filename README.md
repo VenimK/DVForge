@@ -3,6 +3,7 @@
 [![Python](https://img.shields.io/badge/Python-3.8%2B-3776AB?logo=python&logoColor=white)](#quick-start)
 [![Platforms](https://img.shields.io/badge/Windows%20%7C%20macOS%20%7C%20Linux-black)](#who-can-build-what)
 [![RustDesk](https://img.shields.io/badge/RustDesk-1.4.9-orange)](#)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
 # DVForge
 
@@ -184,6 +185,16 @@ dvforge/
 - DVForge **only builds**. It does not publish releases or host downloads.
 - One Flutter on the machine (3.24.5). Bridge codegen is local, not a second CI Flutter.
 - Updates: **Check for updates** in the left rail pulls a newer DVForge commit when you want it.
+
+---
+
+## License
+
+DVForge is [GNU GPL v3.0](LICENSE).
+
+It incorporates work from [rdgen](https://github.com/bryangerlach/rdgen) by [Bryan Gerlach](https://github.com/bryangerlach) (GPL-3.0) — the custom-client config shape, patches, and GitHub Actions generator this local builder is based on.
+
+Clients you produce are based on [RustDesk](https://github.com/rustdesk/rustdesk) (AGPL-3.0).
 
 ---
 
