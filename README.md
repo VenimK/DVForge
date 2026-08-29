@@ -5,6 +5,11 @@
 [![RustDesk](https://img.shields.io/badge/RustDesk-1.4.9-orange)](#)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
+[![Tiddley123](https://img.shields.io/badge/Tiddley123-Contributor-6CC644?logo=github&logoColor=white)](https://github.com/Tiddley123)
+[![bryangerlach](https://img.shields.io/badge/bryangerlach-Contributor-A31F34?logo=github&logoColor=white)](https://github.com/bryangerlach)
+[![VenimK](https://img.shields.io/badge/VenimK-Contributor-8B5CF6?logo=github&logoColor=white)](https://github.com/VenimK)
+[![deadboy18](https://img.shields.io/badge/deadboy18-Contributor-F59E0B?logo=github&logoColor=white)](https://github.com/deadboy18)
+
 # DVForge
 
 **Build your own branded RustDesk client on this computer — server, key, password, and permissions baked in. No GitHub. No cloud CI.**
