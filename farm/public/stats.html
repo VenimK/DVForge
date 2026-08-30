@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DVForge — farm status</title>
+<style>
+:root {
+  --bg:#10131a; --panel:#171b24; --line:#2b3342;
+  --ink:#e8edf5; --dim:#97a1b3; --faint:#626d80;
+  --amber:#f2b447; --good:#57c98a; --bad:#f2685f; --steel:#5e9be0;
+  --sans: system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --mono: ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+}
+* { box-sizing: border-box; }
+body { margin:0; min-height:100vh; background:var(--bg); color:var(--ink); font-family:var(--sans); }
+.wrap { max-width: 720px; margin: 0 auto; padding: 40px 20px 80px; }
+.brand { font-size:11px; letter-spacing:.16em; text-transform:uppercase; color:var(--amber); }
+h1 { font-size:28px; margin:8px 0; }
+.lede { color:var(--dim); line-height:1.5; margin:0 0 22px; }
+.row { display:flex; flex-wrap:wrap; gap:10px; margin-bottom:18px; }
+.stat {
+  flex:1 1 110px; background:var(--panel); border:1px solid var(--line);
+  border-radius:10px; padding:12px 14px;
+}
+.stat b { display:block; font-size:22px; font-variant-numeric:tabular-nums; }
+.stat span { font-size:12px; color:var(--dim); }
+.pill {
+  display:inline-flex; align-items:center; gap:8px;
+  padding:8px 12px; background:var(--panel); border:1px solid var(--line);
+  border-radius:999px; font-size:13px; color:var(--dim);
+}
+.dot { width:8px; height:8px; border-radius:50%; background:var(--faint); }
+.dot.on { background:var(--good); box-shadow:0 0 0 3px rgba(87,201,138,.18); }
+.dot.busy { background:var(--amber); box-shadow:0 0 0 3px rgba(242,180,71,.18); }
+.dot.off { background:#5a3340; }
+h2 { font-size:13px; letter-spacing:.12em; text-transform:uppercase; color:var(--amber); margin:28px 0 10px; }
+table { width:100%; border-collapse:collapse; font-size:13.5px; }
+th, td { text-align:left; padding:8px 6px; border-bottom:1px solid var(--line); }
+th { color:var(--faint); font-weight:500; font-size:11px; letter-spacing:.08em; text-transform:uppercase; }
+.muted { color:var(--dim); }
+.empty { color:var(--faint); font-size:13px; }
+a { color:var(--steel); }
+.err { color:var(--bad); }
+.ok { color:var(--good); }
+.tick { font-size:12px; color:var(--faint); margin-top:16px; }
+code { font-family:var(--mono); font-size:12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="brand">DVForge</div>
+  <h1>Farm status</h1>
+  <p class="lede">Live workers and queue depth. Job ids and configs stay private.
+    <a href="/">Request a client</a> · <a href="/join">Set up a worker</a></p>
+
+  <div class="row" id="cov"></div>
+  <div class="row" id="nums"></div>
+
+  <h2>Workers</h2>
+  <div id="workers" class="empty">loading…</div>
+
+  <h2>Building now</h2>
+  <div id="running" class="empty">none</div>
+
+  <h2>Waiting</h2>
+  <div id="waiting" class="empty">none</div>
+
+  <h2>Recent builds</h2>
+  <div id="recent" class="empty">none</div>
+  <p class="tick" id="tick"></p>
+</div>
+<script>
+const $ = s => document.querySelector(s);
+function fmtSec(s) {
+  s = Math.max(0, parseInt(s, 10) || 0);
+  const m = Math.floor(s / 60), r = s % 60;
+  if (m >= 60) return Math.floor(m / 60) + "h " + (m % 60) + "m";
+  if (m) return m + "m " + r + "s";
+  return r + "s";
+}
+function esc(s) {
+  return String(s || "").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+}
+function dotClass(w) {
+  if (w.online && w.busy) return "busy";
+  if (w.online) return "on";
+  return "off";
+}
+function platLabel(k) {
+  return { macos:"Mac", windows:"Windows", linux:"Linux", android:"Android" }[k] || k;
+}
+function jobLine(j) {
+  const name = j.appname || "client";
+  const t = (j.targets || []).join(", ") || "?";
+  return "<b>" + esc(name) + "</b> · " + esc(t);
+}
+
+async function refresh() {
+  const r = await fetch("/stats");
+  const d = await r.json();
+  const cov = d.coverage || {};
+  $("#cov").innerHTML = ["macos","windows","linux","android"].map(k => {
+    const on = !!cov[k];
+    const wait = (d.waiting_by || {})[k] || 0;
+    return '<span class="pill"><span class="dot ' + (on ? "on" : "off") + '"></span>' +
+      platLabel(k) + " " + (on ? "online" : "offline") +
+      (wait ? " · " + wait + " waiting" : "") + "</span>";
+  }).join("");
+
+  const q = d.queue || {};
+  const cells = [
+    [q.running || 0, "building"],
+    [q.waiting || 0, "waiting"],
+    [d.workers_online || 0, "workers online"],
+    [q.done || 0, "finished"],
+    [q.failed || 0, "failed"],
+  ];
+  $("#nums").innerHTML = cells.map(([n, lab]) =>
+    '<div class="stat"><b>' + n + "</b><span>" + lab + "</span></div>").join("");
+
+  const workers = d.workers || [];
+  if (!workers.length) {
+    $("#workers").innerHTML = '<p class="empty">No workers have checked in since the queue started. Open <a href="/join">/join</a> on each builder.</p>';
+  } else {
+    $("#workers").innerHTML = "<table><thead><tr><th></th><th>Name</th><th>Builds</th><th>Seen</th></tr></thead><tbody>" +
+      workers.map(w => {
+        const state = w.online ? (w.busy ? "building" : "idle") : "offline";
+        const seen = w.last_seen_sec == null ? "—" : (w.online ? "now" : fmtSec(w.last_seen_sec) + " ago");
+        const claim = (w.claiming || []).map(x => x.replace(/-$/, "")).join(", ");
+        return "<tr><td><span class='dot " + dotClass(w) + "'></span></td><td>" +
+          esc(w.name) + " <span class='muted'>" + esc(state) + "</span></td><td>" +
+          esc(claim || w.platform) + "</td><td class='muted'>" + seen + "</td></tr>";
+      }).join("") + "</tbody></table>";
+  }
+
+  const running = d.running || [];
+  $("#running").innerHTML = running.length
+    ? "<table><tbody>" + running.map(j =>
+        "<tr><td>" + jobLine(j) + "</td><td class='muted'>" +
+        esc(j.worker || j.waiting_for) + " · " + esc(j.phase || "") +
+        " · " + fmtSec(j.elapsed_sec) + "</td></tr>").join("") + "</tbody></table>"
+    : '<p class="empty">Idle.</p>';
+
+  const waiting = d.waiting || [];
+  $("#waiting").innerHTML = waiting.length
+    ? "<table><tbody>" + waiting.map(j =>
+        "<tr><td>" + jobLine(j) + "</td><td class='muted'>needs " +
+        esc(j.waiting_for || "a worker") + "</td></tr>").join("") + "</tbody></table>"
+    : '<p class="empty">Nothing in the inbox.</p>';
+
+  const recent = d.recent || [];
+  $("#recent").innerHTML = recent.length
+    ? "<table><thead><tr><th></th><th>Target</th><th>Worker</th><th>Time</th></tr></thead><tbody>" +
+      recent.map(j => {
+        const mark = j.ok ? "<span class='ok'>ok</span>" : "<span class='err'>fail</span>";
+        const t = (j.targets || []).join(", ") || "?";
+        const extra = j.ok ? fmtSec(j.seconds) : esc(j.error || "failed");
+        return "<tr><td>" + mark + "</td><td>" + esc(t) + "</td><td class='muted'>" +
+          esc(j.worker) + "</td><td class='muted'>" + extra +
+          (j.finished ? " · " + esc(j.finished) : "") + "</td></tr>";
+      }).join("") + "</tbody></table>"
+    : '<p class="empty">No finished jobs yet.</p>';
+
+  $("#tick").innerHTML = "Updated " + esc(d.now) + " · queue up " + fmtSec(d.uptime_sec) +
+    " · JSON at <code>/stats</code> and <code>/health</code>";
+}
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

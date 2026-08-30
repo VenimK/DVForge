@@ -358,9 +358,16 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/build/stream":
             return self._stream(SESSION)
         if path == "/api/build/status":
+            tail = []
+            with SESSION.lock:
+                for line in SESSION.history[-40:]:
+                    if not line or line == "\x00DONE":
+                        continue
+                    tail.append(line)
             return self._send_json({
                 "running": SESSION.running,
                 "result": SESSION.result,
+                "log_tail": tail[-15:],
             })
         if path == "/api/toolchains":
             host = detect.host_info()

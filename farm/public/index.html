@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DVForge — request a client</title>
+<style>
+:root {
+  --bg:#10131a; --panel:#171b24; --line:#2b3342;
+  --ink:#e8edf5; --dim:#97a1b3; --faint:#626d80;
+  --amber:#f2b447; --good:#57c98a; --bad:#f2685f; --steel:#5e9be0;
+  --sans: system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --mono: ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; min-height: 100vh; background: var(--bg); color: var(--ink);
+  font-family: var(--sans); font-size: 15px;
+  background-image:
+    radial-gradient(900px 500px at 80% -10%, rgba(94,155,224,.07), transparent 55%);
+}
+.wrap { max-width: 560px; margin: 0 auto; padding: 40px 20px 80px; }
+.brand { font-size: 11px; letter-spacing: .16em; text-transform: uppercase; color: var(--amber); }
+h1 { font-size: 28px; font-weight: 650; margin: 8px 0 8px; }
+.lede { color: var(--dim); line-height: 1.5; margin: 0 0 28px; }
+label { display: block; font-size: 12.5px; color: var(--dim); margin: 16px 0 0; }
+select, input[type=text], input[type=password] {
+  width: 100%; margin-top: 6px; padding: 10px 12px;
+  background: #0c0f14; border: 1px solid var(--line); border-radius: 8px;
+  color: var(--ink); font-family: var(--mono); font-size: 13px;
+}
+select:focus, input:focus { outline: none; border-color: var(--steel); }
+.file {
+  margin-top: 6px; padding: 14px; border: 1px dashed var(--line); border-radius: 8px;
+  color: var(--dim); font-size: 13px;
+}
+.file input { margin-top: 8px; }
+.btn {
+  margin-top: 22px; width: 100%; padding: 12px 16px; border: 0; border-radius: 8px;
+  background: var(--amber); color: #10131a; font-weight: 700; font-size: 14px; cursor: pointer;
+}
+.btn:disabled { opacity: .45; cursor: not-allowed; }
+.hint { font-size: 12px; color: var(--faint); margin-top: 10px; line-height: 1.45; }
+.card {
+  margin-top: 28px; padding: 16px 18px; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 10px; display: none;
+}
+.card.show { display: block; }
+.card h2 { margin: 0 0 8px; font-size: 13px; letter-spacing: .1em; text-transform: uppercase; color: var(--amber); }
+.mono { font-family: var(--mono); font-size: 13px; word-break: break-all; }
+.status { margin-top: 8px; color: var(--dim); }
+.status.ok { color: var(--good); }
+.status.bad { color: var(--bad); }
+.meta { margin-top: 10px; font-size: 13px; color: var(--dim); line-height: 1.5; }
+.meta b { color: var(--ink); font-weight: 600; }
+.log {
+  margin: 12px 0 0; max-height: 180px; overflow: auto;
+  padding: 10px 12px; background: #0c0f14; border-radius: 8px;
+  font-family: var(--mono); font-size: 11px; line-height: 1.45; color: #b7c0ce;
+  white-space: pre-wrap; word-break: break-word;
+}
+.bar-wrap { margin-top: 14px; display: none; }
+.bar-wrap.show { display: block; }
+.bar-top { display: flex; justify-content: space-between; font-size: 12px; color: var(--dim); margin-bottom: 6px; }
+.bar-top b { color: var(--ink); font-variant-numeric: tabular-nums; }
+.bar {
+  height: 10px; border-radius: 999px; background: #0c0f14; border: 1px solid var(--line);
+  overflow: hidden;
+}
+.bar > span {
+  display: block; height: 100%; width: 0%;
+  background: linear-gradient(90deg, #c48a20, var(--amber), #f7d48a);
+  border-radius: 999px;
+  transition: width .6s ease;
+}
+.bar.indeterminate > span {
+  width: 35% !important;
+  animation: slide 1.4s ease-in-out infinite;
+}
+.bar.done > span { width: 100% !important; background: var(--good); }
+@keyframes slide {
+  0% { transform: translateX(-120%); }
+  100% { transform: translateX(320%); }
+}
+.dl { display: block; margin-top: 10px; color: var(--steel); }
+.token-row { margin-top: 20px; }
+.token-row summary { cursor: pointer; color: var(--faint); font-size: 12px; }
+.farm {
+  display:flex; flex-wrap:wrap; gap:8px 14px; align-items:center;
+  margin: 0 0 22px; padding: 10px 12px; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 10px;
+  font-size: 12.5px; color: var(--dim);
+}
+.farm a { color: var(--steel); margin-left: auto; }
+.pill { display:inline-flex; align-items:center; gap:6px; }
+.dot { width:8px; height:8px; border-radius:50%; background: var(--faint); }
+.dot.on { background: var(--good); box-shadow: 0 0 0 3px rgba(87,201,138,.15); }
+.dot.off { background: #5a3340; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="brand">DVForge</div>
+  <div class="farm" id="farm">
+    <span class="pill"><span class="dot" id="d-macos"></span>Mac</span>
+    <span class="pill"><span class="dot" id="d-windows"></span>Windows</span>
+    <span class="pill"><span class="dot" id="d-linux"></span>Linux</span>
+    <span class="pill"><span class="dot" id="d-android"></span>Android</span>
+    <span id="farmcounts"></span>
+    <a href="/status">farm status</a>
+  </div>
+  <h1>Request a branded client</h1>
+  <p class="lede">Upload your <code>RustDesk.json</code> and pick what to build.
+    When a Mac or Windows worker finishes, the installer appears here. Typical wait: 5–40 minutes.</p>
+
+  <form id="f">
+    <label>What to build
+      <select name="targets" required>
+        <option value="windows-x86_64-exe">Windows — portable .exe</option>
+        <option value="windows-x86_64-msi">Windows — .msi installer</option>
+        <option value="macos-arm64-dmg">macOS Apple Silicon — .dmg</option>
+        <option value="macos-x86_64-dmg">macOS Intel — .dmg</option>
+        <option value="android-arm64">Android — arm64 APK</option>
+        <option value="linux-x86_64-deb">Linux — .deb</option>
+        <option value="linux-x86_64-rpm">Linux — .rpm</option>
+        <option value="linux-x86_64-appimage">Linux — AppImage</option>
+      </select>
+    </label>
+    <label>RustDesk.json
+      <div class="file">
+        Export from DVForge (Config → Save) or rdgen.
+        <input type="file" name="json" accept=".json,application/json" required>
+      </div>
+    </label>
+    <label>RustDesk version
+      <input type="text" name="version" value="1.4.9" spellcheck="false">
+    </label>
+    <details class="token-row">
+      <summary>Access token (if the operator set one)</summary>
+      <input type="password" id="token" placeholder="Bearer token" autocomplete="off">
+    </details>
+    <button class="btn" type="submit" id="go">Queue build</button>
+    <p class="hint">Windows jobs go to a Windows PC, Mac jobs to a Mac, Linux/Android jobs to a Linux box. Keep this tab open to watch for the download.
+      Operators: <a href="/join" style="color:#5e9be0">set up a worker</a> (no NAS mount).</p>
+  </form>
+
+  <div class="card" id="card">
+    <h2>Your job</h2>
+    <div class="mono" id="jid"></div>
+    <div class="status" id="st">queued…</div>
+    <div class="bar-wrap" id="barwrap">
+      <div class="bar-top"><span id="barlabel">Estimating…</span><b id="barpct"></b></div>
+      <div class="bar" id="bar"><span id="barfill"></span></div>
+    </div>
+    <div class="meta" id="meta"></div>
+    <pre class="log" id="log" hidden></pre>
+    <div id="dls"></div>
+  </div>
+</div>
+<script>
+const $ = s => document.querySelector(s);
+const tokenEl = $("#token");
+try { tokenEl.value = sessionStorage.getItem("farmToken") || ""; } catch (e) {}
+
+function headers() {
+  const h = {};
+  const t = (tokenEl.value || "").trim();
+  if (t) h["Authorization"] = "Bearer " + t;
+  return h;
+}
+
+$("#f").addEventListener("submit", async e => {
+  e.preventDefault();
+  const f = e.target;
+  const file = f.json.files[0];
+  if (!file) return;
+  const t = (tokenEl.value || "").trim();
+  try { sessionStorage.setItem("farmToken", t); } catch (err) {}
+  $("#go").disabled = true;
+  $("#st").className = "status";
+  $("#st").textContent = "uploading…";
+  $("#card").classList.add("show");
+  $("#dls").innerHTML = "";
+  let cfg;
+  try { cfg = JSON.parse(await file.text()); }
+  catch (err) {
+    $("#st").className = "status bad";
+    $("#st").textContent = "that file is not JSON";
+    $("#go").disabled = false;
+    return;
+  }
+  const targets = f.targets.value;
+  const version = f.version.value.trim() || "1.4.9";
+  const r = await fetch("/job?targets=" + encodeURIComponent(targets) + "&version=" + encodeURIComponent(version), {
+    method: "POST",
+    headers: Object.assign({ "Content-Type": "application/json" }, headers()),
+    body: JSON.stringify(cfg),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok || !data.ok) {
+    $("#st").className = "status bad";
+    $("#st").textContent = data.error || ("HTTP " + r.status);
+    $("#go").disabled = false;
+    return;
+  }
+  $("#jid").textContent = data.id;
+  $("#st").textContent = "queued — waiting for a worker…";
+  $("#meta").textContent = "";
+  $("#log").hidden = true;
+  setBar(null);
+  Object.keys(runClock).forEach(k => delete runClock[k]);
+  poll(data.id);
+});
+
+function fmtSec(s) {
+  s = Math.max(0, parseInt(s, 10) || 0);
+  const m = Math.floor(s / 60), r = s % 60;
+  if (m >= 60) return Math.floor(m / 60) + "h " + (m % 60) + "m";
+  if (m) return m + " min " + r + "s";
+  return r + "s";
+}
+
+function showLog(lines) {
+  const el = $("#log");
+  if (!lines || !lines.length) { el.hidden = true; return; }
+  el.hidden = false;
+  el.textContent = lines.filter(Boolean).join("\n");
+  el.scrollTop = el.scrollHeight;
+}
+
+const PHASES = [
+  [/waiting for inbox|queued/i, 3, "In the queue"],
+  [/waiting for DVForge|already building/i, 8, "Waiting for the builder"],
+  [/Check out|git reset|git submodule|source reset/i, 14, "Checking out RustDesk"],
+  [/flutter_rust_bridge|Generate flutter/i, 20, "Generating bridge code"],
+  [/Applying customizations|Customizations complete/i, 26, "Applying branding"],
+  [/vcpkg/i, 32, "Native dependencies"],
+  [/cargo build|Compiling |Finished `release`/i, 48, "Compiling Rust"],
+  [/Flutter|xcodebuild|Building macOS|BUILD |gradle|flutter build/i, 72, "Building the app"],
+  [/packag|create-dmg|\.dmg|\.msi|codesign|copied |artifact/i, 90, "Packaging installer"],
+];
+
+let lastPct = 0;
+const runClock = {}; // job id → ms when we first saw "running"
+
+function estimatePct(d) {
+  if (d.state === "done") return 100;
+  if (d.state === "failed") return lastPct;
+  const p = d.progress || {};
+  const blob = (p.log_tail || []).join("\n") + " " + (p.phase || "") + " " + (d.state || "");
+  let fromLog = 4, label = "Starting…";
+  PHASES.forEach(([re, pct, lab]) => {
+    if (re.test(blob)) { fromLog = pct; label = lab; }
+  });
+  const typical = d.typical_sec || 20 * 60;
+  if (d.state === "running" && d.id && !runClock[d.id]) runClock[d.id] = Date.now();
+  const localElapsed = d.id && runClock[d.id]
+    ? Math.round((Date.now() - runClock[d.id]) / 1000) : 0;
+  const elapsed = Math.max(p.elapsed_sec || 0, localElapsed);
+  const fromTime = typical > 0
+    ? Math.round(10 + 80 * (1 - Math.exp(-elapsed / typical)))
+    : fromLog;
+  let pct = Math.max(fromLog, fromTime);
+  if (d.state === "queued") pct = Math.min(pct, 6);
+  if (p.phase === "waiting") pct = Math.max(pct, 8);
+  pct = Math.min(96, Math.max(lastPct, pct));
+  lastPct = pct;
+  const remain = Math.max(0, typical - elapsed);
+  return { pct, label, remain, elapsed, typical };
+}
+
+function setBar(est, opts) {
+  const wrap = $("#barwrap");
+  const bar = $("#bar");
+  if (!est) {
+    wrap.classList.remove("show");
+    lastPct = 0;
+    $("#barfill").style.background = "";
+    return;
+  }
+  wrap.classList.add("show");
+  bar.classList.toggle("indeterminate", !!opts && opts.indeterminate);
+  bar.classList.toggle("done", !!opts && opts.done);
+  $("#barfill").style.width = (opts && opts.done ? 100 : est.pct) + "%";
+  $("#barpct").textContent = (opts && opts.done ? "100" : est.pct) + "%";
+  if (opts && opts.done) {
+    $("#barlabel").textContent = "Finished";
+  } else if (opts && opts.indeterminate) {
+    $("#barlabel").textContent = est.label || "Waiting…";
+    $("#barpct").textContent = "";
+  } else {
+    let lab = est.label || "Building";
+    if (est.remain > 20) {
+      lab += est.elapsed > 8
+        ? " · ~" + fmtSec(est.remain) + " left (estimate)"
+        : " · typically ~" + fmtSec(est.typical || est.remain);
+    }
+    $("#barlabel").textContent = lab;
+  }
+}
+
+async function poll(id) {
+  const r = await fetch("/job/" + encodeURIComponent(id), { headers: headers() });
+  const d = await r.json().catch(() => ({}));
+  const meta = $("#meta");
+  const bits = [];
+  if (d.appname) bits.push("App <b>" + d.appname.replace(/[<>]/g, "") + "</b>");
+  if (d.targets && d.targets.length) bits.push("Target <b>" + d.targets.join(", ") + "</b>");
+  if (d.version) bits.push("RustDesk <b>" + d.version + "</b>");
+
+  if (d.state === "failed") {
+    $("#st").className = "status bad";
+    $("#st").textContent = "failed: " + (d.error || "see farm/failed");
+    meta.innerHTML = bits.join(" · ");
+    setBar({ pct: lastPct || 0, label: "Failed" }, { done: false });
+    $("#bar").classList.remove("done");
+    $("#barfill").style.background = "var(--bad)";
+    $("#go").disabled = false;
+    return;
+  }
+  if (d.state === "done" && d.status && d.status.ok) {
+    $("#st").className = "status ok";
+    const sec = d.status.seconds;
+    $("#st").textContent = "ready — built in " + fmtSec(sec) + " on " + (d.status.worker || "worker");
+    meta.innerHTML = bits.join(" · ");
+    lastPct = 100;
+    setBar({ pct: 100, label: "Finished" }, { done: true });
+    showLog([]);
+    const box = $("#dls");
+    box.innerHTML = "";
+    (d.files || []).forEach(name => {
+      const a = document.createElement("a");
+      a.className = "dl";
+      a.href = "/dl/" + encodeURIComponent(id) + "/" + encodeURIComponent(name);
+      a.textContent = "Download " + name;
+      box.appendChild(a);
+    });
+    $("#go").disabled = false;
+    return;
+  }
+  if (d.state === "done" && d.status && !d.status.ok) {
+    $("#st").className = "status bad";
+    $("#st").textContent = "build failed: " + (d.status.error || "");
+    meta.innerHTML = bits.join(" · ");
+    $("#go").disabled = false;
+    return;
+  }
+
+  $("#st").className = "status";
+  const p = d.progress || {};
+  const est = estimatePct(d);
+  if ((d.state || "queued") === "queued") {
+    const ahead = d.queue_ahead || 0;
+    const wait = d.waiting_for ? ("waiting for " + d.waiting_for) : "waiting for a worker";
+    $("#st").textContent = ahead
+      ? "queued — " + ahead + " job(s) ahead, " + wait
+      : "queued — " + wait;
+    if (d.hint) bits.push(d.hint);
+    setBar({ pct: 4, label: wait }, { indeterminate: true });
+  } else {
+    const elapsed = est.elapsed;
+    const who = p.worker || d.waiting_for || "builder";
+    const phase = p.phase === "waiting"
+      ? "worker connected, waiting for DVForge to be free"
+      : "compiling on " + who;
+    $("#st").textContent = elapsed
+      ? "running — " + phase + " · elapsed " + fmtSec(elapsed)
+      : "running — " + phase;
+    if (d.hint) bits.push("Typical: " + d.hint);
+    showLog(p.log_tail);
+    setBar(est, { indeterminate: p.phase === "waiting" });
+  }
+  meta.innerHTML = bits.join(" · ");
+  setTimeout(() => poll(id), 4000);
+}
+
+const q = new URLSearchParams(location.search).get("job");
+if (q) {
+  $("#card").classList.add("show");
+  $("#jid").textContent = q;
+  poll(q);
+}
+
+async function farmStrip() {
+  try {
+    const r = await fetch("/health");
+    const d = await r.json();
+    const cov = d.coverage || {};
+    ["macos","windows","linux","android"].forEach(k => {
+      const el = document.getElementById("d-" + k);
+      if (el) el.className = "dot " + (cov[k] ? "on" : "off");
+    });
+    const bits = [];
+    if (d.running) bits.push(d.running + " building");
+    if (d.waiting) bits.push(d.waiting + " waiting");
+    bits.push((d.workers_online || 0) + " worker" + (d.workers_online === 1 ? "" : "s"));
+    $("#farmcounts").textContent = bits.join(" · ");
+  } catch (e) {}
+}
+farmStrip();
+setInterval(farmStrip, 8000);
+</script>
+</body>
+</html>

@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DVForge — set up a worker</title>
+<style>
+:root {
+  --bg:#10131a; --panel:#171b24; --line:#2b3342;
+  --ink:#e8edf5; --dim:#97a1b3; --faint:#626d80;
+  --amber:#f2b447; --steel:#5e9be0;
+  --sans: system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --mono: ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+}
+* { box-sizing: border-box; }
+body { margin:0; min-height:100vh; background:var(--bg); color:var(--ink); font-family:var(--sans); }
+.wrap { max-width: 640px; margin: 0 auto; padding: 40px 20px 80px; }
+.brand { font-size:11px; letter-spacing:.16em; text-transform:uppercase; color:var(--amber); }
+h1 { font-size:28px; margin:8px 0; }
+.lede { color:var(--dim); line-height:1.5; }
+label { display:block; font-size:12.5px; color:var(--dim); margin:16px 0 0; }
+select, input {
+  width:100%; margin-top:6px; padding:10px 12px; background:#0c0f14;
+  border:1px solid var(--line); border-radius:8px; color:var(--ink);
+  font-family:var(--mono); font-size:13px;
+}
+pre {
+  margin-top:16px; padding:14px 16px; background:#0c0f14; border:1px solid var(--line);
+  border-radius:10px; overflow:auto; font-family:var(--mono); font-size:12.5px; line-height:1.5;
+}
+.btn { margin-top:12px; padding:9px 14px; border:0; border-radius:8px; background:var(--amber); color:#10131a; font-weight:700; cursor:pointer; }
+a { color:var(--steel); }
+.hint { font-size:13px; color:var(--dim); line-height:1.5; }
+ol { color:var(--dim); line-height:1.55; padding-left:18px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="brand">DVForge</div>
+  <h1>Set up a worker</h1>
+  <p class="lede">No NAS mount. This machine only needs DVForge running locally, then one command that talks to this website over HTTPS.</p>
+
+  <label>This computer
+    <select id="os">
+      <option value="linux">Linux (builds .deb / .rpm / AppImage / Android)</option>
+      <option value="windows">Windows (builds .exe / .msi)</option>
+      <option value="mac">macOS (builds .dmg)</option>
+    </select>
+  </label>
+  <label>Access token (same as the submit page)
+    <input id="token" type="password" autocomplete="off" placeholder="Bearer token">
+  </label>
+  <button class="btn" type="button" id="copy">Copy start command</button>
+
+  <pre id="cmd"></pre>
+  <p class="hint">First log line should include <code>queue=https://api.nas86.eu</code> and <code>claiming windows-*</code> (or macos / linux). If the log shows <code>queue=%DVFORGE_QUEUE%</code> you are in PowerShell — use the flags above, not <code>set</code> / <code>%VAR%</code>. DVForge stays on <code>127.0.0.1:8765</code>.</p>
+
+  <ol>
+    <li>Install DVForge on this PC the usual way (<code>Setup-DVForge-*.sh</code> / <code>.ps1</code>).</li>
+    <li>Start it: <code>./run.sh</code> or <code>run.bat</code> or <code>python3 app.py --no-browser</code>.</li>
+    <li>In a second terminal, paste the command above (from the <code>farm</code> folder of that clone).</li>
+  </ol>
+  <p class="hint"><a href="/">← Request a client</a> · <a href="/status">farm status</a></p>
+</div>
+<script>
+const $ = s => document.querySelector(s);
+const ua = navigator.userAgent;
+if (/Windows/i.test(ua)) $("#os").value = "windows";
+else if (/Mac/i.test(ua)) $("#os").value = "mac";
+else $("#os").value = "linux";
+try { $("#token").value = sessionStorage.getItem("farmToken") || ""; } catch (e) {}
+
+function cmd() {
+  const origin = location.origin;
+  const token = ($("#token").value || "").trim() || "YOUR_TOKEN";
+  const os = $("#os").value;
+  // Pass URL/token as flags so PowerShell and cmd.exe both work
+  // (`set VAR=` / `%VAR%` is cmd-only and stays literal in PowerShell).
+  if (os === "windows") {
+    return "cd C:\\DVForge\\farm\r\n" +
+      "python worker.py --queue \"" + origin + "\" --token \"" + token + "\"";
+  }
+  const dir = os === "mac" ? "/Users/venimk/DVForge/farm" : "/path/to/DVForge/farm";
+  return "cd " + dir + "\n" +
+    "python3 worker.py --queue \"" + origin + "\" --token \"" + token + "\"";
+}
+function render() { $("#cmd").textContent = cmd(); }
+$("#os").onchange = render;
+$("#token").oninput = render;
+render();
+$("#copy").onclick = async () => {
+  try { sessionStorage.setItem("farmToken", $("#token").value); } catch (e) {}
+  await navigator.clipboard.writeText(cmd());
+  $("#copy").textContent = "Copied";
+  setTimeout(() => $("#copy").textContent = "Copy start command", 1500);
+};
+</script>
+</body>
+</html>
