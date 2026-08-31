@@ -135,13 +135,18 @@ select:focus, input:focus { outline: none; border-color: var(--steel); }
     <label>RustDesk version
       <input type="text" name="version" value="1.4.9" spellcheck="false">
     </label>
+    <label>Worker
+      <select name="assign" id="assign">
+        <option value="">First available (highest rating)</option>
+      </select>
+    </label>
     <details class="token-row">
       <summary>Access token (if the operator set one)</summary>
       <input type="password" id="token" placeholder="Bearer token" autocomplete="off">
     </details>
     <button class="btn" type="submit" id="go">Queue build</button>
-    <p class="hint">Windows jobs go to a Windows PC, Mac jobs to a Mac, Linux/Android jobs to a Linux box. Keep this tab open to watch for the download.
-      Operators: <a href="/join" style="color:#5e9be0">set up a worker</a> (no NAS mount).</p>
+    <p class="hint">Windows jobs go to a Windows PC, Mac jobs to a Mac, Linux/Android jobs to a Linux box. Default worker is the highest-rated idle machine; a worker that fails every job is skipped until its rating is reset on <a href="/status" style="color:#5e9be0">farm status</a>.
+      Operators: <a href="/join" style="color:#5e9be0">set up a worker</a>.</p>
   </form>
 
   <div class="card" id="card">
@@ -191,7 +196,10 @@ $("#f").addEventListener("submit", async e => {
   }
   const targets = f.targets.value;
   const version = f.version.value.trim() || "1.4.9";
-  const r = await fetch("/job?targets=" + encodeURIComponent(targets) + "&version=" + encodeURIComponent(version), {
+  const assign = (f.assign && f.assign.value) ? f.assign.value : "";
+  let jobUrl = "/job?targets=" + encodeURIComponent(targets) + "&version=" + encodeURIComponent(version);
+  if (assign) jobUrl += "&assign=" + encodeURIComponent(assign);
+  const r = await fetch(jobUrl, {
     method: "POST",
     headers: Object.assign({ "Content-Type": "application/json" }, headers()),
     body: JSON.stringify(cfg),
@@ -307,6 +315,7 @@ async function poll(id) {
   if (d.appname) bits.push("App <b>" + d.appname.replace(/[<>]/g, "") + "</b>");
   if (d.targets && d.targets.length) bits.push("Target <b>" + d.targets.join(", ") + "</b>");
   if (d.version) bits.push("RustDesk <b>" + d.version + "</b>");
+  if (d.assign) bits.push("Pinned <b>" + d.assign.replace(/[<>]/g, "") + "</b>");
 
   if (d.state === "failed") {
     $("#st").className = "status bad";
@@ -381,9 +390,46 @@ if (q) {
   poll(q);
 }
 
+function targetPlat(t) {
+  t = t || "";
+  if (t.indexOf("macos") === 0) return "macos";
+  if (t.indexOf("windows") === 0) return "windows";
+  if (t.indexOf("linux") === 0) return "linux";
+  if (t.indexOf("android") === 0) return "android";
+  return "";
+}
+function workerFits(w, plat) {
+  if (!plat) return true;
+  if (plat === "android") return w.platform === "linux" || w.android;
+  return w.platform === plat;
+}
+function fillWorkers(stats) {
+  const sel = $("#assign");
+  if (!sel) return;
+  const keep = sel.value;
+  const plat = targetPlat(document.querySelector("[name=targets]").value);
+  const list = (stats.workers || []).filter(w => w.name && workerFits(w, plat));
+  sel.innerHTML = "";
+  const first = document.createElement("option");
+  first.value = "";
+  first.textContent = "First available (highest rating)";
+  sel.appendChild(first);
+  list.forEach(w => {
+    const o = document.createElement("option");
+    o.value = w.name;
+    const bits = [w.name, (w.score_pct != null ? w.score_pct + "%" : "")];
+    if (w.online) bits.push(w.busy ? "busy" : "online");
+    else bits.push("offline");
+    if (w.eligible === false) bits.push("blocked");
+    o.textContent = bits.filter(Boolean).join(" · ");
+    sel.appendChild(o);
+  });
+  if (keep && Array.from(sel.options).some(o => o.value === keep)) sel.value = keep;
+}
+
 async function farmStrip() {
   try {
-    const r = await fetch("/health");
+    const r = await fetch("/stats");
     const d = await r.json();
     const cov = d.coverage || {};
     ["macos","windows","linux","android"].forEach(k => {
@@ -391,12 +437,15 @@ async function farmStrip() {
       if (el) el.className = "dot " + (cov[k] ? "on" : "off");
     });
     const bits = [];
-    if (d.running) bits.push(d.running + " building");
-    if (d.waiting) bits.push(d.waiting + " waiting");
+    if (d.queue && d.queue.running) bits.push(d.queue.running + " building");
+    if (d.queue && d.queue.waiting) bits.push(d.queue.waiting + " waiting");
     bits.push((d.workers_online || 0) + " worker" + (d.workers_online === 1 ? "" : "s"));
     $("#farmcounts").textContent = bits.join(" · ");
+    fillWorkers(d);
   } catch (e) {}
 }
+const tgt = document.querySelector("[name=targets]");
+if (tgt) tgt.addEventListener("change", farmStrip);
 farmStrip();
 setInterval(farmStrip, 8000);
 </script>

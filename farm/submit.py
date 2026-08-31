@@ -34,6 +34,8 @@ def main():
     p.add_argument("--dry-run", action="store_true",
                    help="Worker prints the plan only, does not compile")
     p.add_argument("--id", default="", help="Job id (default: timestamp + uuid)")
+    p.add_argument("--assign", default="",
+                   help="Only this worker hostname may claim the job")
     args = p.parse_args()
 
     with open(args.config, encoding="utf-8") as f:
@@ -65,6 +67,8 @@ def main():
         "config": cfg,
         "submitted": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
+    if args.assign.strip():
+        job["assign"] = args.assign.strip()
     os.makedirs(INBOX, exist_ok=True)
     dest = os.path.join(INBOX, jid + ".json")
     tmp = dest + ".tmp"
@@ -75,6 +79,8 @@ def main():
     print("queued", dest)
     print("targets:", " ".join(args.targets),
           "| dry_run=" + str(job["dry_run"]))
+    if job.get("assign"):
+        print("assign:", job["assign"])
     print("workers pick this up from farm/inbox/ (Mac vs Windows by target)")
 
 

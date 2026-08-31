@@ -45,6 +45,17 @@ a { color:var(--steel); }
 .ok { color:var(--good); }
 .tick { font-size:12px; color:var(--faint); margin-top:16px; }
 code { font-family:var(--mono); font-size:12px; }
+.btn-reset {
+  padding:4px 8px; border:0; border-radius:6px; background:#2b3342;
+  color:var(--ink); font-size:12px; cursor:pointer;
+}
+.btn-reset:hover { background:var(--amber); color:#10131a; }
+.token-mini { margin: 0 0 10px; }
+.token-mini input {
+  width: min(280px, 100%); padding:8px 10px; background:#0c0f14;
+  border:1px solid var(--line); border-radius:8px; color:var(--ink);
+  font-family:var(--mono); font-size:13px;
+}
 </style>
 </head>
 <body>
@@ -58,6 +69,10 @@ code { font-family:var(--mono); font-size:12px; }
   <div class="row" id="nums"></div>
 
   <h2>Workers</h2>
+  <p class="lede" style="margin-top:0">Highest rating is offered jobs first. A machine that fails every job (2+) or fails 5 in a row is skipped until you reset it. Pinning a worker on the submit form still sends that machine a job so you can test a fix.</p>
+  <div class="token-mini">
+    <input id="token" type="password" placeholder="Token (needed to reset a rating)" autocomplete="off">
+  </div>
   <div id="workers" class="empty">loading…</div>
 
   <h2>Building now</h2>
@@ -72,6 +87,10 @@ code { font-family:var(--mono); font-size:12px; }
 </div>
 <script>
 const $ = s => document.querySelector(s);
+try { $("#token").value = sessionStorage.getItem("farmToken") || ""; } catch (e) {}
+$("#token").addEventListener("input", () => {
+  try { sessionStorage.setItem("farmToken", $("#token").value); } catch (e) {}
+});
 function fmtSec(s) {
   s = Math.max(0, parseInt(s, 10) || 0);
   const m = Math.floor(s / 60), r = s % 60;
@@ -83,6 +102,7 @@ function esc(s) {
   return String(s || "").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 }
 function dotClass(w) {
+  if (w.eligible === false) return "off";
   if (w.online && w.busy) return "busy";
   if (w.online) return "on";
   return "off";
@@ -123,14 +143,19 @@ async function refresh() {
   if (!workers.length) {
     $("#workers").innerHTML = '<p class="empty">No workers have checked in since the queue started. Open <a href="/join">/join</a> on each builder.</p>';
   } else {
-    $("#workers").innerHTML = "<table><thead><tr><th></th><th>Name</th><th>Builds</th><th>Seen</th></tr></thead><tbody>" +
+    $("#workers").innerHTML = "<table><thead><tr><th></th><th>Name</th><th>Rating</th><th>Builds</th><th>Seen</th><th></th></tr></thead><tbody>" +
       workers.map(w => {
-        const state = w.online ? (w.busy ? "building" : "idle") : "offline";
+        const state = w.eligible === false ? "blocked" : (w.online ? (w.busy ? "building" : "idle") : "offline");
         const seen = w.last_seen_sec == null ? "—" : (w.online ? "now" : fmtSec(w.last_seen_sec) + " ago");
         const claim = (w.claiming || []).map(x => x.replace(/-$/, "")).join(", ");
+        const rec = (w.successes || 0) + " ok / " + (w.failures || 0) + " fail";
+        const rate = (w.score_pct != null ? w.score_pct + "%" : "—") +
+          (w.blocked_reason ? " <span class='err'>" + esc(w.blocked_reason) + "</span>" : "");
         return "<tr><td><span class='dot " + dotClass(w) + "'></span></td><td>" +
           esc(w.name) + " <span class='muted'>" + esc(state) + "</span></td><td>" +
-          esc(claim || w.platform) + "</td><td class='muted'>" + seen + "</td></tr>";
+          rate + "<div class='muted'>" + rec + "</div></td><td>" +
+          esc(claim || w.platform) + "</td><td class='muted'>" + seen +
+          "</td><td><button class='btn-reset' data-reset=\"" + encodeURIComponent(w.name) + "\">Reset</button></td></tr>";
       }).join("") + "</tbody></table>";
   }
 
@@ -165,6 +190,27 @@ async function refresh() {
   $("#tick").innerHTML = "Updated " + esc(d.now) + " · queue up " + fmtSec(d.uptime_sec) +
     " · JSON at <code>/stats</code> and <code>/health</code>";
 }
+$("#workers").addEventListener("click", async e => {
+  const b = e.target.closest("[data-reset]");
+  if (!b) return;
+  const name = decodeURIComponent(b.getAttribute("data-reset") || "");
+  const t = ($("#token").value || "").trim();
+  const h = { "Content-Type": "application/json" };
+  if (t) h["Authorization"] = "Bearer " + t;
+  b.disabled = true;
+  const r = await fetch("/worker/reset", {
+    method: "POST",
+    headers: h,
+    body: JSON.stringify({ name }),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    b.disabled = false;
+    alert(d.error || ("HTTP " + r.status));
+    return;
+  }
+  refresh();
+});
 refresh();
 setInterval(refresh, 5000);
 </script>

@@ -140,6 +140,9 @@ def claim_one(d):
             continue
         if not can_claim(job):
             continue
+        want = (job.get("assign") or job.get("assign_worker") or "").strip()
+        if want and want != WORKER_NAME:
+            continue
         dest = os.path.join(d["running"], name)
         try:
             os.rename(src, dest)

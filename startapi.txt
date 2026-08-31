@@ -1,0 +1,1 @@
+ python worker.py --queue "https://api.nas86.eu" --token "pick-a-secret"

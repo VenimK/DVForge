@@ -54,8 +54,13 @@ CLAIM = {
 }
 OS_LABEL = {"Darwin": "macos", "Windows": "windows", "Linux": "linux"}
 ONLINE_SEC = 45
+# Ban after this many attempts with zero successes, or this many fails in a row.
+BAN_AFTER_FAIL_ONLY = 2
+BAN_AFTER_STREAK = 5
 STARTED = time.time()
 WORKERS = {}
+RATINGS = {}
+RATINGS_FILE = os.path.join(FARM, "ratings.json")
 _LOCK = threading.Lock()
 
 
@@ -80,12 +85,136 @@ def _can_claim(job, os_name, android_on_mac=False):
     return all(any(str(t).startswith(x) for x in pref) for t in targets)
 
 
+def _job_assign(job):
+    return (job.get("assign") or job.get("assign_worker") or "").strip()
+
+
+def load_ratings():
+    global RATINGS
+    try:
+        with open(RATINGS_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        RATINGS = data if isinstance(data, dict) else {}
+    except Exception:
+        RATINGS = {}
+
+
+def save_ratings():
+    os.makedirs(os.path.dirname(RATINGS_FILE) or ".", exist_ok=True)
+    tmp = RATINGS_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(RATINGS, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, RATINGS_FILE)
+
+
+def rating_public(name):
+    rec = RATINGS.get(name) or {}
+    s = int(rec.get("successes") or 0)
+    f = int(rec.get("failures") or 0)
+    streak = int(rec.get("consecutive_failures") or 0)
+    # Laplace: new workers start at 50%, not 0 or 100.
+    score = (s + 1) / float(s + f + 2)
+    eligible = True
+    blocked = ""
+    if s + f >= BAN_AFTER_FAIL_ONLY and s == 0:
+        eligible = False
+        blocked = "failed all %s jobs" % (s + f)
+    elif streak >= BAN_AFTER_STREAK:
+        eligible = False
+        blocked = "%s failures in a row" % streak
+    return {
+        "score": round(score, 4),
+        "score_pct": int(round(score * 100)),
+        "successes": s,
+        "failures": f,
+        "consecutive_failures": streak,
+        "eligible": eligible,
+        "blocked_reason": blocked,
+        "last_error": rec.get("last_error") or "",
+    }
+
+
+def record_result(worker_name, ok, error="", os_name=""):
+    name = (worker_name or "").strip()
+    if not name:
+        return
+    with _LOCK:
+        rec = dict(RATINGS.get(name) or {})
+        rec["successes"] = int(rec.get("successes") or 0)
+        rec["failures"] = int(rec.get("failures") or 0)
+        rec["consecutive_failures"] = int(rec.get("consecutive_failures") or 0)
+        if os_name:
+            rec["os"] = os_name
+        if ok:
+            rec["successes"] += 1
+            rec["consecutive_failures"] = 0
+            rec["last_error"] = ""
+        else:
+            rec["failures"] += 1
+            rec["consecutive_failures"] += 1
+            rec["last_error"] = (error or "")[:200]
+        rec["updated"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        RATINGS[name] = rec
+        save_ratings()
+
+
+def reset_rating(worker_name):
+    name = (worker_name or "").strip()
+    if not name:
+        raise ValueError("worker name required")
+    with _LOCK:
+        rec = dict(RATINGS.get(name) or {})
+        rec["successes"] = 0
+        rec["failures"] = 0
+        rec["consecutive_failures"] = 0
+        rec["last_error"] = ""
+        rec["updated"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        rec["reset"] = True
+        RATINGS[name] = rec
+        save_ratings()
+    return rating_public(name)
+
+
+def _better_idle_online(os_name, worker_name):
+    """Name of a higher-rated idle worker of the same OS, else None."""
+    mine = rating_public(worker_name)["score"]
+    now = time.time()
+    with _LOCK:
+        others = list(WORKERS.values())
+    for rec in others:
+        name = (rec.get("name") or "").strip()
+        if not name or name == worker_name:
+            continue
+        if (rec.get("os") or "") != os_name:
+            continue
+        last = float(rec.get("last_seen") or 0)
+        if last <= 0 or (now - last) > ONLINE_SEC:
+            continue
+        if rec.get("busy"):
+            continue
+        info = rating_public(name)
+        if not info["eligible"]:
+            continue
+        if info["score"] > mine:
+            return name
+    return None
+
+
 def claim_job(os_name, worker_name, android_on_mac=False):
-    """Rename inbox → running for the first job this OS can build."""
+    """Rename inbox → running for the best job this worker may take.
+
+    Unassigned jobs: blocked workers are skipped; if a higher-rated idle
+    worker of the same OS is online, leave the job for them.
+    Assigned jobs (`assign`) go only to that worker, even if blocked
+    (so you can test a machine after a fix without resetting first).
+    """
     try:
         names = sorted(os.listdir(INBOX))
     except OSError:
         return None
+    me_ok = rating_public(worker_name)["eligible"]
+    better = _better_idle_online(os_name, worker_name) if me_ok else None
     for name in names:
         if not name.endswith(".json") or name.startswith("."):
             continue
@@ -97,6 +226,16 @@ def claim_job(os_name, worker_name, android_on_mac=False):
             continue
         if not _can_claim(job, os_name, android_on_mac):
             continue
+        assign = _job_assign(job)
+        if assign:
+            if assign != worker_name:
+                continue
+        else:
+            if not me_ok:
+                continue
+            if better:
+                continue
+        os.makedirs(RUNNING, exist_ok=True)
         dest = os.path.join(RUNNING, name)
         try:
             os.rename(src, dest)
@@ -127,6 +266,12 @@ def parse_body(raw, qs):
     if not isinstance(data, dict):
         raise ValueError("JSON object required")
 
+    qs_assign = (
+        (qs.get("assign") or [""])[0]
+        or (qs.get("worker") or [""])[0]
+        or ""
+    ).strip()
+
     # Full job: {targets, config, version?}
     if isinstance(data.get("config"), dict) and data.get("targets"):
         job = {
@@ -136,6 +281,9 @@ def parse_body(raw, qs):
             "dry_run": bool(data.get("dry_run", False)),
             "config": data["config"],
         }
+        assign = (data.get("assign") or data.get("assign_worker") or qs_assign or "").strip()
+        if assign:
+            job["assign"] = assign
         return job
 
     # Bare RustDesk.json — targets must be in the query string
@@ -147,13 +295,16 @@ def parse_body(raw, qs):
             "pass targets: POST /job?targets=windows-x86_64-exe  "
             "or JSON {\"targets\":[...],\"config\":{...}}")
     dry = qs.get("dry_run", ["0"])[0] in ("1", "true", "yes")
-    return {
+    job = {
         "id": "",
         "version": qs.get("version", ["1.4.9"])[0],
         "targets": targets,
         "dry_run": dry,
         "config": data,
     }
+    if qs_assign:
+        job["assign"] = qs_assign
+    return job
 
 
 def _job_json_names(folder):
@@ -235,6 +386,9 @@ def _peek_job(path):
         who = "a Linux PC"
     elif any(str(t).startswith("android-") for t in targets):
         who = "a Linux (or Mac) builder"
+    assign = _job_assign(job)
+    if assign:
+        who = assign
     return {
         "targets": targets,
         "version": job.get("version") or "",
@@ -242,6 +396,7 @@ def _peek_job(path):
         "hint": hint,
         "typical_sec": TYPICAL_SEC.get(t0, 20 * 60),
         "waiting_for": who,
+        "assign": assign,
         "submitted": job.get("submitted") or "",
     }
 
@@ -359,6 +514,7 @@ def _safe_job(info, extra=None):
         "version": info.get("version") or "",
         "waiting_for": info.get("waiting_for") or "",
         "typical_sec": info.get("typical_sec") or 0,
+        "assign": info.get("assign") or "",
     }
     if extra:
         rec.update(extra)
@@ -465,16 +621,23 @@ def farm_stats():
     workers = []
     coverage = {"macos": False, "windows": False, "linux": False, "android": False}
     with _LOCK:
-        snapshot = list(WORKERS.values())
-    snapshot.sort(key=lambda w: (-float(w.get("last_seen") or 0), w.get("name") or ""))
+        live = dict(WORKERS)
+        rated = list(RATINGS.keys())
+    names = set(live.keys()) | set(rated)
+    snapshot = []
+    for name in names:
+        rec = dict(live.get(name) or {})
+        rec["name"] = name
+        if not rec.get("os") and RATINGS.get(name, {}).get("os"):
+            rec["os"] = RATINGS[name]["os"]
+        snapshot.append(rec)
     for rec in snapshot:
         last = float(rec.get("last_seen") or 0)
         age = int(now - last) if last else None
-        if age is not None and age > 3600:
-            continue
         online = age is not None and age <= ONLINE_SEC
         plat = OS_LABEL.get(rec.get("os") or "", "")
         busy = bool(rec.get("busy")) or rec.get("name") in busy_names
+        rate = rating_public(rec.get("name") or "")
         item = {
             "name": rec.get("name") or "",
             "os": rec.get("os") or "",
@@ -485,11 +648,18 @@ def farm_stats():
             "online": online,
             "busy": busy if online else False,
         }
+        item.update(rate)
         workers.append(item)
-        if online and plat:
+        if online and rate["eligible"] and plat:
             coverage[plat] = True
             if plat == "linux" or item["android"]:
                 coverage["android"] = True
+    workers.sort(key=lambda w: (
+        not w["online"],
+        not w["eligible"],
+        -float(w.get("score") or 0),
+        w.get("name") or "",
+    ))
 
     return {
         "ok": True,
@@ -719,6 +889,13 @@ class Handler(BaseHTTPRequestHandler):
                     json.dump(status, f, indent=2)
                     f.write("\n")
             note_worker(status.get("host") or "", status.get("worker") or "", busy=False)
+            if not status.get("dry_run"):
+                record_result(
+                    status.get("worker") or "",
+                    bool(status.get("ok")),
+                    status.get("error") or "",
+                    status.get("host") or "",
+                )
             return self._send(200, {"ok": True})
 
         if path.startswith("/artifact/"):
@@ -734,8 +911,20 @@ class Handler(BaseHTTPRequestHandler):
                 f.write(raw)
             return self._send(200, {"ok": True, "bytes": len(raw), "name": name})
 
+        if path in ("/worker/reset", "/rating/reset"):
+            try:
+                data = json.loads(self._body().decode("utf-8") or "{}")
+            except Exception:
+                data = {}
+            name = (data.get("name") or data.get("worker") or (qs.get("name") or [""])[0] or "").strip()
+            try:
+                info = reset_rating(name)
+            except ValueError as e:
+                return self._send(400, {"error": str(e)})
+            return self._send(200, {"ok": True, "name": name, "rating": info})
+
         if path != "/job":
-            return self._send(404, {"error": "POST /job | /claim | /progress/id | /result/id | /artifact/id"})
+            return self._send(404, {"error": "POST /job | /claim | /progress/id | /result/id | /artifact/id | /worker/reset"})
         raw = self._body()
         try:
             job = parse_body(raw, qs)
@@ -744,13 +933,16 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, {"error": str(e)})
         except Exception as e:
             return self._send(500, {"error": str(e)})
-        return self._send(200, {
+        out = {
             "ok": True,
             "id": jid,
             "targets": job["targets"],
             "dry_run": job["dry_run"],
             "inbox": dest,
-        })
+        }
+        if job.get("assign"):
+            out["assign"] = job["assign"]
+        return self._send(200, out)
 
 
 def main():
@@ -760,17 +952,21 @@ def main():
     p.add_argument("--port", type=int, default=int(os.environ.get("DVFORGE_QUEUE_PORT", "8766")))
     p.add_argument("--farm", default=FARM)
     args = p.parse_args()
-    global INBOX, OUTBOX, FAILED, RUNNING
+    global INBOX, OUTBOX, FAILED, RUNNING, RATINGS_FILE
     farm = os.path.abspath(args.farm)
     INBOX = os.path.join(farm, "inbox")
     OUTBOX = os.path.join(farm, "outbox")
     FAILED = os.path.join(farm, "failed")
     RUNNING = os.path.join(farm, "running")
-    os.makedirs(INBOX, exist_ok=True)
+    RATINGS_FILE = os.path.join(farm, "ratings.json")
+    load_ratings()
+    for folder in (INBOX, OUTBOX, FAILED, RUNNING):
+        os.makedirs(folder, exist_ok=True)
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     print("farm queue  http://%s:%s/job" % (args.host, args.port), flush=True)
     print("stats       http://%s:%s/stats   (JSON)  /status (page)" % (args.host, args.port), flush=True)
     print("inbox       %s" % INBOX, flush=True)
+    print("ratings     %s (%s workers)" % (RATINGS_FILE, len(RATINGS)), flush=True)
     print("token       %s" % ("yes" if TOKEN else "none (LAN only!)"), flush=True)
     print("curl example:", flush=True)
     print("  curl -sS -X POST 'http://THIS_PC:%s/job?targets=windows-x86_64-exe' \\" % args.port)

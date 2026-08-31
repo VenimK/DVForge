@@ -173,6 +173,27 @@ Install `farm/nginx-api.nas86.eu.conf` into nginx and add a DNS A record for `ap
 
 **Anyone:** open `https://api.nas86.eu/` — pick Windows / Mac / Android, upload `RustDesk.json`, wait, download.
 
+Workers are rated from job results. A new machine starts at 50%. Higher-rated idle workers of the same OS get unassigned jobs first. A worker with **zero successes after 2+ jobs**, or **5 failures in a row**, is skipped until you reset it:
+
+```bash
+curl -sS -X POST https://api.nas86.eu/worker/reset \
+  -H 'Authorization: Bearer pick-a-secret' \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"DESKTOP-MVN28Q7"}'
+```
+
+Pin a machine (skips rating; useful after a fix):
+
+```bash
+curl -sS -X POST \
+  'https://api.nas86.eu/job?targets=windows-x86_64-exe&assign=DESKTOP-MVN28Q7' \
+  -H 'Authorization: Bearer pick-a-secret' \
+  -H 'Content-Type: application/json' \
+  --data-binary @RustDesk.json
+```
+
+The submit form has a Worker dropdown (default: first available). Reset buttons are on `https://api.nas86.eu/status`.
+
 Live stats (no job ids, no configs):
 
 ```bash

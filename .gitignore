@@ -36,6 +36,7 @@ nugetmsi.txt
 *.bak
 *.cache
 .env
+farm/ratings.json
 
 # === Keep these tracked (don't ignore) ===
 !clean.sh
