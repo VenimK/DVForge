@@ -2263,6 +2263,15 @@ class Build:
 
     def build_linux(self):
         self.log("\n=== Build Linux ===")
+        # GCC 15+ (Ubuntu 26.04+) requires explicit #include <cstdint> for
+        # uint8_t etc. in C++ sources that relied on transitive includes.
+        # Force-include it globally so vcpkg/RustDesk C++ builds compile
+        # without manually patching every upstream file.
+        existing = os.environ.get("CXXFLAGS", "")
+        if "-include cstdint" not in existing:
+            os.environ["CXXFLAGS"] = (
+                (existing + " ") if existing else "") + "-include cstdint"
+        self.log(f"  · CXXFLAGS={os.environ['CXXFLAGS']!r} (GCC 15+ compat)")
         self.setup_vcpkg("x64-linux")
         self.customize_for("linux")
         # BINARY_NAME change poisons CMakeCache the same way Windows does.
