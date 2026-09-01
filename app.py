@@ -348,7 +348,8 @@ class Handler(BaseHTTPRequestHandler):
             })
         if path == "/api/config":
             try:
-                return self._send_json(config_gen.load_config(CONFIG_PATH))
+                cfg = config_gen.load_config(CONFIG_PATH)
+                return self._send_json(config_gen.config_for_api(cfg))
             except Exception as e:
                 return self._send_json({"error": str(e)}, 500)
         if path == "/api/config/status":

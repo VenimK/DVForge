@@ -247,11 +247,30 @@ def claim_job(os_name, worker_name, android_on_mac=False):
     return None
 
 
+def _pack_job_config(job):
+    """If the JSON has icon/logo/p12 paths this host can read, embed the bytes."""
+    cfg = job.get("config")
+    if not isinstance(cfg, dict):
+        return
+    root = os.path.dirname(HERE)
+    try:
+        if root not in sys.path:
+            sys.path.insert(0, root)
+        from builder import config_gen
+        packed = config_gen.pack_portable(cfg, root)
+        job["config"] = cfg
+        if packed:
+            job["portable"] = packed
+    except Exception:
+        pass
+
+
 def write_job(job):
     os.makedirs(INBOX, exist_ok=True)
     jid = (job.get("id") or "").strip() or _jid()
     job["id"] = jid
     job.setdefault("submitted", time.strftime("%Y-%m-%dT%H:%M:%S"))
+    _pack_job_config(job)
     dest = os.path.join(INBOX, jid + ".json")
     tmp = dest + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:

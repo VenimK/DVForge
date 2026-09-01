@@ -130,6 +130,167 @@ def resolve_branding_path(path: str, kind: str = "icon") -> str:
     return path
 
 
+# Files that must travel with a farm job. Paths stay in the JSON for local
+# builds; *base64 blobs are what a remote worker writes to its own disk.
+# Developer ID / Keychain identities cannot be embedded — only files.
+PORTABLE_ASSETS = (
+    # path_key, blob_key, dest_dir relative to project root, default stem
+    ("iconFile", "iconbase64", "workspace/branding", "icon"),
+    ("logoFile", "logobase64", "workspace/branding", "logo"),
+    ("signWinPfx", "signWinPfxBase64", "workspace/signing", "windows"),
+    ("signAndroidKeystore", "signAndroidKeystoreBase64", "workspace/signing", "android"),
+    ("signMacP12", "signMacP12Base64", "workspace/signing", "macos"),
+    ("signMacNotaryKey", "signMacNotaryKeyBase64", "workspace/signing", "notary-api-key"),
+)
+_PORTABLE_EXTS = {
+    ".png", ".jpg", ".jpeg", ".svg", ".ico",
+    ".pfx", ".p12", ".jks", ".keystore", ".json", ".p8",
+}
+MAX_PORTABLE_BYTES = 8 * 1024 * 1024
+
+
+def _safe_ext(path, fallback):
+    ext = os.path.splitext(path or "")[1].lower()
+    return ext if ext in _PORTABLE_EXTS else fallback
+
+
+def _asset_stem(cfg):
+    name = (cfg.get("appname") or cfg.get("exename") or "app").strip() or "app"
+    name = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-._") or "app"
+    return name
+
+
+def _resolve_cfg_file(raw, root, kind=""):
+    """Find a path key relative to *root* first (not the process cwd)."""
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+    candidates = []
+    if os.path.isabs(raw):
+        candidates.append(raw)
+    else:
+        candidates.append(os.path.join(root, raw.replace("/", os.sep)))
+    if kind in ("icon", "logo"):
+        branding = os.path.join(root, "workspace", "branding")
+        candidates.append(os.path.join(branding, os.path.basename(raw)))
+        for ext in (".png", ".svg", ".ico", ".jpg", ".jpeg"):
+            candidates.append(os.path.join(branding, kind + ext))
+    seen = set()
+    for c in candidates:
+        if not c or c in seen:
+            continue
+        seen.add(c)
+        if os.path.isfile(c):
+            return os.path.abspath(c)
+    return ""
+
+
+def pack_portable(cfg, root=None):
+    """Embed icon/logo/signing file bytes into cfg[*base64]. Mutates cfg.
+
+    Skips a key when a blob is already present. Returns list of packed keys.
+    """
+    if not isinstance(cfg, dict):
+        return []
+    root = root or _project_root()
+    packed = []
+    for path_key, blob_key, _dest, kind in PORTABLE_ASSETS:
+        blob = cfg.get(blob_key)
+        if isinstance(blob, str) and len(blob.strip()) > 20:
+            packed.append(path_key)
+            continue
+        kind_hint = kind if kind in ("icon", "logo") else ""
+        fp = _resolve_cfg_file(cfg.get(path_key) or "", root, kind_hint)
+        if not fp:
+            continue
+        try:
+            size = os.path.getsize(fp)
+        except OSError:
+            continue
+        if size <= 0 or size > MAX_PORTABLE_BYTES:
+            continue
+        with open(fp, "rb") as f:
+            cfg[blob_key] = base64.b64encode(f.read()).decode("ascii")
+        packed.append(path_key)
+    return packed
+
+
+def unpack_portable(cfg, root=None):
+    """Write *base64 blobs to this machine's workspace/ and point path keys at them.
+
+    Returns list of relative paths written. Developer ID names are left as-is.
+    """
+    if not isinstance(cfg, dict):
+        return []
+    root = root or _project_root()
+    written = []
+    stem = _asset_stem(cfg)
+    for path_key, blob_key, dest_rel, kind in PORTABLE_ASSETS:
+        blob = cfg.get(blob_key)
+        if not isinstance(blob, str):
+            continue
+        blob = "".join(blob.split())
+        if len(blob) < 20:
+            continue
+        try:
+            raw = base64.b64decode(blob)
+        except Exception:
+            continue
+        if not raw or len(raw) > MAX_PORTABLE_BYTES:
+            continue
+        fallback = ".png" if kind in ("icon", "logo") else ".p12"
+        if kind == "android":
+            fallback = ".jks"
+        if kind == "notary-api-key":
+            fallback = ".p8"
+        ext = _safe_ext(cfg.get(path_key) or "", fallback)
+        dest_dir = os.path.join(root, dest_rel.replace("/", os.sep))
+        os.makedirs(dest_dir, exist_ok=True)
+        name = (kind + ext) if kind in ("icon", "logo") else (stem + ext)
+        if kind == "windows" and ext not in (".pfx", ".p12"):
+            name = stem + ".pfx"
+        dest = os.path.join(dest_dir, name)
+        tmp = dest + ".tmp"
+        with open(tmp, "wb") as f:
+            f.write(raw)
+        os.replace(tmp, dest)
+        rel = os.path.relpath(dest, root).replace("\\", "/")
+        cfg[path_key] = rel
+        written.append(rel)
+    return written
+
+
+def portable_summary(cfg):
+    """Which assets are embedded (no bytes). Safe to put on /stats-like APIs."""
+    out = []
+    if not isinstance(cfg, dict):
+        return out
+    for path_key, blob_key, _d, _k in PORTABLE_ASSETS:
+        blob = cfg.get(blob_key)
+        n = len(blob) if isinstance(blob, str) else 0
+        if n > 20:
+            # base64 is 4/3 of file size
+            out.append({"key": path_key, "bytes": n * 3 // 4,
+                        "path": cfg.get(path_key) or ""})
+    return out
+
+
+def config_for_api(cfg):
+    """Drop large blobs so the Config tab does not download megabytes."""
+    if not isinstance(cfg, dict):
+        return cfg
+    out = dict(cfg)
+    embedded = []
+    for path_key, blob_key, _d, _k in PORTABLE_ASSETS:
+        blob = out.get(blob_key)
+        if isinstance(blob, str) and len(blob) > 200:
+            out[blob_key] = ""
+            embedded.append(path_key)
+    if embedded:
+        out["portableAssets"] = embedded
+    return out
+
+
 def build_custom_env(cfg: dict) -> dict:
     """Return the full CUSTOM_* mapping (strings), mirroring load-config.py."""
     d = cfg
@@ -304,9 +465,21 @@ def load_config(path: str) -> dict:
         f"(A template also ships at {example}.)")
 
 
-def save_config(path: str, cfg: dict):
-    with open(path, "w", encoding="utf-8") as f:
+def save_config(path: str, cfg: dict, root=None):
+    """Persist config. Unpack farm blobs onto this machine, then re-embed files."""
+    if not isinstance(cfg, dict):
+        raise ValueError("config must be an object")
+    cfg = dict(cfg)
+    root = root or _project_root()
+    unpack_portable(cfg, root)
+    pack_portable(cfg, root)
+    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, path)
+    return cfg
 
 
 if __name__ == "__main__":

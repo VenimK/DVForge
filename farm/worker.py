@@ -338,6 +338,12 @@ def run_job(job, url, d):
     cfg = job.get("config")
     if not isinstance(cfg, dict):
         raise RuntimeError("job has no config object")
+    port = [k for k, v in cfg.items()
+            if str(k).lower().endswith("base64") and isinstance(v, str) and len(v) > 20]
+    if port:
+        log("portable assets in job: %s" % ", ".join(port))
+    else:
+        log("no portable icon/logo/signing blobs in job — worker will use its own files")
 
     # One compile at a time. Don't overwrite config while another build runs.
     timeout = 600 if job.get("dry_run") else 4 * 3600

@@ -173,6 +173,10 @@ Install `farm/nginx-api.nas86.eu.conf` into nginx and add a DNS A record for `ap
 
 **Anyone:** open `https://api.nas86.eu/` — pick Windows / Mac / Android, upload `RustDesk.json`, wait, download.
 
+Save the config in DVForge first. That embeds icon, logo, and signing **files** (`iconbase64`, `logobase64`, `signMacP12Base64`, …) in the JSON so a remote worker can recreate `workspace/branding/` and `workspace/signing/`. Apple **Developer ID** / Keychain identities are not files — they must already exist on the Mac worker. Passwords still travel in the JSON.
+
+Workers need the updated `builder/config_gen.py` (restart DVForge there) so `POST /api/config` unpacks those blobs.
+
 Workers are rated from job results. A new machine starts at 50%. Higher-rated idle workers of the same OS get unassigned jobs first. A worker with **zero successes after 2+ jobs**, or **5 failures in a row**, is skipped until you reset it:
 
 ```bash

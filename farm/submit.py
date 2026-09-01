@@ -40,6 +40,15 @@ def main():
 
     with open(args.config, encoding="utf-8") as f:
         cfg = json.load(f)
+    if ROOT not in sys.path:
+        sys.path.insert(0, ROOT)
+    try:
+        from builder import config_gen
+        packed = config_gen.pack_portable(cfg, ROOT)
+        if packed:
+            print("portable:", ", ".join(packed))
+    except Exception as e:
+        print("portable pack skipped:", e)
 
     plats = set()
     for t in args.targets:
