@@ -43,6 +43,7 @@ cd DVForge
 | **macOS** (DMG, optional Android) | `bash Setup-DVForge-macOS.sh` &nbsp;·&nbsp; add `--with-android` for APKs |
 | **Windows** (`.exe` / `.msi`) | `powershell -NoProfile -ExecutionPolicy Bypass -File .\Setup-DVForge-Windows.ps1` |
 | **Windows + WSL** (Linux + APKs) | `powershell -NoProfile -ExecutionPolicy Bypass -File .\Setup-DVForge-WSL2.ps1` |
+| **Ubuntu** (Linux + APKs) | `./Setup-DVForge-Ubuntu.sh` |
 
 Already have the tree open? On a Mac use `bash Setup-DVForge-macOS.sh --in-place`.
 
@@ -51,6 +52,9 @@ Already have the tree open? On a Mac use `bash Setup-DVForge-macOS.sh --in-place
 ```bash
 # Linux / macOS
 ./run.sh
+
+# Linux with python virtual environment
+source .venv/bin/activate && ./run.sh
 
 # Windows
 run.bat
