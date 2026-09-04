@@ -22,9 +22,7 @@ builder/__pycache__/
 
 # === Logs & screenshots ===
 *.log
-*.png
 *.jpg
-*.svg
 error*.txt
 buildingMSI.txt
 nugetmsi.txt
