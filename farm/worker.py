@@ -389,6 +389,120 @@ def run_job(job, url, d):
             pass
     return status
 
+def check_and_fail_stale_jobs(farm, d):
+    """Detect and fail jobs left in 'running' after an unexpected crash."""
+    log("Checking for stale jobs from previous crashes...")
+
+    # HTTP Mode (queries the queue API)
+    if QUEUE_BASE:
+        running_ids = []
+        try:
+            # First try GET /jobs
+            r = http_json(QUEUE_BASE + "/jobs", headers=_qheaders(), timeout=15)
+            if isinstance(r, dict) and "running" in r:
+                running_ids = r["running"]
+        except Exception:
+            pass
+
+        # If /jobs failed or was unauthorized, inspect /stats
+        if not running_ids:
+            try:
+                stats = http_json(QUEUE_BASE + "/stats", timeout=15)
+                # queue.py's list_jobs / stats provides info; if running contains dicts, we can fetch active items
+                raw_running = stats.get("running") or []
+                for item in raw_running:
+                    # If /stats has worker matching ours, we will search for it
+                    if item.get("worker") == WORKER_NAME:
+                        log("Queue reports %s is busy with: %s" % (WORKER_NAME, item.get("appname") or "job"))
+            except Exception:
+                pass
+
+        for jid in running_ids:
+            try:
+                # Ask the queue for job details: GET /job/<id>
+                job_info = http_json(QUEUE_BASE + "/job/" + jid, headers=_qheaders(), timeout=15)
+                if not job_info:
+                    continue
+
+                state = job_info.get("state")
+                prog = job_info.get("progress") or {}
+                
+                # Check who claimed it
+                claimed_worker = (
+                    prog.get("worker")
+                    or job_info.get("assign")
+                    or job_info.get("waiting_for")
+                )
+
+                if state == "running" and claimed_worker == WORKER_NAME:
+                    log("Found stale running job on server: %s. Sending failure result..." % jid)
+                    fail_payload = {
+                        "id": jid,
+                        "ok": False,
+                        "worker": WORKER_NAME,
+                        "host": HOST,
+                        "targets": job_info.get("targets") or [],
+                        "error": "Worker restarted unexpectedly mid-build",
+                        "finished": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    }
+                    # queue.py's /result/<id> will delete the files in RUNNING and mark busy=False!
+                    http_json(
+                        QUEUE_BASE + "/result/" + jid,
+                        data=fail_payload,
+                        headers=_qheaders(),
+                        timeout=30
+                    )
+                    log("Successfully cleared stale job %s from server." % jid)
+            except Exception as e:
+                log("Failed inspecting/clearing job %s: %s" % (jid, e))
+
+    # Local Shared Folder / NAS Mode (untested)
+    running_dir = d.get("running")
+    if running_dir and os.path.isdir(running_dir):
+        try:
+            entries = sorted(os.listdir(running_dir))
+        except OSError:
+            entries = []
+
+        for name in entries:
+            if not name.endswith(".json") or name.endswith(".progress.json"):
+                continue
+
+            jid = name[:-5]
+            job_file = os.path.join(running_dir, name)
+            prog_file = os.path.join(running_dir, jid + ".progress.json")
+
+            owner = None
+            targets = []
+
+            if os.path.isfile(prog_file):
+                try:
+                    with open(prog_file, encoding="utf-8") as f:
+                        pdata = json.load(f)
+                        owner = pdata.get("worker")
+                        targets = pdata.get("targets") or []
+                except Exception:
+                    pass
+
+            if not owner and os.path.isfile(job_file):
+                try:
+                    with open(job_file, encoding="utf-8") as f:
+                        jdata = json.load(f)
+                        owner = jdata.get("_claimed_by") or (jdata.get("assign") or jdata.get("assign_worker") or "").strip()
+                        targets = jdata.get("targets") or []
+                except Exception:
+                    pass
+
+            if owner == WORKER_NAME:
+                log("Found stale local job %s. Failing it out..." % jid)
+                stale_job = {
+                    "id": jid,
+                    "_file": name,
+                    "_path": job_file,
+                    "targets": targets,
+                }
+                fail_job(stale_job, d, "Worker restarted unexpectedly mid-build")
+
 
 def loop(farm, url, once):
     d = dirs(farm)
@@ -396,6 +510,7 @@ def loop(farm, url, once):
         os.makedirs(d[k], exist_ok=True)
     log("farm=%s" % (QUEUE_BASE or farm))
     log("api=%s  claiming %s" % (url, ", ".join(prefixes()) + "*"))
+    check_and_fail_stale_jobs(farm, d)
     idle = 0
     while True:
         try:
