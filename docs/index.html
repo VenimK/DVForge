@@ -758,29 +758,577 @@ h3 { font-size: 1.15rem; margin-bottom: 8px; }
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
   gap: 14px;
+  position: relative;
 }
+
+/* ── speed lines background ─────────────────────── */
+.speed-section {
+  position: relative;
+  overflow: hidden;
+}
+.speed-lines {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: 0;
+}
+.speed-lines .streak {
+  position: absolute;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--amber), transparent);
+  opacity: 0;
+  animation: streakFly var(--dur) var(--del) ease-in-out infinite;
+}
+@keyframes streakFly {
+  0%   { transform: translateX(-120%); opacity: 0; }
+  10%  { opacity: .4; }
+  90%  { opacity: .4; }
+  100% { transform: translateX(120vw); opacity: 0; }
+}
+.speed-section > .wrap { position: relative; z-index: 1; }
+
+/* ── time card with ring gauge ──────────────────── */
 .time-card {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--r);
-  padding: 18px 16px;
+  padding: 20px 18px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  position: relative;
+  overflow: hidden;
+  transition: transform .2s, border-color .2s, box-shadow .2s;
 }
+.time-card::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, transparent 60%, var(--amber-glow));
+  opacity: 0;
+  transition: opacity .3s;
+  pointer-events: none;
+}
+.time-card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 8px 24px rgba(0,0,0,.15);
+  border-color: var(--amber-dim);
+}
+.time-card:hover::after { opacity: 1; }
+.time-card.fastest {
+  border-color: var(--good);
+  box-shadow: 0 0 20px rgba(87,201,138,.12);
+}
+.time-card.fastest .time-badge {
+  display: inline-block;
+}
+
+/* ring gauge */
+.time-ring {
+  flex-shrink: 0;
+  width: 64px;
+  height: 64px;
+  position: relative;
+}
+.time-ring svg {
+  width: 64px;
+  height: 64px;
+  transform: rotate(-90deg);
+}
+.time-ring .ring-bg {
+  fill: none;
+  stroke: var(--line);
+  stroke-width: 4;
+}
+.time-ring .ring-fg {
+  fill: none;
+  stroke-width: 4;
+  stroke-linecap: round;
+  stroke-dasharray: var(--circ);
+  stroke-dashoffset: var(--circ);
+  transition: stroke-dashoffset 1.8s cubic-bezier(.16,1,.3,1);
+}
+.time-ring.animated .ring-fg {
+  stroke-dashoffset: var(--offset);
+}
+.time-ring .ring-label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--mono);
+  font-size: .72rem;
+  font-weight: 600;
+  color: var(--ink-dim);
+}
+
+/* card text */
+.time-info { flex: 1; min-width: 0; }
 .time-target {
   font-family: var(--mono);
   font-size: .78rem;
   color: var(--ink-dim);
-  margin-bottom: 6px;
+  margin-bottom: 4px;
 }
 .time-val {
   font-family: var(--mono);
   font-size: 1.5rem;
   font-weight: 700;
   color: var(--amber);
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
 }
+.time-val .count-target { display: inline; }
 .time-val span {
   font-size: .85rem;
   font-weight: 500;
   color: var(--ink-faint);
+}
+.time-card .time-meta {
+  font-family: var(--mono);
+  font-size: .68rem;
+  color: var(--ink-faint);
+  margin-top: 2px;
+}
+.time-badge {
+  display: none;
+  font-family: var(--mono);
+  font-size: .6rem;
+  font-weight: 600;
+  color: var(--good);
+  background: rgba(87,201,138,.1);
+  border: 1px solid rgba(87,201,138,.2);
+  border-radius: 4px;
+  padding: 2px 6px;
+  margin-top: 4px;
+  letter-spacing: .04em;
+}
+
+/* ── comparison bar ─────────────────────────────── */
+.speed-compare {
+  margin-top: 32px;
+  padding: 22px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+}
+.speed-compare-title {
+  font-family: var(--mono);
+  font-size: .82rem;
+  font-weight: 600;
+  color: var(--ink);
+  margin-bottom: 16px;
+}
+.speed-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.speed-bar-label {
+  font-family: var(--mono);
+  font-size: .72rem;
+  color: var(--ink-dim);
+  width: 110px;
+  flex-shrink: 0;
+  text-align: right;
+}
+.speed-bar-track {
+  flex: 1;
+  height: 22px;
+  background: var(--panel-2);
+  border-radius: 11px;
+  overflow: hidden;
+  position: relative;
+}
+.speed-bar-fill {
+  height: 100%;
+  border-radius: 11px;
+  position: relative;
+  width: 0%;
+  transition: width 2s cubic-bezier(.16,1,.3,1);
+}
+.speed-bar-fill.local {
+  background: linear-gradient(90deg, var(--good), #57c98a88);
+}
+.speed-bar-fill.local::after {
+  content: '';
+  position: absolute;
+  right: 0; top: 0; bottom: 0;
+  width: 30px;
+  background: linear-gradient(90deg, transparent, rgba(87,201,138,.5));
+  animation: bar-shimmer 1.5s ease-in-out infinite alternate;
+}
+@keyframes bar-shimmer {
+  0% { opacity: .3; } 100% { opacity: 1; }
+}
+.speed-bar-fill.cloud {
+  background: linear-gradient(90deg, var(--ink-faint), #626d8088);
+}
+.speed-bar-time {
+  font-family: var(--mono);
+  font-size: .72rem;
+  font-weight: 600;
+  color: var(--ink);
+  margin-left: 10px;
+  flex-shrink: 0;
+  min-width: 55px;
+}
+.speed-bar-time.fast { color: var(--good); }
+.speed-faster {
+  font-family: var(--mono);
+  font-size: .72rem;
+  color: var(--amber);
+  margin-top: 8px;
+  text-align: center;
+  opacity: 0;
+  transition: opacity .6s .8s;
+}
+.speed-faster.show { opacity: 1; }
+
+/* ── card entrance animation ────────────────────── */
+.time-card {
+  opacity: 0;
+  transform: translateX(-30px);
+}
+.time-card.fly-in {
+  animation: cardFlyIn .6s cubic-bezier(.16,1,.3,1) forwards;
+  animation-delay: var(--d, 0s);
+}
+@keyframes cardFlyIn {
+  0%   { opacity: 0; transform: translateX(-40px) scale(.95); }
+  60%  { opacity: 1; transform: translateX(6px) scale(1.01); }
+  100% { opacity: 1; transform: translateX(0) scale(1); }
+}
+
+/* ── glow pulse on value after count finishes ───── */
+.time-val .count-done {
+  animation: valGlow .6s ease-out;
+}
+@keyframes valGlow {
+  0%   { text-shadow: 0 0 12px var(--amber); }
+  100% { text-shadow: none; }
+}
+
+@media (max-width: 600px) {
+  .speed-bar-label { width: 80px; font-size: .65rem; }
+  .time-ring { width: 52px; height: 52px; }
+  .time-ring svg { width: 52px; height: 52px; }
+}
+
+/* ── live farm status strip ─────────────────────── */
+.farm-live { margin-top: 40px; }
+.farm-live-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.farm-live-header h3 {
+  font-size: 1rem;
+  margin: 0;
+}
+.farm-live-header .live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--good);
+  box-shadow: 0 0 0 3px rgba(87,201,138,.18);
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+@keyframes pulse-dot {
+  0%, 100% { box-shadow: 0 0 0 3px rgba(87,201,138,.18); }
+  50% { box-shadow: 0 0 0 6px rgba(87,201,138,.08); }
+}
+.farm-live-header .live-dot.offline {
+  background: var(--bad);
+  box-shadow: 0 0 0 3px rgba(242,104,95,.18);
+  animation: none;
+}
+.farm-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.farm-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 12px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-family: var(--mono);
+  font-size: .72rem;
+  color: var(--ink-dim);
+}
+.farm-pill .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.farm-pill .dot.on { background: var(--good); box-shadow: 0 0 0 2px rgba(87,201,138,.2); }
+.farm-pill .dot.off { background: #5a3340; }
+[data-theme="light"] .farm-pill .dot.off { background: #c0a0a8; }
+.farm-stats-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+.farm-stat {
+  flex: 1 1 100px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  padding: 12px 14px;
+  min-width: 100px;
+}
+.farm-stat b {
+  display: block;
+  font-family: var(--mono);
+  font-size: 1.35rem;
+  font-variant-numeric: tabular-nums;
+}
+.farm-stat span {
+  font-size: .72rem;
+  color: var(--ink-faint);
+}
+
+/* ── success rate bar ───────────────────────────── */
+.farm-rate {
+  margin-bottom: 18px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.farm-rate-label {
+  font-family: var(--mono);
+  font-size: .72rem;
+  color: var(--ink-dim);
+  flex-shrink: 0;
+}
+.farm-rate-bar {
+  flex: 1;
+  height: 6px;
+  background: var(--panel-2);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.farm-rate-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--good);
+  transition: width 1s ease-out;
+}
+.farm-rate-pct {
+  font-family: var(--mono);
+  font-size: .78rem;
+  font-weight: 600;
+  color: var(--good);
+  min-width: 42px;
+}
+
+/* ── workers mini viz ───────────────────────────── */
+.farm-workers-viz {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 18px;
+}
+.worker-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: .66rem;
+  color: var(--ink-dim);
+  transition: border-color .15s;
+}
+.worker-chip:hover { border-color: var(--ink-faint); }
+.worker-chip .w-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.worker-chip .w-dot.on  { background: var(--good); }
+.worker-chip .w-dot.off { background: var(--ink-faint); opacity: .4; }
+.worker-chip .w-plat {
+  opacity: .6;
+}
+
+/* ── collapsible recent builds ──────────────────── */
+.farm-recent { margin-top: 18px; }
+.farm-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-family: var(--mono);
+  font-size: .72rem;
+  color: var(--ink-dim);
+  cursor: pointer;
+  margin-bottom: 10px;
+  transition: border-color .15s, color .15s;
+}
+.farm-toggle:hover { border-color: var(--ink-faint); color: var(--ink); }
+.farm-toggle .chevron {
+  display: inline-block;
+  transition: transform .25s;
+  font-size: .6rem;
+}
+.farm-toggle.open .chevron { transform: rotate(90deg); }
+.farm-recent-body {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height .4s cubic-bezier(.16,1,.3,1);
+}
+.farm-recent-body.open { max-height: 800px; }
+.farm-recent table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: .82rem;
+}
+.farm-recent th {
+  text-align: left;
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: .66rem;
+  color: var(--ink-faint);
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  padding: 8px 6px;
+  border-bottom: 1px solid var(--line);
+}
+.farm-recent td {
+  padding: 7px 6px;
+  border-bottom: 1px solid rgba(43,51,66,.4);
+  color: var(--ink-dim);
+  font-family: var(--mono);
+  font-size: .78rem;
+}
+.farm-recent tr:hover td { background: var(--panel-2); }
+.farm-recent .ok { color: var(--good); }
+.farm-recent .fail { color: var(--bad); }
+.farm-tick {
+  font-family: var(--mono);
+  font-size: .66rem;
+  color: var(--ink-faint);
+  margin-top: 10px;
+}
+.farm-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--mono);
+  font-size: .78rem;
+  margin-top: 12px;
+}
+.farm-loading {
+  font-family: var(--mono);
+  font-size: .82rem;
+  color: var(--ink-faint);
+  padding: 24px 0;
+}
+.farm-error {
+  font-family: var(--mono);
+  font-size: .82rem;
+  color: var(--bad);
+  padding: 24px 0;
+}
+
+/* ── LIVE badge ─────────────────────────────────── */
+.live-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--mono);
+  font-size: .6rem;
+  font-weight: 600;
+  letter-spacing: .1em;
+  color: var(--good);
+  background: rgba(87,201,138,.08);
+  border: 1px solid rgba(87,201,138,.2);
+  border-radius: 4px;
+  padding: 2px 8px;
+  margin-left: 10px;
+  vertical-align: middle;
+}
+.live-badge .lb-dot {
+  width: 5px; height: 5px;
+  border-radius: 50%;
+  background: var(--good);
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+
+/* ── tooltip ────────────────────────────────────── */
+.time-tip {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-family: var(--mono);
+  font-size: .66rem;
+  color: var(--ink-dim);
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .15s;
+  z-index: 10;
+}
+.time-card:hover .time-tip { opacity: 1; }
+
+/* ── reduced motion ─────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  .speed-lines .streak,
+  .time-ring .ring-fg,
+  .time-card,
+  .speed-bar-fill,
+  .speed-bar-fill.local::after,
+  .farm-live-header .live-dot,
+  .live-badge .lb-dot { animation: none !important; }
+  .time-ring .ring-fg { transition: none; stroke-dashoffset: var(--offset) !important; }
+  .time-card { opacity: 1 !important; transform: none !important; transition: none; }
+  .speed-bar-fill { transition: none; }
+  .farm-recent-body { transition: none; }
+}
+
+/* ── light theme tweaks for new elements ────────── */
+[data-theme="light"] .speed-lines .streak {
+  background: linear-gradient(90deg, transparent, var(--amber-dim), transparent);
+  opacity: .15;
+}
+[data-theme="light"] .time-card.fastest {
+  box-shadow: 0 0 16px rgba(42,157,90,.1);
+}
+[data-theme="light"] .speed-bar-fill.local {
+  background: linear-gradient(90deg, var(--good), rgba(42,157,90,.5));
+}
+[data-theme="light"] .speed-bar-fill.cloud {
+  background: linear-gradient(90deg, var(--ink-faint), rgba(122,129,148,.4));
+}
+[data-theme="light"] .farm-recent tr:hover td {
+  background: var(--raised);
+}
+[data-theme="light"] .live-badge {
+  background: rgba(42,157,90,.06);
+  border-color: rgba(42,157,90,.15);
 }
 
 
@@ -1277,6 +1825,7 @@ footer {
     <a href="#platforms" class="nav-link">Platforms</a>
     <a href="#quick-start" class="nav-link">Quick start</a>
     <a href="#customize" class="nav-link">Customize</a>
+    <a href="#farm-status" class="nav-link">Farm</a>
     <a href="#deep-dive" class="nav-link">Deep dive</a>
     <a href="#faq" class="nav-link">FAQ</a>
     <div class="nav-spacer"></div>
@@ -1821,38 +2370,57 @@ footer {
 
 
 <!-- ═══════════════════════════════════════════════════════
-     BUILD TIMES
+     BUILD TIMES  (live from api.nas86.eu)
      ═══════════════════════════════════════════════════════ -->
-<section>
-<div class="wrap">
-  <h2>Real build times</h2>
-  <p class="section-lead">Measured on the project's test machines. First run is slower (Rust downloads crates); subsequent builds reuse the cache.</p>
+<section id="farm-status" class="speed-section">
 
-  <div class="times stagger">
-    <div class="time-card">
-      <div class="time-target">Linux .deb</div>
-      <div class="time-val">~<span class="count-target" data-target="8">0</span> <span>min</span></div>
+<!-- animated streak lines behind the section -->
+<div class="speed-lines" id="speed-lines" aria-hidden="true"></div>
+
+<div class="wrap">
+  <h2>Real build times <span class="live-badge" id="live-badge" style="display:none;"><span class="lb-dot"></span>LIVE</span></h2>
+  <p class="section-lead">Live from the build farm — averaged from recent successful builds. No cloud CI, no queuing. Your machine, your binaries.</p>
+
+  <div class="times" id="build-times">
+    <div class="farm-loading" id="build-loading">Fetching from build farm…</div>
+  </div>
+
+  <!-- DVForge vs cloud CI comparison -->
+  <div class="speed-compare" id="speed-compare" style="display:none;">
+    <div class="speed-compare-title">DVForge local vs. typical cloud CI</div>
+    <div class="speed-bar-row">
+      <div class="speed-bar-label">DVForge</div>
+      <div class="speed-bar-track"><div class="speed-bar-fill local" id="bar-local"></div></div>
+      <div class="speed-bar-time fast" id="bar-local-time">—</div>
     </div>
-    <div class="time-card">
-      <div class="time-target">Linux .rpm</div>
-      <div class="time-val">~<span class="count-target" data-target="8.5">0</span> <span>min</span></div>
+    <div class="speed-bar-row">
+      <div class="speed-bar-label">Cloud CI</div>
+      <div class="speed-bar-track"><div class="speed-bar-fill cloud" id="bar-cloud"></div></div>
+      <div class="speed-bar-time" id="bar-cloud-time">~45 min</div>
     </div>
-    <div class="time-card">
-      <div class="time-target">Android arm64</div>
-      <div class="time-val">~<span class="count-target" data-target="15">0</span> <span>min</span></div>
+    <div class="speed-faster" id="speed-faster"></div>
+  </div>
+
+  <!-- ── live farm status ── -->
+  <div class="farm-live" id="farm-live">
+    <div class="farm-live-header">
+      <span class="live-dot" id="farm-dot"></span>
+      <h3>Farm status</h3>
     </div>
-    <div class="time-card">
-      <div class="time-target">Android armeabi</div>
-      <div class="time-val">~<span class="count-target" data-target="19">0</span> <span>min</span></div>
+    <div class="farm-pills" id="farm-pills"></div>
+    <div class="farm-stats-row" id="farm-nums"></div>
+
+    <div class="farm-rate" id="farm-rate" style="display:none;">
+      <span class="farm-rate-label">Success rate</span>
+      <div class="farm-rate-bar"><div class="farm-rate-fill" id="farm-rate-fill" style="width:0%"></div></div>
+      <span class="farm-rate-pct" id="farm-rate-pct">—</span>
     </div>
-    <div class="time-card">
-      <div class="time-target">Android x86_64</div>
-      <div class="time-val">~<span class="count-target" data-target="15">0</span> <span>min</span></div>
-    </div>
-    <div class="time-card">
-      <div class="time-target">Android universal</div>
-      <div class="time-val">~<span class="count-target" data-target="64">0</span> <span>min</span></div>
-    </div>
+
+    <div class="farm-workers-viz" id="farm-workers-viz"></div>
+
+    <div class="farm-recent" id="farm-recent"></div>
+    <p class="farm-tick" id="farm-tick"></p>
+    <a class="farm-link" href="https://api.nas86.eu/status" target="_blank" rel="noopener">Full farm dashboard →</a>
   </div>
 </div>
 </section>
@@ -2461,31 +3029,415 @@ function copyCmd(btn, text) {
   setTimeout(type, 600);
 })();
 
-// ── Build time counter animation ──
+// ── Live farm data (speed edition) ──
 (function() {
-  const counters = document.querySelectorAll('.count-target');
-  if (!counters.length) return;
-  const obs = new IntersectionObserver((entries) => {
-    entries.forEach(e => {
-      if (!e.isIntersecting) return;
-      obs.unobserve(e.target);
-      const target = parseFloat(e.target.dataset.target);
-      const isFloat = target % 1 !== 0;
-      const duration = 1200;
-      const start = performance.now();
-      function tick(now) {
-        const elapsed = now - start;
-        const progress = Math.min(elapsed / duration, 1);
-        // ease-out
-        const eased = 1 - Math.pow(1 - progress, 3);
-        const current = eased * target;
-        e.target.textContent = isFloat ? current.toFixed(1) : Math.round(current);
-        if (progress < 1) requestAnimationFrame(tick);
+  const API = 'https://api.nas86.eu/stats';
+  const CACHE_KEY = 'dvforge-farm-cache';
+  const $ = id => document.getElementById(id);
+
+  // Pretty target names
+  const TARGET_LABELS = {
+    'android-arm64':      'Android arm64',
+    'android-armeabi':    'Android armeabi',
+    'android-x86_64':     'Android x86_64',
+    'android-universal':  'Android universal',
+    'linux-x86_64-deb':   'Linux .deb',
+    'linux-x86_64-rpm':   'Linux .rpm',
+    'windows-x86_64-exe': 'Windows .exe',
+    'windows-x86_64-msi': 'Windows .msi',
+    'macos-arm64-dmg':    'macOS .dmg',
+    'macos-x86_64-dmg':   'macOS x86 .dmg',
+  };
+
+  // Cloud CI typical time in minutes (GitHub Actions for RustDesk)
+  const CLOUD_CI_MIN = 45;
+
+  function fmtSec(s) {
+    s = Math.max(0, parseInt(s, 10) || 0);
+    const m = Math.floor(s / 60), r = s % 60;
+    if (m >= 60) return Math.floor(m / 60) + 'h ' + (m % 60) + 'm';
+    if (m) return m + 'm ' + r + 's';
+    return r + 's';
+  }
+  function esc(s) {
+    return String(s || '').replace(/[&<>"']/g, c =>
+      ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+  function platLabel(k) {
+    return { macos:'Mac', windows:'Windows', linux:'Linux', android:'Android' }[k] || k;
+  }
+  function relTime(iso) {
+    if (!iso) return '';
+    const diff = (Date.now() - new Date(iso + 'Z').getTime()) / 1000;
+    if (diff < 60) return 'just now';
+    if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+    if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+    return Math.floor(diff / 86400) + 'd ago';
+  }
+
+  // Cache helpers
+  function saveCache(data) {
+    try { localStorage.setItem(CACHE_KEY, JSON.stringify({ ts: Date.now(), data: data })); } catch(e) {}
+  }
+  function loadCache() {
+    try {
+      const raw = localStorage.getItem(CACHE_KEY);
+      if (!raw) return null;
+      return JSON.parse(raw);
+    } catch(e) { return null; }
+  }
+
+  // Build speed-line streaks
+  (function initStreaks() {
+    const container = $('speed-lines');
+    if (!container) return;
+    for (let i = 0; i < 12; i++) {
+      const s = document.createElement('div');
+      s.className = 'streak';
+      s.style.cssText =
+        'top:' + (5 + Math.random() * 90) + '%;' +
+        'width:' + (80 + Math.random() * 200) + 'px;' +
+        '--dur:' + (2 + Math.random() * 3) + 's;' +
+        '--del:' + (Math.random() * 4) + 's;' +
+        'opacity:' + (.1 + Math.random() * .3);
+      container.appendChild(s);
+    }
+  })();
+
+  // Animated counter
+  function animateCount(el, target, cb) {
+    const isFloat = target % 1 !== 0;
+    const duration = 1400;
+    const start = performance.now();
+    function tick(now) {
+      const p = Math.min((now - start) / duration, 1);
+      const eased = 1 - Math.pow(1 - p, 3);
+      el.textContent = isFloat ? (eased * target).toFixed(1) : Math.round(eased * target);
+      if (p < 1) requestAnimationFrame(tick);
+      else {
+        el.classList.add('count-done');
+        if (cb) cb();
       }
-      requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+  }
+
+  // Ring gauge SVG
+  function ringSVG(pct, color) {
+    const r = 26, circ = 2 * Math.PI * r;
+    const offset = circ - (circ * Math.min(pct, 1));
+    return '<svg viewBox="0 0 64 64">' +
+      '<circle class="ring-bg" cx="32" cy="32" r="' + r + '"/>' +
+      '<circle class="ring-fg" cx="32" cy="32" r="' + r + '" ' +
+        'stroke="' + color + '" ' +
+        'style="--circ:' + circ + ';--offset:' + offset + '"/>' +
+      '</svg>';
+  }
+
+  // Color based on minutes: green (<5), amber (5-12), amber-dim (12+)
+  function speedColor(min) {
+    if (min <= 5)  return 'var(--good)';
+    if (min <= 12) return 'var(--amber)';
+    return 'var(--amber-dim)';
+  }
+
+  // Render build time cards with ring gauges and fly-in
+  let firstRender = true;
+  function renderTimeCards(items) {
+    const grid = $('build-times');
+    const loading = $('build-loading');
+    if (loading) loading.style.display = 'none';
+
+    // Find fastest
+    let fastestIdx = 0;
+    items.forEach((item, i) => { if (item.min < items[fastestIdx].min) fastestIdx = i; });
+
+    // Max minutes for ring scale (cap at 20)
+    const maxMin = Math.max(20, ...items.map(i => i.min));
+
+    grid.innerHTML = items.map((item, i) => {
+      const pct = Math.min(item.min / maxMin, 1);
+      const color = speedColor(item.min);
+      const isFastest = i === fastestIdx && items.length > 1;
+      let meta = '';
+      if (item.builds) meta = item.builds + ' build' + (item.builds > 1 ? 's' : '');
+      if (item.avgSec) meta += (meta ? ' · avg ' : 'avg ') + fmtSec(item.avgSec);
+
+      let tip = '';
+      if (item.minSec && item.maxSec && item.builds > 1) {
+        tip = 'Range: ' + fmtSec(item.minSec) + ' – ' + fmtSec(item.maxSec);
+      }
+
+      return '<div class="time-card' + (isFastest ? ' fastest' : '') + '" style="--d:' + (i * .1) + 's">' +
+        (tip ? '<div class="time-tip">' + esc(tip) + '</div>' : '') +
+        '<div class="time-ring" data-pct="' + pct + '" data-color="' + color + '">' +
+          ringSVG(pct, color) +
+          '<div class="ring-label">' + fmtSec(Math.round(item.min * 60)) + '</div>' +
+        '</div>' +
+        '<div class="time-info">' +
+          '<div class="time-target">' + esc(item.target) + '</div>' +
+          '<div class="time-val">' +
+            '<span class="count-target" data-target="' + item.min + '">0</span>' +
+            '<span>min</span>' +
+          '</div>' +
+          (meta ? '<div class="time-meta">' + esc(meta) + '</div>' : '') +
+          (isFastest ? '<div class="time-badge">fastest</div>' : '') +
+        '</div>' +
+      '</div>';
+    }).join('');
+
+    // Observe for fly-in + ring animation + count
+    if (firstRender) {
+      firstRender = false;
+      const obs = new IntersectionObserver(entries => {
+        entries.forEach(e => {
+          if (!e.isIntersecting) return;
+          obs.unobserve(e.target);
+          // Fly in
+          e.target.classList.add('fly-in');
+          // Animate ring
+          const ring = e.target.querySelector('.time-ring');
+          if (ring) setTimeout(() => ring.classList.add('animated'), 200);
+          // Count up
+          const ct = e.target.querySelector('.count-target');
+          if (ct) setTimeout(() => animateCount(ct, parseFloat(ct.dataset.target)), 300);
+        });
+      }, { threshold: 0.15 });
+      grid.querySelectorAll('.time-card').forEach(c => obs.observe(c));
+    } else {
+      // Subsequent renders: just show instantly
+      grid.querySelectorAll('.time-card').forEach(c => {
+        c.style.opacity = '1';
+        c.style.transform = 'none';
+        const ring = c.querySelector('.time-ring');
+        if (ring) ring.classList.add('animated');
+        const ct = c.querySelector('.count-target');
+        if (ct) ct.textContent = ct.dataset.target;
+      });
+    }
+  }
+
+  // Comparison bar animation
+  let compareShown = false;
+  function renderCompare(avgMin) {
+    const cmp = $('speed-compare');
+    cmp.style.display = '';
+    const localPct = Math.min((avgMin / CLOUD_CI_MIN) * 100, 100);
+    const cloudPct = 100;
+
+    $('bar-local-time').textContent = '~' + (avgMin % 1 === 0 ? avgMin : avgMin.toFixed(1)) + ' min';
+    $('bar-cloud-time').textContent = '~' + CLOUD_CI_MIN + ' min';
+
+    const multiplier = Math.round(CLOUD_CI_MIN / avgMin);
+    $('speed-faster').textContent = multiplier + '× faster than cloud CI';
+
+    if (!compareShown) {
+      compareShown = true;
+      const obs = new IntersectionObserver(entries => {
+        entries.forEach(e => {
+          if (!e.isIntersecting) return;
+          obs.unobserve(e.target);
+          setTimeout(() => {
+            $('bar-local').style.width = localPct + '%';
+            $('bar-cloud').style.width = cloudPct + '%';
+            $('speed-faster').classList.add('show');
+          }, 200);
+        });
+      }, { threshold: 0.3 });
+      obs.observe(cmp);
+    } else {
+      $('bar-local').style.width = localPct + '%';
+      $('bar-cloud').style.width = cloudPct + '%';
+      $('speed-faster').classList.add('show');
+    }
+  }
+
+  // Render farm status section
+  function renderFarm(d) {
+    const dot = $('farm-dot');
+    const online = d.workers_online || 0;
+    dot.classList.toggle('offline', online === 0);
+
+    // Show LIVE badge
+    const badge = $('live-badge');
+    if (badge) badge.style.display = online > 0 ? '' : 'none';
+
+    const cov = d.coverage || {};
+    $('farm-pills').innerHTML = ['macos','windows','linux','android'].map(k => {
+      const on = !!cov[k];
+      return '<span class="farm-pill"><span class="dot ' + (on ? 'on' : 'off') + '"></span>' +
+        platLabel(k) + ' ' + (on ? 'online' : 'offline') + '</span>';
+    }).join('');
+
+    const q = d.queue || {};
+    const cells = [
+      [q.running || 0, 'building'],
+      [q.waiting || 0, 'waiting'],
+      [online, 'workers online'],
+      [q.done || 0, 'finished'],
+      [q.failed || 0, 'failed'],
+    ];
+    $('farm-nums').innerHTML = cells.map(([n, lab]) =>
+      '<div class="farm-stat"><b>' + n + '</b><span>' + esc(lab) + '</span></div>'
+    ).join('');
+
+    // Success rate
+    const okN = d.recent_ok || 0;
+    const failN = d.recent_fail || 0;
+    const total = okN + failN;
+    if (total > 0) {
+      const pct = Math.round((okN / total) * 100);
+      $('farm-rate').style.display = '';
+      $('farm-rate-fill').style.width = pct + '%';
+      $('farm-rate-pct').textContent = pct + '%';
+      $('farm-rate-pct').style.color = pct >= 80 ? 'var(--good)' : pct >= 50 ? 'var(--amber)' : 'var(--bad)';
+    }
+
+    // Workers mini visualization
+    const workers = d.workers || [];
+    if (workers.length) {
+      $('farm-workers-viz').innerHTML = workers.map(w => {
+        const state = w.online ? (w.busy ? 'building' : 'idle') : 'offline';
+        const dotCls = w.online ? 'on' : 'off';
+        const plat = (w.claiming || []).map(c => c.replace(/-$/, '')).join(', ') || w.platform;
+        return '<span class="worker-chip" title="' + esc(w.name) + ' — ' + esc(state) + ' — ' + esc(plat) + '">' +
+          '<span class="w-dot ' + dotCls + '"></span>' +
+          esc(w.name.length > 18 ? w.name.slice(0, 16) + '…' : w.name) +
+          '<span class="w-plat">' + esc(plat) + '</span>' +
+          '</span>';
+      }).join('');
+    }
+
+    // Recent builds (collapsible, with relative timestamps)
+    const recent = (d.recent || []).slice(0, 12);
+    if (recent.length) {
+      const toggleId = 'farm-recent-toggle';
+      const bodyId = 'farm-recent-body';
+      $('farm-recent').innerHTML =
+        '<button class="farm-toggle" id="' + toggleId + '" aria-expanded="false">' +
+          '<span class="chevron">▶</span> Recent builds (' + recent.length + ')' +
+        '</button>' +
+        '<div class="farm-recent-body" id="' + bodyId + '">' +
+        '<table><thead><tr><th></th><th>Target</th><th>Worker</th><th>Time</th><th></th></tr></thead><tbody>' +
+        recent.map(j => {
+          const mark = j.ok ? '<span class="ok">ok</span>' : '<span class="fail">fail</span>';
+          const t = (j.targets || []).join(', ') || '?';
+          const extra = j.ok ? fmtSec(j.seconds) : esc(j.error || 'failed');
+          const ago = relTime(j.finished);
+          return '<tr><td>' + mark + '</td><td>' + esc(t) + '</td><td>' +
+            esc(j.worker) + '</td><td>' + extra + '</td>' +
+            '<td style="color:var(--ink-faint);font-size:.68rem;">' + esc(ago) + '</td></tr>';
+        }).join('') + '</tbody></table></div>';
+
+      // Wire toggle
+      const toggleBtn = $(toggleId);
+      const body = $(bodyId);
+      if (toggleBtn && body) {
+        toggleBtn.addEventListener('click', () => {
+          const open = body.classList.toggle('open');
+          toggleBtn.classList.toggle('open', open);
+          toggleBtn.setAttribute('aria-expanded', open);
+        });
+      }
+    } else {
+      $('farm-recent').innerHTML = '<p style="color:var(--ink-faint);font-size:.82rem;">No recent builds.</p>';
+    }
+
+    const upStr = d.uptime_sec ? fmtSec(d.uptime_sec) : '?';
+    $('farm-tick').textContent = 'Updated ' + (d.now || '—') + ' · queue up ' + upStr;
+  }
+
+  // Process API data into build time items
+  function processData(d) {
+    const buckets = {};
+    for (const j of (d.recent || [])) {
+      if (!j.ok || !j.seconds) continue;
+      const key = (j.targets || []).join(', ');
+      if (!key) continue;
+      if (!buckets[key]) buckets[key] = [];
+      buckets[key].push(j.seconds);
+    }
+
+    const items = [];
+    for (const [raw, times] of Object.entries(buckets)) {
+      const avg = times.reduce((a, b) => a + b, 0) / times.length;
+      const label = TARGET_LABELS[raw] || raw;
+      items.push({
+        target: label,
+        min: Math.round(avg / 60 * 10) / 10,
+        builds: times.length,
+        avgSec: Math.round(avg),
+        minSec: Math.min(...times),
+        maxSec: Math.max(...times),
+        raw: raw
+      });
+    }
+
+    const order = ['linux','android','macos','windows'];
+    items.sort((a, b) => {
+      const ai = order.findIndex(p => a.raw.startsWith(p));
+      const bi = order.findIndex(p => b.raw.startsWith(p));
+      return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi) || a.raw.localeCompare(b.raw);
     });
-  }, { threshold: 0.5 });
-  counters.forEach(c => obs.observe(c));
+
+    return items;
+  }
+
+  async function fetchFarm() {
+    try {
+      const r = await fetch(API);
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const d = await r.json();
+
+      // Cache for offline fallback
+      saveCache(d);
+
+      const items = processData(d);
+
+      if (items.length) {
+        renderTimeCards(items);
+        // Use overall average for comparison bar
+        const overallAvg = items.reduce((s, i) => s + i.min, 0) / items.length;
+        renderCompare(Math.round(overallAvg * 10) / 10);
+      }
+
+      renderFarm(d);
+    } catch (err) {
+      console.warn('Farm API error:', err);
+
+      // Try localStorage cache
+      const cached = loadCache();
+      if (cached && cached.data) {
+        const items = processData(cached.data);
+        if (items.length) {
+          renderTimeCards(items);
+          const overallAvg = items.reduce((s, i) => s + i.min, 0) / items.length;
+          renderCompare(Math.round(overallAvg * 10) / 10);
+        }
+        renderFarm(cached.data);
+        const age = Math.round((Date.now() - cached.ts) / 60000);
+        $('farm-tick').textContent += ' (cached ' + age + 'm ago — farm unreachable)';
+      } else {
+        // No cache at all — show minimal error state
+        const loading = $('build-loading');
+        if (loading) { loading.textContent = 'Could not reach build farm'; loading.classList.add('farm-error'); }
+        $('farm-dot').classList.add('offline');
+        $('farm-pills').innerHTML = '<span class="farm-pill" style="color:var(--bad);">Build farm unreachable</span>';
+      }
+    }
+  }
+
+  fetchFarm();
+  // Refresh every 30s, but pause when tab is hidden
+  let pollTimer = setInterval(fetchFarm, 30000);
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      clearInterval(pollTimer);
+    } else {
+      fetchFarm(); // immediate refresh on return
+      pollTimer = setInterval(fetchFarm, 30000);
+    }
+  });
 })();
 
 // ── Lightbox ──
