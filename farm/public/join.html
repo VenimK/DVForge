@@ -38,7 +38,7 @@ ol { color:var(--dim); line-height:1.55; padding-left:18px; }
 <div class="wrap">
   <div class="brand">DVForge</div>
   <h1>Set up a worker</h1>
-  <p class="lede">No NAS mount. This machine only needs DVForge running locally, then one command that talks to this website over HTTPS.</p>
+  <p class="lede">No NAS mount. One command starts local DVForge (and on the Mac, the farm API) and joins this farm over HTTPS.</p>
 
   <label>This computer
     <select id="os">
@@ -53,12 +53,11 @@ ol { color:var(--dim); line-height:1.55; padding-left:18px; }
   <button class="btn" type="button" id="copy">Copy start command</button>
 
   <pre id="cmd"></pre>
-  <p class="hint">First log line should include <code>queue=https://api.nas86.eu</code> and <code>claiming windows-*</code> (or macos / linux). If the log shows <code>queue=%DVFORGE_QUEUE%</code> you are in PowerShell — use the flags above, not <code>set</code> / <code>%VAR%</code>. DVForge stays on <code>127.0.0.1:8765</code>.</p>
+  <p class="hint">You should see <code>starting DVForge</code> (or <code>already running</code>), then <code>queue=https://api.nas86.eu</code> and <code>claiming windows-*</code> (or macos / linux). On the Mac, <code>--with-queue</code> also starts the farm API if <code>:8766</code> is down. Ctrl+C stops the worker and the DVForge it started; the farm API stays up. If the log shows <code>queue=%DVFORGE_QUEUE%</code> you are in PowerShell — use the flags above, not <code>set</code> / <code>%VAR%</code>.</p>
 
   <ol>
     <li>Install DVForge on this PC the usual way (<code>Setup-DVForge-*.sh</code> / <code>.ps1</code>).</li>
-    <li>Start it: <code>./run.sh</code> or <code>run.bat</code> or <code>python3 app.py --no-browser</code>.</li>
-    <li>In a second terminal, paste the command above (from the <code>farm</code> folder of that clone).</li>
+    <li>Paste the command above from that clone’s <code>farm</code> folder. No second terminal.</li>
   </ol>
   <p class="hint"><a href="/">← Request a client</a> · <a href="/status">farm status</a></p>
 </div>
@@ -78,11 +77,14 @@ function cmd() {
   // (`set VAR=` / `%VAR%` is cmd-only and stays literal in PowerShell).
   if (os === "windows") {
     return "cd C:\\DVForge\\farm\r\n" +
-      "python worker.py --queue \"" + origin + "\" --token \"" + token + "\"";
+      "python worker.py --with-app --queue \"" + origin + "\" --token \"" + token + "\"";
   }
-  const dir = os === "mac" ? "/Users/venimk/DVForge/farm" : "/path/to/DVForge/farm";
-  return "cd " + dir + "\n" +
-    "python3 worker.py --queue \"" + origin + "\" --token \"" + token + "\"";
+  if (os === "mac") {
+    return "cd /Users/venimk/DVForge/farm\n" +
+      "python3 worker.py --with-app --with-queue --queue \"" + origin + "\" --token \"" + token + "\"";
+  }
+  return "cd /path/to/DVForge/farm\n" +
+    "python3 worker.py --with-app --queue \"" + origin + "\" --token \"" + token + "\"";
 }
 function render() { $("#cmd").textContent = cmd(); }
 $("#os").onchange = render;

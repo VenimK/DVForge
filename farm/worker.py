@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """DVForge farm worker — YOUR machines only (Mac, Windows, Linux).
 
-Each PC:
-  1. Runs DVForge locally  (python3 app.py --no-browser / run.sh / run.bat)
-  2. Runs this worker against that localhost API
-  3. Shares this farm/ folder (this repo on the NAS)
+Each PC runs this worker. --with-app starts local DVForge if :8765 is down.
+The Mac that hosts the farm API also passes --with-queue (starts queue.py
+on :8766 if needed). One command, no second terminal.
+
+  python3 farm/worker.py --with-app --with-queue --queue https://api.nas86.eu --token SECRET
 
 Mac claims macos-* (add --android to also take APKs).
 Windows claims windows-* only.
@@ -23,6 +24,8 @@ import json
 import os
 import platform
 import shutil
+import signal
+import subprocess
 import sys
 import time
 import urllib.error
@@ -73,13 +76,18 @@ def http_json(url, data=None, method=None, timeout=30, headers=None):
             return json.loads(raw) if raw.strip() else {}
     except urllib.error.HTTPError as e:
         raw = e.read().decode("utf-8", "replace")
+        if e.code in (502, 503, 504):
+            raise RuntimeError(
+                "HTTP %s %s — queue.py is not running behind nginx (start it on the NAS)"
+                % (e.code, url))
+        snippet = raw[:200].replace("\r", " ").replace("\n", " ").strip()
         try:
             parsed = json.loads(raw)
         except Exception:
-            raise RuntimeError("HTTP %s %s: %s" % (e.code, url, raw[:200].replace("\n", " ")))
+            raise RuntimeError("HTTP %s %s: %s" % (e.code, url, snippet))
         err = parsed.get("error") if isinstance(parsed, dict) else None
         if e.code >= 400:
-            raise RuntimeError("HTTP %s %s: %s" % (e.code, url, err or raw[:200]))
+            raise RuntimeError("HTTP %s %s: %s" % (e.code, url, err or snippet))
         return parsed
     except urllib.error.URLError as e:
         raise RuntimeError("unreachable %s: %s" % (url, e.reason))
@@ -504,6 +512,102 @@ def check_and_fail_stale_jobs(farm, d):
                 fail_job(stale_job, d, "Worker restarted unexpectedly mid-build")
 
 
+def dvforge_up(url, timeout=2):
+    try:
+        http_json(url.rstrip("/") + "/api/host", timeout=timeout)
+        return True
+    except Exception:
+        return False
+
+
+def app_py_path():
+    cand = os.path.join(os.path.dirname(HERE), "app.py")
+    return cand if os.path.isfile(cand) else None
+
+
+def start_app(url):
+    app = app_py_path()
+    if not app:
+        sys.exit("app.py not found next to farm/. Run this from a DVForge clone.")
+    log("starting DVForge: %s --no-browser" % app)
+    kwargs = {"cwd": os.path.dirname(app)}
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs["start_new_session"] = True
+    proc = subprocess.Popen([sys.executable, app, "--no-browser"], **kwargs)
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            sys.exit("DVForge exited before it was ready (code %s)" % proc.returncode)
+        if dvforge_up(url):
+            log("DVForge ready at %s" % url)
+            return proc
+        time.sleep(0.3)
+    stop_app(proc)
+    sys.exit("DVForge did not start on %s within 30s" % url)
+
+
+def stop_app(proc):
+    if not proc or proc.poll() is not None:
+        return
+    log("stopping DVForge")
+    try:
+        if os.name == "nt":
+            proc.terminate()
+        else:
+            proc.send_signal(signal.SIGINT)
+        proc.wait(timeout=8)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def queue_listen():
+    host = os.environ.get("DVFORGE_QUEUE_HOST", "0.0.0.0")
+    port = int(os.environ.get("DVFORGE_QUEUE_PORT", "8766"))
+    return host, port
+
+
+def queue_up(timeout=2):
+    _host, port = queue_listen()
+    try:
+        http_json("http://127.0.0.1:%s/health" % port, timeout=timeout)
+        return True
+    except Exception:
+        return False
+
+
+def start_queue(token):
+    qpy = os.path.join(HERE, "queue.py")
+    if not os.path.isfile(qpy):
+        sys.exit("queue.py not found in %s" % HERE)
+    host, port = queue_listen()
+    log("starting farm API: %s --host %s --port %s" % (qpy, host, port))
+    env = os.environ.copy()
+    if token:
+        env["DVFORGE_FARM_TOKEN"] = token
+    kwargs = {"cwd": HERE, "env": env}
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs["start_new_session"] = True
+    proc = subprocess.Popen(
+        [sys.executable, qpy, "--host", host, "--port", str(port)], **kwargs)
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            sys.exit("queue.py exited before it was ready (code %s)" % proc.returncode)
+        if queue_up():
+            log("farm API ready at http://%s:%s" % (host, port))
+            return proc
+        time.sleep(0.3)
+    stop_app(proc)
+    sys.exit("queue.py did not start on :%s within 15s" % port)
+
+
 def loop(farm, url, once):
     d = dirs(farm)
     for k in d:
@@ -553,6 +657,10 @@ def main():
     p.add_argument("--once", action="store_true")
     p.add_argument("--android", action="store_true",
                    help="On macOS, also claim android-* jobs")
+    p.add_argument("--with-app", action="store_true",
+                   help="Start app.py --no-browser if localhost DVForge is not up")
+    p.add_argument("--with-queue", action="store_true",
+                   help="Start queue.py on :8766 if the farm API is not up (Mac host)")
     args = p.parse_args()
     CLAIM_ANDROID_ON_MAC = bool(args.android)
     QUEUE_TOKEN = (args.token or "").strip()
@@ -561,18 +669,35 @@ def main():
         sys.exit(
             "queue URL was not expanded: %s\n"
             "PowerShell does not honor set / %%VAR%%. Run:\n"
-            "  python worker.py --queue https://api.nas86.eu --token YOUR_TOKEN"
+            "  python worker.py --with-app --queue https://api.nas86.eu --token YOUR_TOKEN"
             % QUEUE_BASE)
     farm = os.path.abspath(args.farm)
-    try:
-        http_json(args.url + "/api/host")
-    except Exception as e:
+    url = args.url.rstrip("/")
+    if args.with_queue:
+        if queue_up():
+            log("farm API already running on :%s" % queue_listen()[1])
+        else:
+            start_queue(QUEUE_TOKEN)
+            log("farm API left running if you stop this worker")
+    app_proc = None
+    if dvforge_up(url):
+        log("DVForge already running at %s" % url)
+    elif args.with_app or args.with_queue:
+        app_proc = start_app(url)
+    else:
         sys.exit("DVForge not reachable at %s\n"
-                 "Start it first: python3 app.py --no-browser   (or run.sh / run.bat)\n%s"
-                 % (args.url, e))
+                 "One command: python3 worker.py --with-app --queue URL --token TOKEN\n"
+                 "Mac that hosts the API: add --with-queue\n"
+                 "Or start it first: python3 app.py --no-browser   (or run.sh / run.bat)"
+                 % url)
     if QUEUE_BASE:
         log("queue=%s (HTTP, no shared folder required)" % QUEUE_BASE)
-    loop(farm, args.url.rstrip("/"), args.once)
+    try:
+        loop(farm, url, args.once)
+    except KeyboardInterrupt:
+        log("stop")
+    finally:
+        stop_app(app_proc)
 
 
 if __name__ == "__main__":

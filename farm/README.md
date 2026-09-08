@@ -99,16 +99,24 @@ Windows (PowerShell):
 
 ```powershell
 cd C:\DVForge\farm
-python worker.py --queue "https://api.nas86.eu" --token "pick-a-secret"
+python worker.py --with-app --queue "https://api.nas86.eu" --token "pick-a-secret"
 ```
 
-Linux (oxicloud):
+macOS (this Mac also hosts the farm API — one command):
 
 ```bash
-# DVForge already running on 127.0.0.1:8765
-cd /opt/rustdesk-builder/Buildwithconfig/test/DVForge/farm
-python3 worker.py --queue "https://api.nas86.eu" --token "pick-a-secret"
+cd /Users/venimk/DVForge/farm
+python3 worker.py --with-app --with-queue --queue "https://api.nas86.eu" --token "testingfase"
 ```
+
+Linux:
+
+```bash
+cd /path/to/DVForge/farm
+python3 worker.py --with-app --queue "https://api.nas86.eu" --token "testingfase"
+```
+
+`--with-app` starts `python3 app.py --no-browser` if `127.0.0.1:8765` is not already up. `--with-queue` starts `queue.py` on `:8766` if the farm API is down (Mac host only). Ctrl+C stops the worker and the DVForge it started; the farm API is left running so other PCs keep claiming.
 
 Copy the latest `farm/worker.py` onto that machine if it is an older clone. Restart `queue.py` so `/claim` exists. Bump nginx `client_max_body_size` to `80m` (see `nginx-api.nas86.eu.conf`) so `.dmg` uploads succeed.
 
@@ -161,13 +169,15 @@ Do not put port 8766 on the public internet without nginx HTTPS + a token. DVFor
 
 Publish **only the queue**. Workers keep talking to local DVForge.
 
-On the NAS (same box as nginx):
+On the Mac mini (not the NAS):
 
 ```bash
-export DVFORGE_FARM=/volume1/downloads/MusicLover/RustDesk/Buildwithconfig/test/dvforge/farm
-export DVFORGE_FARM_TOKEN=pick-a-secret
-python3 $DVFORGE_FARM/queue.py --host 127.0.0.1 --port 8766
+cd /Users/venimk/DVForge
+export DVFORGE_FARM_TOKEN=testingfase
+python3 farm/queue.py --host 0.0.0.0 --port 8766
 ```
+
+nginx on the NAS only reverse-proxies `https://api.nas86.eu` → `http://192.168.1.100:8766`. If you skip nginx, workers use `--queue "http://192.168.1.100:8766"`.
 
 Install `farm/nginx-api.nas86.eu.conf` into nginx and add a DNS A record for `api.nas86.eu`.
 
