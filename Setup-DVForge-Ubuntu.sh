@@ -136,8 +136,46 @@ if [ "$INSTALL_APPIMAGE_DEPS" = true ]; then
 
     log "Installing Python build packages..."
     "${VENV_DIR}/bin/pip" install --upgrade pip setuptools wheel
-    "${VENV_DIR}/bin/pip" install setuptools_scm
+    "${VENV_DIR}/bin/pip" install "setuptools_scm<10"
     "${VENV_DIR}/bin/pip" install "git+https://github.com/rustdesk-org/appimage-builder.git"
+
+    # Ensure gnupg is present since the shim relies on gpg --dearmor
+    if ! command -v gpg >/dev/null 2>&1; then
+        log "Installing gnupg dependency..."
+        sudo apt-get update && sudo apt-get install -y gnupg
+    fi
+
+    # Create a compatibility shim if apt-key is not on $PATH
+    if ! command -v apt-key >/dev/null 2>&1; then
+        log "'apt-key' not found on \$PATH. Creating compatibility shim at /usr/local/bin/apt-key..."
+        
+        sudo tee /usr/local/bin/apt-key >/dev/null <<'EOF'
+#!/bin/sh
+case "$1" in
+  add)
+    shift
+    if [ "$1" = "-" ] || [ -z "$1" ]; then
+      gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/appimage-builder-shim.gpg >/dev/null
+    else
+      gpg --dearmor < "$1" | sudo tee "/etc/apt/trusted.gpg.d/$(basename "$1").gpg" >/dev/null
+    fi
+    ;;
+  list|fingerprint)
+    gpg --no-default-keyring --keyring /etc/apt/trusted.gpg.d/*.gpg --list-keys 2>/dev/null
+    ;;
+  *)
+    # Exit cleanly for unsupported/ignored subcommands so the build tool doesn't halt
+    exit 0
+    ;;
+esac
+exit 0
+EOF
+
+        sudo chmod +x /usr/local/bin/apt-key
+        log "apt-key shim created successfully."
+    else
+        log "'apt-key' already exists at $(command -v apt-key)."
+    fi
 
     # Prevent committing .venv if repo lacks .gitignore
     if [ -d "${PROJECT_DIR}/.git" ]; then
