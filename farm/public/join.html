@@ -50,10 +50,13 @@ ol { color:var(--dim); line-height:1.55; padding-left:18px; }
   <label>Access token (same as the submit page)
     <input id="token" type="password" autocomplete="off" placeholder="Bearer token">
   </label>
+  <label>Notification webhook (optional)
+    <input id="webhook" type="url" autocomplete="off" placeholder="https://discord.com/api/webhooks/...">
+  </label>
   <button class="btn" type="button" id="copy">Copy start command</button>
 
   <pre id="cmd"></pre>
-  <p class="hint">You should see <code>starting DVForge</code> (or <code>already running</code>), then <code>queue=https://api.nas86.eu</code> and <code>claiming windows-*</code> (or macos / linux). On the Mac, <code>--with-queue</code> also starts the farm API if <code>:8766</code> is down. Ctrl+C stops the worker and the DVForge it started; the farm API stays up. If the log shows <code>queue=%DVFORGE_QUEUE%</code> you are in PowerShell — use the flags above, not <code>set</code> / <code>%VAR%</code>.</p>
+  <p class="hint">You should see <code>starting DVForge</code> (or <code>already running</code>), then <code>queue=https://api.nas86.eu</code> and <code>claiming windows-*</code> (or macos / linux). On the Mac, <code>--with-queue</code> also starts the farm API if <code>:8766</code> is down. The optional webhook receives an alert only after the worker goes offline for more than 45 seconds, then another when it recovers; no startup message is sent. Ctrl+C stops the worker and the DVForge it started; the farm API stays up. If the log shows <code>queue=%DVFORGE_QUEUE%</code> you are in PowerShell — use the flags above, not <code>set</code> / <code>%VAR%</code>.</p>
 
   <ol>
     <li>Install DVForge on this PC the usual way (<code>Setup-DVForge-*.sh</code> / <code>.ps1</code>).</li>
@@ -72,23 +75,26 @@ try { $("#token").value = sessionStorage.getItem("farmToken") || ""; } catch (e)
 function cmd() {
   const origin = location.origin;
   const token = ($("#token").value || "").trim() || "YOUR_TOKEN";
+  const webhook = ($("#webhook").value || "").trim();
+  const webhookArg = webhook ? " --notification-webhook \"" + webhook + "\"" : "";
   const os = $("#os").value;
   // Pass URL/token as flags so PowerShell and cmd.exe both work
   // (`set VAR=` / `%VAR%` is cmd-only and stays literal in PowerShell).
   if (os === "windows") {
     return "cd C:\\DVForge\\farm\r\n" +
-      "python worker.py --with-app --queue \"" + origin + "\" --token \"" + token + "\"";
+      "python worker.py --with-app --queue \"" + origin + "\" --token \"" + token + "\"" + webhookArg;
   }
   if (os === "mac") {
     return "cd /Users/venimk/DVForge/farm\n" +
-      "python3 worker.py --with-app --with-queue --queue \"" + origin + "\" --token \"" + token + "\"";
+      "python3 worker.py --with-app --with-queue --queue \"" + origin + "\" --token \"" + token + "\"" + webhookArg;
   }
   return "cd /path/to/DVForge/farm\n" +
-    "python3 worker.py --with-app --queue \"" + origin + "\" --token \"" + token + "\"";
+    "python3 worker.py --with-app --queue \"" + origin + "\" --token \"" + token + "\"" + webhookArg;
 }
 function render() { $("#cmd").textContent = cmd(); }
 $("#os").onchange = render;
 $("#token").oninput = render;
+$("#webhook").oninput = render;
 render();
 $("#copy").onclick = async () => {
   try { sessionStorage.setItem("farmToken", $("#token").value); } catch (e) {}

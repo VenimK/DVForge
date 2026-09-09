@@ -116,7 +116,9 @@ cd /path/to/DVForge/farm
 python3 worker.py --with-app --queue "https://api.nas86.eu" --token "testingfase"
 ```
 
-`--with-app` starts `python3 app.py --no-browser` if `127.0.0.1:8765` is not already up. `--with-queue` starts `queue.py` on `:8766` if the farm API is down (Mac host only). Ctrl+C stops the worker and the DVForge it started; the farm API is left running so other PCs keep claiming.
+`--with-app` starts `python3 app.py --no-browser` if `127.0.0.1:8765` is not already up. `--with-queue` starts `queue.py` on `:8766` if the farm API is down (Mac host only). Ctrl+C stops the worker and the DVForge it started; **the farm API is deliberately left running** so other PCs keep claiming — it is not tied to any one worker's lifetime.
+
+The worker refuses to start a second time under the same name on the same machine (checked via a local PID lock keyed on `DVFORGE_WORKER` / the hostname). Two workers sharing a name would both keep pinging `/claim`, hiding real outages from the queue's offline detection and `--notification-webhook` alerts below. If you see "Another worker named '...' is already running", find and stop the old process, or set `DVFORGE_WORKER=<unique-name>` to intentionally run a second one.
 
 Copy the latest `farm/worker.py` onto that machine if it is an older clone. Restart `queue.py` so `/claim` exists. Bump nginx `client_max_body_size` to `80m` (see `nginx-api.nas86.eu.conf`) so `.dmg` uploads succeed.
 
