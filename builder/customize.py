@@ -397,6 +397,7 @@ def _apply_linux_launcher(src, env, app, log):
             f"    exec: usr/share/rustdesk/{bin_name}", log)
         sed(src, yml, "apps/rustdesk.png", f"apps/{bin_name}.png", log)
         sed(src, yml, "apps/rustdesk.svg", f"apps/{bin_name}.svg", log)
+        sed(src, yml, "tar -xvf ./data.tar.xz", "tar -xvf ./data.tar.zst")
 
 
 def _apply_company(src, env, platform, log):
