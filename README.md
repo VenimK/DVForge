@@ -559,6 +559,8 @@ Two transports are supported:
 
 **Worker rating:** new machines start at 50%. Higher-rated idle workers of the same OS get jobs first. A worker with zero successes after 2+ jobs, or 5 failures in a row, is skipped until reset. You can **pin** a specific machine for a job.
 
+**Offline alerts:** pass `--notification-webhook <url>` (or `DVFORGE_WORKER_WEBHOOK`) to a worker and the queue will POST to that URL when the worker drops offline or recovers — useful for a Discord/Slack channel. See `farm/README.md` § 3d.
+
 > 🔒 **Security:** never expose port 8766 or DVForge's `:8765` to the public internet without nginx HTTPS + a token. Prefer blocking `/api/build/` on any public vhost and letting the queue be the only public entry. **One job = one OS.**
 
 Full walk-through (both PCs, NAS mounts, nginx, curl recipes, worker reset/pin): **[`farm/README.md`](farm/README.md)**.

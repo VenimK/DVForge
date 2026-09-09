@@ -33,6 +33,8 @@ import sys
 import threading
 import time
 import uuid
+import urllib.request
+import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -62,6 +64,9 @@ WORKERS = {}
 RATINGS = {}
 RATINGS_FILE = os.path.join(FARM, "ratings.json")
 _LOCK = threading.Lock()
+# Worker names we have already fired an OFFLINE alert for, so we only fire
+# once per outage and can send a single ONLINE recovery ping when they return.
+_NOTIFIED_OFFLINE = set()
 
 
 def _jid():
@@ -495,7 +500,7 @@ def one_job(jid):
     return {"id": jid, "state": "unknown"}
 
 
-def note_worker(os_name, worker_name, android=False, busy=None):
+def note_worker(os_name, worker_name, android=False, busy=None, webhook=None, current_job=None):
     """Remember a /claim or /progress ping. In-memory; resets if queue.py restarts."""
     name = (worker_name or "").strip()
     if not name:
@@ -509,11 +514,101 @@ def note_worker(os_name, worker_name, android=False, busy=None):
         rec["last_seen"] = time.time()
         if busy is not None:
             rec["busy"] = bool(busy)
+        if webhook is not None:
+            # Empty string clears a previously registered webhook; keep None = unchanged.
+            rec["webhook"] = webhook
+        if current_job is not None:
+            rec["current_job"] = current_job
         claiming = list(CLAIM.get(rec.get("os") or "", ()) or ())
         if rec.get("android") and "android-" not in claiming:
             claiming.append("android-")
         rec["claiming"] = claiming
         WORKERS[name] = rec
+
+
+def _post_webhook(url, payload, timeout=10):
+    """Fire-and-forget JSON POST to a worker's registered webhook.
+
+    Discord accepts {"content": "..."} or embeds; we send a generic JSON
+    object so any webhook receiver (Discord, Slack, custom) can read it.
+    All exceptions are swallowed — a bad webhook must never break the monitor.
+    A real User-Agent is required: Cloudflare blocks Python-urllib's default.
+    """
+    try:
+        body = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=body,
+            headers={"Content-Type": "application/json",
+                     "User-Agent": "DVForge-Farm/1.0 (+https://github.com/VenimK/DVForge)"},
+            method="POST")
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            r.read()
+    except Exception as e:
+        sys.stderr.write("webhook post failed (%s): %s\n" % (url, e))
+
+
+def _webhook_monitor(poll_sec=10):
+    """Background daemon: watch WORKERS last_seen vs ONLINE_SEC and notify.
+
+    Fires an OFFLINE alert when a worker with a registered webhook crosses
+    the ONLINE_SEC threshold, and an ONLINE recovery ping when it checks
+    back in. Each transition is reported at most once per outage.
+    """
+    while True:
+        time.sleep(poll_sec)
+        now = time.time()
+        # Snapshot under the lock so we never hold it while doing HTTP.
+        with _LOCK:
+            snapshot = [
+                (name, dict(rec))
+                for name, rec in WORKERS.items()
+                if rec.get("webhook")
+            ]
+            offline_already = set(_NOTIFIED_OFFLINE)
+        for name, rec in snapshot:
+            last = float(rec.get("last_seen") or 0)
+            if last <= 0:
+                continue
+            age = now - last
+            online = age <= ONLINE_SEC
+            webhook = rec.get("webhook") or ""
+            if not online and name not in offline_already:
+                # Online -> offline transition.
+                with _LOCK:
+                    _NOTIFIED_OFFLINE.add(name)
+                msg = ("DVForge worker OFFLINE: %s (last seen %ds ago"
+                       % (name, int(age)))
+                if rec.get("busy"):
+                    msg += ", was busy"
+                if rec.get("current_job"):
+                    msg += ", job: %s" % rec.get("current_job")
+                msg += ")"
+                payload = {
+                    "content": msg,
+                    "event": "worker_offline",
+                    "worker": name,
+                    "os": rec.get("os") or "",
+                    "busy": bool(rec.get("busy")),
+                    "current_job": rec.get("current_job") or "",
+                    "last_seen_sec": int(age),
+                    "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "message": msg,
+                }
+                _post_webhook(webhook, payload)
+            elif online and name in offline_already:
+                # Offline -> online recovery.
+                with _LOCK:
+                    _NOTIFIED_OFFLINE.discard(name)
+                msg = "DVForge worker back ONLINE: %s" % name
+                payload = {
+                    "content": msg,
+                    "event": "worker_online",
+                    "worker": name,
+                    "os": rec.get("os") or "",
+                    "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "message": msg,
+                }
+                _post_webhook(webhook, payload)
 
 
 def _kinds(targets):
@@ -857,8 +952,11 @@ class Handler(BaseHTTPRequestHandler):
             os_name = data.get("os") or ""
             worker = data.get("worker") or "worker"
             android = bool(data.get("android"))
+            webhook = data.get("webhook") or ""
             job = claim_job(os_name, worker, android)
-            note_worker(os_name, worker, android, busy=bool(job))
+            note_worker(os_name, worker, android, busy=bool(job),
+                        webhook=webhook,
+                        current_job=(job.get("id") if job else None))
             if not job:
                 return self._send(200, {"ok": True, "job": None})
             return self._send(200, {"ok": True, "job": job})
@@ -878,7 +976,9 @@ class Handler(BaseHTTPRequestHandler):
                 json.dump(prog, f)
                 f.write("\n")
             os.replace(tmp, dest)
-            note_worker(prog.get("host") or "", prog.get("worker") or "", busy=True)
+            note_worker(prog.get("host") or "", prog.get("worker") or "", busy=True,
+                        webhook=(prog.get("webhook") or ""),
+                        current_job=(prog.get("id") or jid))
             return self._send(200, {"ok": True})
 
         if path.startswith("/result/"):
@@ -982,11 +1082,14 @@ def main():
     for folder in (INBOX, OUTBOX, FAILED, RUNNING):
         os.makedirs(folder, exist_ok=True)
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
+    monitor = threading.Thread(target=_webhook_monitor, name="webhook-monitor", daemon=True)
+    monitor.start()
     print("farm queue  http://%s:%s/job" % (args.host, args.port), flush=True)
     print("stats       http://%s:%s/stats   (JSON)  /status (page)" % (args.host, args.port), flush=True)
     print("inbox       %s" % INBOX, flush=True)
     print("ratings     %s (%s workers)" % (RATINGS_FILE, len(RATINGS)), flush=True)
     print("token       %s" % ("yes" if TOKEN else "none (LAN only!)"), flush=True)
+    print("webhooks    %s" % ("on" if monitor.is_alive() else "off"), flush=True)
     print("curl example:", flush=True)
     print("  curl -sS -X POST 'http://THIS_PC:%s/job?targets=windows-x86_64-exe' \\" % args.port)
     print("    -H 'Content-Type: application/json' --data-binary @RustDesk.json", flush=True)

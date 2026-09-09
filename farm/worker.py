@@ -54,6 +54,7 @@ def log(msg):
 
 QUEUE_BASE = None
 QUEUE_TOKEN = ""
+WEBHOOK = ""  # per-worker alert destination, set from --notification-webhook
 
 
 def _qheaders(extra=None):
@@ -94,11 +95,15 @@ def http_json(url, data=None, method=None, timeout=30, headers=None):
 
 
 def claim_http():
-    r = http_json(QUEUE_BASE + "/claim", data={
+    payload = {
         "os": HOST,
         "worker": WORKER_NAME,
         "android": CLAIM_ANDROID_ON_MAC,
-    }, headers=_qheaders(), timeout=60)
+    }
+    if WEBHOOK:
+        payload["webhook"] = WEBHOOK
+    r = http_json(QUEUE_BASE + "/claim", data=payload,
+                  headers=_qheaders(), timeout=60)
     job = (r or {}).get("job")
     if not job:
         return None
@@ -187,6 +192,8 @@ def write_progress(job, d, **extra):
         "targets": job.get("targets") or [],
         "updated": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
+    if WEBHOOK:
+        rec["webhook"] = WEBHOOK
     rec.update(extra)
     path = os.path.join(d["running"], jid + ".progress.json")
     tmp = path + ".tmp"
@@ -661,10 +668,16 @@ def main():
                    help="Start app.py --no-browser if localhost DVForge is not up")
     p.add_argument("--with-queue", action="store_true",
                    help="Start queue.py on :8766 if the farm API is not up (Mac host)")
+    p.add_argument("--notification-webhook",
+                   default=os.environ.get("DVFORGE_WORKER_WEBHOOK", ""),
+                   help="URL to notify when this worker goes offline/recovers "
+                        "(env: DVFORGE_WORKER_WEBHOOK)")
     args = p.parse_args()
     CLAIM_ANDROID_ON_MAC = bool(args.android)
     QUEUE_TOKEN = (args.token or "").strip()
     QUEUE_BASE = (args.queue or "").strip().rstrip("/") or None
+    global WEBHOOK
+    WEBHOOK = (args.notification_webhook or "").strip()
     if QUEUE_BASE and ("%" in QUEUE_BASE or QUEUE_BASE.startswith("$")):
         sys.exit(
             "queue URL was not expanded: %s\n"

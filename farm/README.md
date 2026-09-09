@@ -120,6 +120,38 @@ python3 worker.py --with-app --queue "https://api.nas86.eu" --token "testingfase
 
 Copy the latest `farm/worker.py` onto that machine if it is an older clone. Restart `queue.py` so `/claim` exists. Bump nginx `client_max_body_size` to `80m` (see `nginx-api.nas86.eu.conf`) so `.dmg` uploads succeed.
 
+### 3d. Worker offline alerts (`--notification-webhook`)
+
+Each worker can register a webhook URL at startup so the queue notifies you when it drops offline or recovers. The queue runs a background monitor that watches every worker's `last_seen` timestamp against the 45s online window (`ONLINE_SEC`); when a worker with a registered webhook crosses that threshold, an alert is POSTed to its webhook, and a recovery ping is sent when it checks back in.
+
+Pass the webhook on the worker command line (or via the `DVFORGE_WORKER_WEBHOOK` env var):
+
+```bash
+python3 farm/worker.py --with-app \
+  --queue "https://api.nas86.eu" --token "testingfase" \
+  --notification-webhook "https://discord.com/api/webhooks/..."
+```
+
+The alert payload includes `content` (a human-readable message, rendered by Discord/Slack) plus structured fields (`event`, `worker`, `os`, `busy`, `current_job`, `last_seen_sec`, `at`) that other receivers can parse. Example offline alert:
+
+```json
+{
+  "content": "DVForge worker OFFLINE: mac-mini (last seen 46s ago, was busy, job: 20260909-120530-ab12cd34)",
+  "event": "worker_offline",
+  "worker": "mac-mini",
+  "os": "Darwin",
+  "busy": true,
+  "current_job": "20260909-120530-ab12cd34",
+  "last_seen_sec": 46,
+  "at": "2026-09-09T12:06:16"
+}
+```
+
+Notes:
+- The webhook registration lives in memory on the queue and is re-sent on every `/claim` and `/progress` ping, so a `queue.py` restart self-heals within one poll interval.
+- Webhook POSTs are fire-and-forget with a 10s timeout; a bad URL is logged to stderr and never blocks the monitor or the request handlers.
+- Registration is gated by the queue's existing token auth — untrusted callers can't register arbitrary webhook URLs on an exposed queue.
+
 ## 4. Submit jobs (from either PC)
 
 ```bash
