@@ -122,6 +122,20 @@ The worker refuses to start a second time under the same name on the same machin
 
 Copy the latest `farm/worker.py` onto that machine if it is an older clone. Restart `queue.py` so `/claim` exists. Bump nginx `client_max_body_size` to `80m` (see `nginx-api.nas86.eu.conf`) so `.dmg` uploads succeed.
 
+**Stopping everything cleanly:** `--with-app` / `--with-queue` deliberately leave `app.py` (:8765) and `queue.py` (:8766) running after Ctrl+C, so other machines keep claiming. When you actually want them gone — e.g. before a clean `--notification-webhook` test, or to free the ports for a restart — use:
+
+```bash
+./farm/stop-farm.sh            # stops :8765 and :8766, graceful then force after 5s
+./farm/stop-farm.sh 8766       # stop only the queue
+./farm/stop-farm.sh --force    # kill -9 immediately, no grace period
+```
+
+```bat
+farm\stop-farm.bat             REM Windows: same, via netstat + taskkill
+```
+
+Both also delete any stale `farm/.worker-*.lock` files left behind.
+
 ### 3d. Worker offline alerts (`--notification-webhook`)
 
 Each worker can register a webhook URL at startup so the queue notifies you when it drops offline or recovers. The queue runs a background monitor that watches every worker's `last_seen` timestamp against the 45s online window (`ONLINE_SEC`); when a worker with a registered webhook crosses that threshold, an alert is POSTed to its webhook, and a recovery ping is sent when it checks back in.
