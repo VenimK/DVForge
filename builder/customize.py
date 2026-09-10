@@ -397,6 +397,9 @@ def _apply_linux_launcher(src, env, app, log):
             f"    exec: usr/share/rustdesk/{bin_name}", log)
         sed(src, yml, "apps/rustdesk.png", f"apps/{bin_name}.png", log)
         sed(src, yml, "apps/rustdesk.svg", f"apps/{bin_name}.svg", log)
+        old_tar = "tar -xvf ./data.tar.xz"
+        new_tar = 'for f in ./data.tar.zst ./data.tar.xz; do [ -f "$f" ] && tar -xvf "$f" && break; done'
+        sed(src, yml, old_tar, new_tar)
 
 
 def _apply_company(src, env, platform, log):
