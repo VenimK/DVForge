@@ -576,19 +576,47 @@ def _locate(base, marker, log):
 
 def _ndk_release_name(home):
     """Pkg.ReleaseName from source.properties (e.g. r28c), or ''."""
+    if not home or not os.path.isdir(home):
+        return ""
     props = []
-    p = os.path.join(home or "", "source.properties")
+
+    # Check directly at home
+    p = os.path.join(home, "source.properties")
     if os.path.isfile(p):
         props.append(p)
+
+    # Check one level down (Linux/Windows nests android-ndk-rXX/, macOS has .app)
     try:
-        for child in os.listdir(home or ""):
+        for child in os.listdir(home):
+            child_path = os.path.join(home, child)
+            if not os.path.isdir(child_path):
+                continue
+
+            # Linux/Windows zip layout: .toolchains/android_ndk/android-ndk-r28c/source.properties
+            cand = os.path.join(child_path, "source.properties")
+            if os.path.isfile(cand):
+                props.append(cand)
+            
+            # macOS DMG layout: AndroidNDK*.app/Contents/NDK/source.properties
             if child.endswith(".app"):
-                inner = os.path.join(home, child, "Contents", "NDK",
-                                     "source.properties")
-                if os.path.isfile(inner):
-                    props.append(inner)
+                cand_mac = os.path.join(child_path, "Contents", "NDK", "source.properties")
+                if os.path.isfile(cand_mac):
+                    props.append(cand_mac)
     except OSError:
         pass
+
+    # Fallback: search up to 3 levels deep if still not found
+    if not props:
+        for root, dirs, files in os.walk(home):
+            depth = len(os.path.relpath(root, home).split(os.sep))
+            if depth > 3:
+                dirs.clear()
+                continue
+            if "source.properties" in files:
+                props.append(os.path.join(root, "source.properties"))
+                break
+
+    # Read Pkg.ReleaseName from found source.properties files
     for path in props:
         try:
             with open(path, encoding="utf-8", errors="replace") as f:
