@@ -346,6 +346,7 @@ def publish(job, result, d):
     with open(os.path.join(out, "status.json"), "w", encoding="utf-8") as f:
         json.dump(status, f, indent=2)
         f.write("\n")
+    upload_ok = True
     if QUEUE_BASE:
         for path in copied:
             name = os.path.basename(path)
@@ -359,6 +360,7 @@ def publish(job, result, d):
                 urllib.request.urlopen(req, timeout=600).read()
                 log("uploaded %s (%s bytes)" % (name, len(raw)))
             except Exception as e:
+                upload_ok = False
                 log("upload failed %s: %s" % (name, e))
         pub = dict(status)
         pub["artifacts"] = [os.path.basename(p) for p in copied]
@@ -366,7 +368,16 @@ def publish(job, result, d):
             http_json(QUEUE_BASE + "/result/" + jid, data=pub,
                       headers=_qheaders(), timeout=60)
         except Exception as e:
+            upload_ok = False
             log("result post failed: %s" % e)
+        # Clean up the worker's staging outbox directory after successful upload
+        if upload_ok:
+            try:
+                shutil.rmtree(out, ignore_errors=True)
+                log("purged local staging outbox %s" % out)
+            except OSError as e:
+                log("failed to purge outbox %s: %s" % (out, e))
+
     return status
 
 
