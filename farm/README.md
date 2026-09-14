@@ -138,7 +138,7 @@ Both also delete any stale `farm/.worker-*.lock` files left behind.
 
 ### 3d. Worker offline alerts (`--notification-webhook`)
 
-Each worker can register a webhook URL at startup so the queue notifies you when it drops offline or recovers. The queue runs a background monitor that watches every worker's `last_seen` timestamp against the 45s online window (`ONLINE_SEC`); when a worker with a registered webhook crosses that threshold, an alert is POSTed to its webhook, and a recovery ping is sent when it checks back in.
+Each worker can register a webhook URL at startup so the queue notifies you when it drops offline or recovers. The queue runs a background monitor that watches every worker's `last_seen` timestamp against the 5-minute online window (`ONLINE_SEC = 300`); when a worker with a registered webhook crosses that threshold, an alert is POSTed to its webhook, and a recovery ping is sent when it checks back in. The 5-minute window tolerates brief network blips and worker restarts without firing false alarms.
 
 Pass the webhook on the worker command line (or via the `DVFORGE_WORKER_WEBHOOK` env var):
 
@@ -152,13 +152,13 @@ The alert payload includes `content` (a human-readable message, rendered by Disc
 
 ```json
 {
-  "content": "DVForge worker OFFLINE: mac-mini (last seen 46s ago, was busy, job: 20260909-120530-ab12cd34)",
+  "content": "DVForge worker OFFLINE: mac-mini (last seen 301s ago, was busy, job: 20260909-120530-ab12cd34)",
   "event": "worker_offline",
   "worker": "mac-mini",
   "os": "Darwin",
   "busy": true,
   "current_job": "20260909-120530-ab12cd34",
-  "last_seen_sec": 46,
+  "last_seen_sec": 301,
   "at": "2026-09-09T12:06:16"
 }
 ```

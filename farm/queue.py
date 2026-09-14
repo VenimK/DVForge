@@ -55,7 +55,7 @@ CLAIM = {
     "Linux": ("linux-", "android-"),
 }
 OS_LABEL = {"Darwin": "macos", "Windows": "windows", "Linux": "linux"}
-ONLINE_SEC = 45
+ONLINE_SEC = 300
 # Ban after this many attempts with zero successes, or this many fails in a row.
 BAN_AFTER_FAIL_ONLY = 2
 BAN_AFTER_STREAK = 5
