@@ -2,6 +2,9 @@
 workspace/
 .toolchains/
 
+# === Devin agent skills (local only) ===
+.devin/
+
 # === Python ===
 __pycache__/
 builder/__pycache__/
