@@ -119,6 +119,7 @@ def release_lock(path):
 QUEUE_BASE = None
 QUEUE_TOKEN = ""
 WEBHOOK = ""  # per-worker alert destination, set from --notification-webhook
+WORKER_VERSIONS = []  # RustDesk versions this worker can build (from local app)
 
 
 def _qheaders(extra=None):
@@ -158,11 +159,25 @@ def http_json(url, data=None, method=None, timeout=30, headers=None):
         raise RuntimeError("unreachable %s: %s" % (url, e.reason))
 
 
+def fetch_versions(url):
+    """Query the local DVForge app for available RustDesk build versions."""
+    global WORKER_VERSIONS
+    try:
+        r = http_json(url.rstrip("/") + "/api/versions", timeout=10)
+        vers = [v.get("version") for v in (r or {}).get("versions", []) if v.get("version")]
+        if vers:
+            WORKER_VERSIONS = vers
+            log("versions: %s" % ", ".join(vers))
+    except Exception:
+        pass  # older app without /api/versions — leave WORKER_VERSIONS empty
+
+
 def claim_http():
     payload = {
         "os": HOST,
         "worker": WORKER_NAME,
         "android": CLAIM_ANDROID_ON_MAC,
+        "versions": WORKER_VERSIONS,
     }
     if WEBHOOK:
         payload["webhook"] = WEBHOOK
@@ -696,6 +711,7 @@ def loop(farm, url, once):
         os.makedirs(d[k], exist_ok=True)
     log("farm=%s" % (QUEUE_BASE or farm))
     log("api=%s  claiming %s" % (url, ", ".join(prefixes()) + "*"))
+    fetch_versions(url)
     check_and_fail_stale_jobs(farm, d)
     idle = 0
     while True:
@@ -721,6 +737,8 @@ def loop(farm, url, once):
         idle += 1
         if idle == 1 or idle % 12 == 0:
             log("waiting for inbox jobs…")
+            # Refresh version list every ~60s (12 × 5s idle pings).
+            fetch_versions(url)
         if once:
             log("no matching job")
             return

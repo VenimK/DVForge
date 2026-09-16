@@ -168,6 +168,14 @@ Notes:
 - Webhook POSTs are fire-and-forget with a 10s timeout; a bad URL is logged to stderr and never blocks the monitor or the request handlers.
 - Registration is gated by the queue's existing token auth — untrusted callers can't register arbitrary webhook URLs on an exposed queue.
 
+### 3e. Worker version compatibility
+
+Each RustDesk release pins its own vcpkg commit (`VERSION_PROFILES` in `builder/orchestrator.py`). The build UI presents these as a dropdown — pick 1.4.9 (stable) or 1.5.0 (latest) and the orchestrator checks out the matching vcpkg version at build time.
+
+When a worker starts, it queries its local DVForge app (`/api/versions`) for the list of versions it can build, and includes that list in every `/claim` ping. The queue stores it and **skips workers that don't support the job's version** — so a worker running an older DVForge clone won't claim a 1.5.0 job, fail the build, and waste a queue slot. Workers that don't report versions (older `worker.py` or app not running) are treated as compatible with all jobs, so this is fully backward-compatible.
+
+`/stats` shows each worker's `versions` array so you can see at a glance which workers need a `git pull`.
+
 ## 4. Submit jobs (from either PC)
 
 ```bash

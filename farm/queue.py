@@ -213,6 +213,10 @@ def claim_job(os_name, worker_name, android_on_mac=False):
     worker of the same OS is online, leave the job for them.
     Assigned jobs (`assign`) go only to that worker, even if blocked
     (so you can test a machine after a fix without resetting first).
+    A worker that reported `versions` (from its local DVForge /api/versions)
+    is skipped for jobs whose RustDesk version it doesn't list — this prevents
+    outdated workers from claiming jobs that need a newer vcpkg commit.
+    Workers that didn't report `versions` are treated as compatible with all.
     """
     try:
         names = sorted(os.listdir(INBOX))
@@ -220,6 +224,8 @@ def claim_job(os_name, worker_name, android_on_mac=False):
         return None
     me_ok = rating_public(worker_name)["eligible"]
     better = _better_idle_online(os_name, worker_name) if me_ok else None
+    with _LOCK:
+        my_versions = list(WORKERS.get(worker_name, {}).get("versions") or [])
     for name in names:
         if not name.endswith(".json") or name.startswith("."):
             continue
@@ -230,6 +236,10 @@ def claim_job(os_name, worker_name, android_on_mac=False):
         except Exception:
             continue
         if not _can_claim(job, os_name, android_on_mac):
+            continue
+        # Version gate: skip jobs whose RustDesk version this worker can't build.
+        job_ver = (job.get("version") or "1.4.9").lstrip("v")
+        if my_versions and job_ver not in my_versions:
             continue
         assign = _job_assign(job)
         if assign:
@@ -500,7 +510,8 @@ def one_job(jid):
     return {"id": jid, "state": "unknown"}
 
 
-def note_worker(os_name, worker_name, android=False, busy=None, webhook=None, current_job=None):
+def note_worker(os_name, worker_name, android=False, busy=None,
+                webhook=None, current_job=None, versions=None):
     """Remember a /claim or /progress ping. In-memory; resets if queue.py restarts."""
     name = (worker_name or "").strip()
     if not name:
@@ -519,6 +530,8 @@ def note_worker(os_name, worker_name, android=False, busy=None, webhook=None, cu
             rec["webhook"] = webhook
         if current_job is not None:
             rec["current_job"] = current_job
+        if versions is not None:
+            rec["versions"] = versions
         claiming = list(CLAIM.get(rec.get("os") or "", ()) or ())
         if rec.get("android") and "android-" not in claiming:
             claiming.append("android-")
@@ -761,6 +774,7 @@ def farm_stats():
             "last_seen_sec": age,
             "online": online,
             "busy": busy if online else False,
+            "versions": rec.get("versions") or [],
         }
         item.update(rate)
         workers.append(item)
@@ -953,10 +967,12 @@ class Handler(BaseHTTPRequestHandler):
             worker = data.get("worker") or "worker"
             android = bool(data.get("android"))
             webhook = data.get("webhook") or ""
+            versions = data.get("versions") or []
             job = claim_job(os_name, worker, android)
             note_worker(os_name, worker, android, busy=bool(job),
                         webhook=webhook,
-                        current_job=(job.get("id") if job else None))
+                        current_job=(job.get("id") if job else None),
+                        versions=versions)
             if not job:
                 return self._send(200, {"ok": True, "job": None})
             return self._send(200, {"ok": True, "job": job})

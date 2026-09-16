@@ -49,6 +49,41 @@ RUST_VERSION = "1.75"        # Windows/Linux desktop
 MAC_RUST_VERSION = "1.81"    # macOS desktop (official CI uses 1.81)
 FLUTTER_VERSION = "3.24.5"
 
+# Version profiles — each RustDesk release pins its own vcpkg commit.
+# The UI presents these as a dropdown; the orchestrator looks up the
+# correct vcpkg commit by self.version at build time.
+# Add a new entry here when a new RustDesk release changes the vcpkg pin.
+VERSION_PROFILES = {
+    "1.4.9": {
+        "vcpkg_commit": "120deac3062162151622ca4860575a33844ba10b",
+        "label": "1.4.9 (stable)",
+        "git_ref": "1.4.9",
+    },
+    "1.5.0": {
+        "vcpkg_commit": "9e593bb18ea69cc5095e012465dcd675a822ed0d",
+        "label": "1.5.0 (latest, from master)",
+        "git_ref": "master",
+    },
+}
+# Fallback for versions not in the table — use the newest known profile.
+DEFAULT_VERSION = sorted(VERSION_PROFILES.keys())[-1]
+
+
+def version_profiles():
+    """Return version profiles for the UI dropdown / API.
+
+    Sorted newest-first so the dropdown shows the latest version on top.
+    """
+    out = []
+    for ver in sorted(VERSION_PROFILES.keys(), reverse=True):
+        prof = VERSION_PROFILES[ver]
+        out.append({
+            "version": ver,
+            "label": prof.get("label") or ver,
+            "vcpkg_commit": prof["vcpkg_commit"][:8],
+        })
+    return out
+
 # Compile caches and bulky downloads that must survive a source reset.
 # Customizations mutate tracked files, so we still git-reset; we just do
 # not delete these (they are gitignored / untracked).
@@ -377,8 +412,23 @@ class Build:
             return False
 
         want = self.version.lstrip("v")
+        git_ref = self._git_ref()
+        is_branch = git_ref != want
         have = self._source_tag()
-        if have != want:
+        if is_branch:
+            # Building from a branch (e.g. 1.5.0 → master): fetch and reset,
+            # don't compare tags since the branch HEAD isn't a tag.
+            self.log(f"  · fetching {git_ref} (branch build for {want})")
+            rc = self.run(
+                ["git", "fetch", "--depth", "1", "origin", git_ref],
+                cwd=self.src_dir, check=False)
+            if rc == 0:
+                self.run(["git", "checkout", "--force", "FETCH_HEAD"],
+                         cwd=self.src_dir, check=False)
+            else:
+                self.log("  ! could not fetch branch — will reclone")
+                return False
+        elif have != want:
             self.log(f"  · switching checkout {have or 'unknown'} -> {want}")
             switched = False
             for ref in (want, f"v{want}"):
@@ -465,7 +515,7 @@ class Build:
                 _shell_rmtree(tmp_dir)
                 if os.path.exists(tmp_dir):
                     _force_rmtree(tmp_dir)
-            self.run(["git", "clone", "--depth", "1", "--branch", self.version,
+            self.run(["git", "clone", "--depth", "1", "--branch", self._git_ref(),
                       "--recurse-submodules", RUSTDESK_REPO, tmp_dir])
             _shell_rmtree(self.src_dir)
             if os.path.exists(self.src_dir):
@@ -473,7 +523,7 @@ class Build:
             else:
                 os.rename(tmp_dir, self.src_dir)
         else:
-            self.run(["git", "clone", "--depth", "1", "--branch", self.version,
+            self.run(["git", "clone", "--depth", "1", "--branch", self._git_ref(),
                       "--recurse-submodules", RUSTDESK_REPO, self.src_dir])
 
     def checkout_source(self):
@@ -485,7 +535,7 @@ class Build:
         os.makedirs(self.workspace, exist_ok=True)
         if os.path.exists(self.src_dir):
             if self.dry_run:
-                self.log(f"  (would reset {self.src_dir} to v{self.version}, "
+                self.log(f"  (would reset {self.src_dir} to {self._git_ref()}, "
                          "keeping cargo/flutter caches)")
                 return
             if self._try_reuse_source():
@@ -1271,7 +1321,23 @@ class Build:
         return None
 
     # ---- native deps (vcpkg) ---------------------------------------------
-    VCPKG_COMMIT = "120deac3062162151622ca4860575a33844ba10b"
+    def _vcpkg_commit(self):
+        """The vcpkg commit pinned for self.version, or the default."""
+        prof = VERSION_PROFILES.get(self.version)
+        if prof:
+            return prof["vcpkg_commit"]
+        return VERSION_PROFILES[DEFAULT_VERSION]["vcpkg_commit"]
+
+    def _git_ref(self):
+        """The git tag/branch to check out for self.version.
+
+        Defaults to self.version (a tag like '1.4.9'); profiles that build
+        from a branch (e.g. 1.5.0 → master) override this with 'git_ref'.
+        """
+        prof = VERSION_PROFILES.get(self.version)
+        if prof and prof.get("git_ref"):
+            return prof["git_ref"]
+        return self.version
 
     def _cargo_bin_version_text(self, name):
         """`name --version` stdout, or empty if the binary is missing."""
@@ -1311,16 +1377,17 @@ class Build:
         self.log(f"  vcpkg deps ({triplet}) from {root}")
         vcpkg_exe = os.path.join(root, "vcpkg.exe" if self.host["os"] == "Windows" else "vcpkg")
         rc, head = self._git_capture(["rev-parse", "HEAD"], cwd=root)
+        commit = self._vcpkg_commit()
         already = (rc == 0 and head and
-                   (head.startswith(self.VCPKG_COMMIT) or
-                    self.VCPKG_COMMIT.startswith(head)))
+                   (head.startswith(commit) or
+                    commit.startswith(head)))
         if already and os.path.isfile(vcpkg_exe):
-            self.log(f"  · vcpkg already at {self.VCPKG_COMMIT[:8]} — "
+            self.log(f"  · vcpkg already at {commit[:8]} — "
                      "skip fetch/bootstrap")
         else:
             self.run(["git", "-C", root, "fetch", "--depth", "1", "origin",
-                      self.VCPKG_COMMIT], check=False)
-            self.run(["git", "-C", root, "checkout", self.VCPKG_COMMIT], check=False)
+                      commit], check=False)
+            self.run(["git", "-C", root, "checkout", commit], check=False)
             # After switching commits the vcpkg binary is stale — re-bootstrap it.
             bootstrap = os.path.join(root,
                                      "bootstrap-vcpkg.bat" if self.host["os"] == "Windows"
@@ -2880,10 +2947,11 @@ class Build:
         # calls vcpkg install but doesn't checkout the right version.
         vcpkg_root = os.environ.get("VCPKG_ROOT", "")
         if vcpkg_root and os.path.isdir(vcpkg_root):
-            self.log(f"  · vcpkg checkout {self.VCPKG_COMMIT[:8]}")
+            commit = self._vcpkg_commit()
+            self.log(f"  · vcpkg checkout {commit[:8]}")
             self.run(["git", "-C", vcpkg_root, "fetch", "--depth", "1",
-                      "origin", self.VCPKG_COMMIT], check=False)
-            self.run(["git", "-C", vcpkg_root, "checkout", self.VCPKG_COMMIT],
+                      "origin", commit], check=False)
+            self.run(["git", "-C", vcpkg_root, "checkout", commit],
                      check=False)
 
         # (rust_target, flutter_target, abi, ndk_script, jni_arch, cc_prefix)
@@ -3157,6 +3225,7 @@ class Build:
                 "    target.build_configurations.each do |config|\n"
                 "      config.build_settings['CLANG_ENABLE_EXPLICIT_MODULES'] = 'NO'\n"
                 "      config.build_settings['SWIFT_ENABLE_EXPLICIT_MODULES'] = 'NO'\n"
+                "      config.build_settings['MACOSX_DEPLOYMENT_TARGET'] = '12.0'\n"
                 "    end\n"
             )
             marker = "    flutter_additional_macos_build_settings(target)\n"
@@ -3164,7 +3233,7 @@ class Build:
                 content = content.replace(marker, marker + injection)
                 with open(podfile, "w") as f:
                     f.write(content)
-                self.log("  · patched Podfile: explicit modules disabled")
+                self.log("  · patched Podfile: explicit modules + deployment target 12.0")
         # -- 2. Patch Runner.xcodeproj --
         pbxproj = os.path.join(self.src_dir, "flutter", "macos",
                                "Runner.xcodeproj", "project.pbxproj")
@@ -3186,8 +3255,54 @@ class Build:
                 with open(pbxproj, "w") as f:
                     f.write(pbx)
                 self.log("  · patched Runner.xcodeproj: explicit modules disabled")
+        # -- 2b. Bump MACOSX_DEPLOYMENT_TARGET to 12.0 (Xcode 26+ minimum) --
+        self._patch_macos_deployment_target(podfile, pbxproj)
         # -- 3. Patch SqfliteImport.h in pub cache --
         self._patch_sqflite_import()
+
+    def _patch_macos_deployment_target(self, podfile, runner_pbxproj):
+        """Bump macOS deployment target from 10.13/10.14 to 12.0.
+
+        Xcode 26+ rejects targets below 12.0. RustDesk 1.4.9 pins 10.14
+        (FMDB pins 10.13); the new Xcode refuses to build either.
+        The post_install hook in the Podfile forces 12.0 on all pod
+        targets, since pod install regenerates Pods.xcodeproj and would
+        otherwise restore the old values from podspecs.
+        """
+        if os.path.isfile(podfile):
+            with open(podfile, "r") as f:
+                content = f.read()
+            new = content.replace("platform :osx, '10.14'",
+                                  "platform :osx, '12.0'")
+            # If the post_install hook already has explicit modules but
+            # not the deployment target line, add it.
+            if ("MACOSX_DEPLOYMENT_TARGET" not in new
+                    and "CLANG_ENABLE_EXPLICIT_MODULES" in new):
+                new = new.replace(
+                    "      config.build_settings['SWIFT_ENABLE_EXPLICIT_MODULES'] = 'NO'\n",
+                    "      config.build_settings['SWIFT_ENABLE_EXPLICIT_MODULES'] = 'NO'\n"
+                    "      config.build_settings['MACOSX_DEPLOYMENT_TARGET'] = '12.0'\n")
+            if new != content:
+                with open(podfile, "w") as f:
+                    f.write(new)
+                self.log("  · patched Podfile: deployment target -> 12.0")
+        # Runner.xcodeproj + Pods.xcodeproj: replace all 10.14 and 10.13
+        pods_pbxproj = os.path.join(self.src_dir, "flutter", "macos", "Pods",
+                                    "Pods.xcodeproj", "project.pbxproj")
+        for proj in (runner_pbxproj, pods_pbxproj):
+            if not os.path.isfile(proj):
+                continue
+            with open(proj, "r") as f:
+                pbx = f.read()
+            new = pbx.replace("MACOSX_DEPLOYMENT_TARGET = 10.14",
+                             "MACOSX_DEPLOYMENT_TARGET = 12.0")
+            new = new.replace("MACOSX_DEPLOYMENT_TARGET = 10.13",
+                              "MACOSX_DEPLOYMENT_TARGET = 12.0")
+            if new != pbx:
+                with open(proj, "w") as f:
+                    f.write(new)
+                label = os.path.basename(os.path.dirname(os.path.dirname(proj)))
+                self.log(f"  · patched {label}: deployment target -> 12.0")
 
     def _patch_sqflite_import(self):
         """Same as rustdesk-local-builder: `@import FMDB;` + explicit modules off.
@@ -3253,7 +3368,7 @@ class Build:
         host = self._host_rust_triple()
         cargo_dir = self._ensure_macos_cargo_dir()
         cargo_env = {
-            "MACOSX_DEPLOYMENT_TARGET": "10.14",
+            "MACOSX_DEPLOYMENT_TARGET": "12.0",
             "CARGO_INCREMENTAL": "0",
             "CARGO_TARGET_DIR": cargo_dir,
         }
@@ -3300,7 +3415,7 @@ class Build:
             "FLUTTER_XCODE_ARCHS": spec["flutter"],
             "FLUTTER_XCODE_ONLY_ACTIVE_ARCH":
                 "YES" if spec["only_active"] else "NO",
-            "MACOSX_DEPLOYMENT_TARGET": "10.14",
+            "MACOSX_DEPLOYMENT_TARGET": "12.0",
             # Flutter forwards FLUTTER_XCODE_* as xcodebuild settings.
             # Keep DerivedData in-tree (a symlink there makes Xcode 26
             # miss FlutterMacOS.framework). Only the Swift module cache

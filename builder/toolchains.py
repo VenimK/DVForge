@@ -38,7 +38,7 @@ import zipfile
 
 
 PINNED = {"flutter": "3.24.5", "llvm": "15.0.6", "ndk": "r28c",
-          "rust": "1.75", "vcpkg": "120deac3062162151622ca4860575a33844ba10b"}
+          "rust": "1.75", "vcpkg": "9e593bb18ea69cc5095e012465dcd675a822ed0d"}
 
 # rough download / on-disk footprint, shown in the UI so people know what a tool
 # costs before installing and what deleting it will free.

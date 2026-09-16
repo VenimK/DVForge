@@ -400,7 +400,10 @@
 
       <div class="build-bar">
         <label class="ver">RustDesk version
-          <input id="version" value="1.4.9" size="10">
+          <select id="version">
+            <option value="1.5.0">1.5.0 (latest, from master)</option>
+            <option value="1.4.9" selected>1.4.9 (stable)</option>
+          </select>
         </label>
         <span class="build-status" id="build-status">idle</span>
         <span class="build-timer" id="build-timer"></span>

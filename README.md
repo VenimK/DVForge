@@ -561,6 +561,8 @@ Two transports are supported:
 
 **Offline alerts:** pass `--notification-webhook <url>` (or `DVFORGE_WORKER_WEBHOOK`) to a worker and the queue will POST to that URL when the worker drops offline or recovers — useful for a Discord/Slack channel. See `farm/README.md` § 3d.
 
+**Version compatibility:** the build UI's version dropdown (1.4.9 stable / 1.5.0 latest) picks the matching vcpkg commit for each RustDesk release. Workers report their available versions to the queue, which skips workers that can't build the job's version — no more outdated workers failing builds before the rating system catches them. See `farm/README.md` § 3e.
+
 **Stopping :8765 / :8766:** `--with-app` / `--with-queue` intentionally leave those running after Ctrl+C so other machines keep claiming. Run `./farm/stop-farm.sh` (`farm\stop-farm.bat` on Windows) to stop both and clean up stale worker locks.
 
 > 🔒 **Security:** never expose port 8766 or DVForge's `:8765` to the public internet without nginx HTTPS + a token. Prefer blocking `/api/build/` on any public vhost and letting the queue be the only public entry. **One job = one OS.**
@@ -680,6 +682,7 @@ DVForge/
 | `GET /api/matrix` | Capability matrix (which targets are buildable) |
 | `GET /api/config` | Current `RustDesk.json` |
 | `GET /api/config/status` | Config validity / status |
+| `GET /api/versions` | Available RustDesk build versions (for the dropdown / farm workers) |
 | `GET /api/build/stream` | **SSE** — live build log |
 | `GET /api/build/status` | Current build state / result |
 | `GET /api/toolchains` | Toolchain list with sizes/versions |
@@ -862,7 +865,7 @@ RustDesk's printer DLL only runs for RustDesk-signed executables. Use the includ
 2. Android does **not** file-read `custom_.txt` — the config is embedded into `MainService.kt` + `native_model.dart` and bundled as a Flutter asset.
 3. Desktop builds are **host-locked**; Android is cross-platform.
 4. Windows host needs the **MSVC linker** (`link.exe`, via VS Build Tools) for *every* target including Android.
-5. Pinned versions: RustDesk `v1.4.9` · Rust `1.75` (macOS `1.81`) · Flutter `3.24.5` · LLVM `15.0.6` · NDK `r28c` · JDK `17` · flutter_rust_bridge_codegen `1.80.1` · vcpkg commit `120deac3062162151622ca4860575a33844ba10b`.
+5. Pinned versions: RustDesk `1.4.9`/`1.5.0` (version dropdown; each pins its own vcpkg commit) · Rust `1.75` (macOS `1.81`) · Flutter `3.24.5` · LLVM `15.0.6` · NDK `r28c` · JDK `17` · flutter_rust_bridge_codegen `1.80.1` · vcpkg `9e593bb` (1.5.0) / `120deac` (1.4.9).
 
 **Config file:** `configs/RustDesk.json` — see [Configuration reference](#-configuration-reference) for every field. Compiled-in vs runtime split documented there.
 

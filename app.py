@@ -355,7 +355,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/config/status":
             # Tells the UI whether a real RustDesk.json exists, or we're running
             # on the example fallback, plus exactly where to place the file.
-            return self._send_json(config_gen.config_status(CONFIG_PATH))        
+            return self._send_json(config_gen.config_status(CONFIG_PATH))
+        if path == "/api/versions":
+            return self._send_json({"versions": orchestrator.version_profiles()})
         if path == "/api/build/stream":
             return self._stream(SESSION)
         if path == "/api/build/status":
