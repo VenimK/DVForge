@@ -337,7 +337,9 @@ def start_build(url, job, timeout_sec=4 * 3600):
 
 def publish(job, result, d):
     jid = job.get("id") or os.path.splitext(job["_file"])[0]
-    out = os.path.join(d["outbox"], jid)
+    out_root = (os.path.join(d["outbox"], ".worker-staging")
+                if QUEUE_BASE else d["outbox"])
+    out = os.path.join(out_root, jid)
     os.makedirs(out, exist_ok=True)
     copied = []
     for art in result.get("artifacts") or []:
