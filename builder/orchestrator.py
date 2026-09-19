@@ -1228,9 +1228,24 @@ class Build:
         self.run(["flutter", "pub", "get"], cwd=flutter_dir, check=True)
         pkg_config = os.path.join(flutter_dir, ".dart_tool", "package_config.json")
         if not os.path.isfile(pkg_config):
+            # flutter pub get exited 0 but didn't create the package config.
+            # Run flutter doctor to help diagnose — common causes: broken
+            # Flutter install, missing Dart SDK, pub cache corruption,
+            # or an old Flutter that reports 3.24+ but has a broken pub.
+            self.log("  ! flutter pub get did not create package_config.json")
+            self.log("  · running flutter doctor for diagnostics …")
+            self.run(["flutter", "doctor", "-v"], cwd=flutter_dir, check=False)
             raise RuntimeError(
                 "flutter pub get did not create .dart_tool/package_config.json; "
-                "bridge codegen would emit dummy bindings")
+                "bridge codegen would emit dummy bindings.\n"
+                "Common causes:\n"
+                "  1. Flutter is broken or partially installed — reinstall "
+                f"Flutter {FLUTTER_VERSION} from the Toolchain tab.\n"
+                "  2. Pub cache is corrupted — run: flutter pub cache repair\n"
+                "  3. Network/proxy blocked pub.dev — check connectivity.\n"
+                "  4. Flutter version too old — ensure Dart >= 3.5.0 "
+                "(Flutter >= 3.24.5).\n"
+                "See flutter doctor output above for details.")
         codegen = shutil.which("flutter_rust_bridge_codegen", path=self._effective_path())
         if not codegen and not self.dry_run:
             raise RuntimeError(
