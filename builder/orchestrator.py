@@ -1228,11 +1228,14 @@ class Build:
         self.run(["flutter", "pub", "get"], cwd=flutter_dir, check=True)
         pkg_config = os.path.join(flutter_dir, ".dart_tool", "package_config.json")
         if not os.path.isfile(pkg_config):
+            self.log("  ! flutter pub get did not create package_config.json")
+            self.log("  · retrying dependency resolution with the selected Dart SDK …")
+            self.run(["dart", "pub", "get"], cwd=flutter_dir, check=False)
+        if not os.path.isfile(pkg_config):
             # flutter pub get exited 0 but didn't create the package config.
             # Run flutter doctor to help diagnose — common causes: broken
             # Flutter install, missing Dart SDK, pub cache corruption,
             # or an old Flutter that reports 3.24+ but has a broken pub.
-            self.log("  ! flutter pub get did not create package_config.json")
             self.log("  · running flutter doctor for diagnostics …")
             self.run(["flutter", "doctor", "-v"], cwd=flutter_dir, check=False)
             raise RuntimeError(
