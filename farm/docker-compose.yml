@@ -1,0 +1,14 @@
+services:
+  dvforge-queue:
+    build: .
+    container_name: dvforge-queue
+    restart: unless-stopped
+    ports:
+      - "8766:8766"
+    environment:
+      - DVFORGE_QUEUE_HOST=0.0.0.0
+      - DVFORGE_QUEUE_PORT=8766
+      # Optional: Uncomment and set a secure token if exposed on a network
+      # - DVFORGE_FARM_TOKEN=your-secret-token-here
+    volumes:
+      - ./farm_data:/app/farm
