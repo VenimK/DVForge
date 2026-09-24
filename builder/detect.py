@@ -186,7 +186,7 @@ TARGETS = [
      "note": "Portable, distro-independent."},
     {"id": "linux-aarch64-deb", "platform": "linux", "arch": "aarch64",
      "label": "Linux arm64 — .deb", "ext": "deb", "host_os": ["Linux"],
-     "note": "arm64 build. Native on an arm64 Linux host; needs flutter-elinux."},
+     "note": "arm64 build. Native on an arm64 Linux host; dispatched to a farm worker on x86_64."},
 
     # ---- Android (NDK) -> Linux or macOS ----
     # Windows is still blocked: MSYS2 Perl breaks openssl-sys. macOS uses the
@@ -253,9 +253,8 @@ def build_matrix(host=None, prereqs=None):
             rows.append(row)
             continue
 
-        # arm64 desktop cross note: buildable but slower / needs elinux unless host is arm64
-        if t["arch"] == "aarch64" and t["platform"] == "linux" and host_arch != "aarch64":
-            row["blocked_reason"] = "Cross-compiles from x86_64 via flutter-elinux (slower)."
+        # arm64 desktop Linux is farm-dispatched from x86_64 hosts; the local
+        # orchestrator does not cross-compile Flutter desktop Linux.
 
         # toolchain readiness
         needed = required_tools(t, host_os_name)

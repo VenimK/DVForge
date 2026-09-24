@@ -23,6 +23,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 import zipfile
 import platform as _platform
 
@@ -2378,6 +2379,14 @@ class Build:
         if wants_deb and not wants_rpm and not wants_appimage:
             self.run([self._py(), "build.py", "--flutter"],
                      cwd=self.src_dir, check=False)
+            # build.py packages the flutter bundle, so write custom_.txt next
+            # to the binary before the next collection step.
+            if not self.dry_run:
+                bundle = self._linux_bundle_dir()
+                if bundle:
+                    customize.write_custom_txt(bundle, env, log=self.log)
+                else:
+                    self.log("  ! flutter linux bundle not found — custom_.txt not staged")
         else:
             # Run cargo + flutter build without packaging, then package ourselves.
             self._build_linux_core()
@@ -4282,6 +4291,107 @@ class Build:
         self.artifacts.append(dest)
         self.log(f"  ✓ artifact: {dest}")
 
+    # -- farm dispatch ------------------------------------------------------
+    def _farm_only_targets(self):
+        """Return targets the local host cannot build and must hand to a farm worker."""
+        farm_targets = []
+        host_os = self.host.get("os")
+        host_arch = self.host.get("arch", "")
+        for tid in self.target_ids:
+            # Flutter desktop Linux arm64 cannot be cross-compiled locally.
+            if tid == "linux-aarch64-deb" and host_os == "Linux" and host_arch not in ("aarch64", "arm64"):
+                farm_targets.append(tid)
+        return farm_targets
+
+    def _farm_dir(self):
+        """Root of the farm shared folder."""
+        default = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "farm")
+        return os.environ.get("DVFORGE_FARM", default)
+
+    def _dispatch_to_farm(self, target_ids):
+        """Submit target(s) to the farm queue and wait for a worker to complete.
+
+        Uses the local shared farm/ folder (farm/inbox -> farm/outbox).
+        A farm worker on an arm64 Linux host will claim the job, run DVForge,
+        and write the finished artifacts to farm/outbox/<job-id>/.
+        """
+        if self.dry_run:
+            self.log(f"  (would dispatch {', '.join(target_ids)} to farm worker)")
+            return
+
+        farm = self._farm_dir()
+        inbox = os.path.join(farm, "inbox")
+        outbox = os.path.join(farm, "outbox")
+        if not os.path.isdir(inbox):
+            raise RuntimeError(
+                f"farm inbox not found: {inbox}\n"
+                "Set DVFORGE_FARM to the shared farm directory, or run a farm worker "
+                "that can build these targets.")
+
+        jid = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8]
+        job = {
+            "id": jid,
+            "version": self.version,
+            "targets": list(target_ids),
+            "dry_run": bool(self.dry_run),
+            "config": self.config,
+            "submitted": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        }
+        os.makedirs(inbox, exist_ok=True)
+        dest = os.path.join(inbox, jid + ".json")
+        tmp = dest + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(job, f, indent=2)
+            f.write("\n")
+        os.replace(tmp, dest)
+
+        self.log(f"\n=== Farm dispatch ===")
+        self.log(f"  queued job {jid} for {', '.join(target_ids)}")
+        self.log(f"  waiting for worker in {outbox}/{jid}/ …")
+
+        status_path = os.path.join(outbox, jid, "status.json")
+        failed_path = os.path.join(farm, "failed", jid + ".json")
+        deadline = time.time() + 4 * 3600  # 4 hours
+        poll_interval = 5
+        while time.time() < deadline:
+            self._check_cancel()
+            if os.path.isfile(status_path):
+                try:
+                    with open(status_path, encoding="utf-8") as f:
+                        status = json.load(f)
+                except Exception:
+                    time.sleep(poll_interval)
+                    continue
+                if status.get("ok"):
+                    copied = 0
+                    for art in status.get("artifacts") or []:
+                        art_path = os.path.join(outbox, jid, os.path.basename(art))
+                        if os.path.isfile(art_path):
+                            os.makedirs(self.out_dir, exist_ok=True)
+                            shutil.copy2(art_path, self.out_dir)
+                            dest_art = os.path.join(self.out_dir, os.path.basename(art_path))
+                            self.artifacts.append(dest_art)
+                            copied += 1
+                    self.log(f"  ✓ farm worker completed {jid} ({copied} artifacts)")
+                    return
+                error = status.get("error") or "unknown farm worker failure"
+                raise RuntimeError(f"farm worker failed {jid}: {error}")
+
+            if os.path.isfile(failed_path):
+                try:
+                    with open(failed_path, encoding="utf-8") as f:
+                        rec = json.load(f)
+                except Exception:
+                    rec = {}
+                error = rec.get("error") or "unknown farm worker failure"
+                raise RuntimeError(f"farm worker failed {jid}: {error}")
+
+            time.sleep(poll_interval)
+
+        raise RuntimeError(
+            f"timed out waiting for farm worker for {jid} "
+            f"(outbox={outbox}). Ensure an arm64 Linux worker is online.")
+
     # -- driver -------------------------------------------------------------
     def execute(self):
         start = time.time()
@@ -4300,16 +4410,28 @@ class Build:
             self._ensure_llvm()
             self.generate_bridge()
 
-            plats = self.platforms_needed()
-            dispatch = {
-                "windows": self.build_windows,
-                "linux": self.build_linux,
-                "android": self.build_android,
-                "macos": self.build_macos,
-            }
-            for p in plats:
-                self._check_cancel()
-                dispatch[p]()
+            # Targets the local host cannot build are handed to a farm worker.
+            farm_targets = self._farm_only_targets()
+            if farm_targets:
+                self._dispatch_to_farm(farm_targets)
+
+            # Run remaining targets locally.
+            original_target_ids = self.target_ids
+            farm_set = set(farm_targets)
+            self.target_ids = [t for t in original_target_ids if t not in farm_set]
+            try:
+                plats = self.platforms_needed()
+                dispatch = {
+                    "windows": self.build_windows,
+                    "linux": self.build_linux,
+                    "android": self.build_android,
+                    "macos": self.build_macos,
+                }
+                for p in plats:
+                    self._check_cancel()
+                    dispatch[p]()
+            finally:
+                self.target_ids = original_target_ids
 
             self._log_sccache_stats()
 
