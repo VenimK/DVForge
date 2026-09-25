@@ -29,6 +29,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -297,6 +298,7 @@ def write_progress(job, d, **extra):
         "worker": WORKER_NAME,
         "host": HOST,
         "targets": job.get("targets") or [],
+        "claim": job.get("_claim_token") or "",
         "updated": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
     if WEBHOOK:
@@ -328,10 +330,11 @@ def clear_progress(job, d):
         pass
 
 
-def wait_idle(url, timeout_sec=4 * 3600):
+def wait_idle(url, timeout_sec=4 * 3600, on_tick=None):
     """DVForge runs one build at a time. Wait out a UI/other job first."""
     deadline = time.time() + timeout_sec
     announced = False
+    last_tick = 0
     while time.time() < deadline:
         st = http_json(url + "/api/build/status")
         if not st.get("running"):
@@ -339,11 +342,17 @@ def wait_idle(url, timeout_sec=4 * 3600):
         if not announced:
             log("DVForge is already building — waiting for it to finish")
             announced = True
+        if on_tick and time.time() - last_tick >= 30:
+            try:
+                on_tick()
+            except Exception:
+                pass
+            last_tick = time.time()
         time.sleep(5)
     raise RuntimeError("timeout waiting for the current DVForge build to finish")
 
 
-def start_build(url, job, timeout_sec=4 * 3600):
+def start_build(url, job, timeout_sec=4 * 3600, on_wait=None):
     payload = {
         "version": job.get("version") or "1.4.9",
         "targets": job.get("targets"),
@@ -357,7 +366,8 @@ def start_build(url, job, timeout_sec=4 * 3600):
         msg = str(start.get("message") or start)
         if "already running" in msg.lower():
             log("build/start busy, retrying…")
-            wait_idle(url, max(30, deadline - time.time()))
+            wait_idle(url, max(30, deadline - time.time()),
+                      on_tick=on_wait)
             continue
         raise RuntimeError("build/start: %s" % msg)
     raise RuntimeError("build/start: still busy after waiting")
@@ -383,6 +393,7 @@ def publish(job, result, d):
         "host": HOST,
         "targets": job.get("targets"),
         "dry_run": bool(job.get("dry_run")),
+        "claim": job.get("_claim_token") or "",
         "seconds": result.get("seconds"),
         "artifacts": copied,
         "error": result.get("error") or result.get("message") or "",
@@ -398,7 +409,10 @@ def publish(job, result, d):
             try:
                 with open(path, "rb") as f:
                     raw = f.read()
-                url = QUEUE_BASE + "/artifact/" + jid + "?name=" + name
+                url = (QUEUE_BASE + "/artifact/" + jid +
+                       "?name=" + urllib.parse.quote(name) +
+                       "&worker=" + urllib.parse.quote(WORKER_NAME) +
+                       "&claim=" + urllib.parse.quote(job.get("_claim_token") or ""))
                 req = urllib.request.Request(
                     url, data=raw, method="POST",
                     headers=_qheaders({"Content-Type": "application/octet-stream"}))
@@ -409,12 +423,21 @@ def publish(job, result, d):
                 log("upload failed %s: %s" % (name, e))
         pub = dict(status)
         pub["artifacts"] = [os.path.basename(p) for p in copied]
-        try:
-            http_json(QUEUE_BASE + "/result/" + jid, data=pub,
-                      headers=_qheaders(), timeout=60)
-        except Exception as e:
-            upload_ok = False
-            log("result post failed: %s" % e)
+        if not upload_ok:
+            pub["ok"] = False
+            pub["error"] = (pub.get("error") or "artifact upload failed")
+        sent = False
+        for attempt in range(3):
+            try:
+                http_json(QUEUE_BASE + "/result/" + jid, data=pub,
+                          headers=_qheaders(), timeout=60)
+                sent = True
+                break
+            except Exception as e:
+                log("result post failed (attempt %s/3): %s" % (attempt + 1, e))
+                time.sleep(5)
+        if not sent:
+            raise RuntimeError("could not report result to queue")
         # Clean up the worker's staging outbox directory after successful upload
         if upload_ok:
             try:
@@ -435,6 +458,7 @@ def fail_job(job, d, err):
         "worker": WORKER_NAME,
         "error": str(err),
         "targets": job.get("targets"),
+        "claim": job.get("_claim_token") or "",
         "finished": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
     path = os.path.join(d["failed"], jid + ".json")
@@ -482,16 +506,19 @@ def run_job(job, url, d):
 
     # One compile at a time. Don't overwrite config while another build runs.
     timeout = 600 if job.get("dry_run") else 4 * 3600
-    write_progress(job, d, phase="waiting", elapsed_sec=0,
-                   note="Waiting for DVForge to become idle")
-    wait_idle(url, timeout)
+    def _waiting_tick():
+        write_progress(job, d, phase="waiting", elapsed_sec=0,
+                       note="Waiting for DVForge to become idle")
+
+    _waiting_tick()
+    wait_idle(url, timeout, on_tick=_waiting_tick)
 
     saved = http_json(url + "/api/config", data=cfg)
     if not saved.get("ok"):
         raise RuntimeError("could not save config: %s" % saved)
 
     try:
-        start_build(url, job, timeout)
+        start_build(url, job, timeout, on_wait=_waiting_tick)
         write_progress(job, d, phase="building", elapsed_sec=0, log_tail=[])
 
         def _tick(elapsed, st):
@@ -565,6 +592,7 @@ def check_and_fail_stale_jobs(farm, d):
                 # Check who claimed it
                 claimed_worker = (
                     prog.get("worker")
+                    or job_info.get("claimed_by")
                     or job_info.get("assign")
                     or job_info.get("waiting_for")
                 )
@@ -743,6 +771,7 @@ def loop(farm, url, once):
     log("api=%s  claiming %s" % (url, ", ".join(prefixes()) + "*"))
     fetch_versions(url)
     check_and_fail_stale_jobs(farm, d)
+    last_stale_check = time.time()
     idle = 0
     while True:
         try:
@@ -769,6 +798,9 @@ def loop(farm, url, once):
             log("waiting for inbox jobs…")
             # Refresh version list every ~60s (12 × 5s idle pings).
             fetch_versions(url)
+        if time.time() - last_stale_check >= 300:
+            check_and_fail_stale_jobs(farm, d)
+            last_stale_check = time.time()
         if once:
             log("no matching job")
             return

@@ -56,6 +56,7 @@ CLAIM = {
 }
 OS_LABEL = {"Darwin": "macos", "Windows": "windows", "Linux": "linux"}
 ONLINE_SEC = 300
+STALE_RUNNING_SEC = 15 * 60
 # Ban after this many attempts with zero successes, or this many fails in a row.
 BAN_AFTER_FAIL_ONLY = 2
 BAN_AFTER_STREAK = 5
@@ -232,6 +233,82 @@ def _better_idle_online(os_name, worker_name):
     return None
 
 
+def _write_json(path, obj):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, path)
+
+
+def _recover_stale_running(now=None):
+    """Requeue claims whose worker died before it could report progress."""
+    now = time.time() if now is None else now
+    try:
+        names = sorted(os.listdir(RUNNING))
+    except OSError:
+        return
+    for name in names:
+        if not name.endswith(".json") or name.endswith(".progress.json"):
+            continue
+        src = os.path.join(RUNNING, name)
+        jid = name[:-5]
+        if (os.path.isfile(os.path.join(OUTBOX, jid, "status.json")) or
+                os.path.isfile(os.path.join(FAILED, name))):
+            continue
+        progress = src[:-5] + ".progress.json"
+        try:
+            newest = os.path.getmtime(src)
+            if os.path.isfile(progress):
+                newest = max(newest, os.path.getmtime(progress))
+        except OSError:
+            continue
+        if now - newest < STALE_RUNNING_SEC:
+            continue
+        try:
+            with open(src, encoding="utf-8") as f:
+                job = json.load(f)
+        except Exception:
+            job = {}
+        for key in ("_file", "_claimed_by", "_claimed_at", "_claim_token"):
+            job.pop(key, None)
+        dest = os.path.join(INBOX, name)
+        try:
+            os.makedirs(INBOX, exist_ok=True)
+            _write_json(dest, job)
+            os.remove(src)
+            try:
+                os.remove(progress)
+            except OSError:
+                pass
+        except OSError:
+            continue
+
+
+def _running_claim(jid):
+    path = os.path.join(RUNNING, jid + ".json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _claim_matches(jid, worker="", token=""):
+    """True when this progress/result belongs to the current claim."""
+    job = _running_claim(jid)
+    if not isinstance(job, dict):
+        return False
+    expected_worker = job.get("_claimed_by") or ""
+    expected_token = job.get("_claim_token") or ""
+    if expected_token:
+        return token == expected_token and (
+            not expected_worker or worker == expected_worker)
+    # Legacy claims have no token; accept them only when the worker matches.
+    return not expected_worker or worker == expected_worker
+
+
 def claim_job(os_name, worker_name, android_on_mac=False, host_arch=""):
     """Rename inbox → running for the best job this worker may take.
 
@@ -244,6 +321,7 @@ def claim_job(os_name, worker_name, android_on_mac=False, host_arch=""):
     outdated workers from claiming jobs that need a newer vcpkg commit.
     Workers that didn't report `versions` are treated as compatible with all.
     """
+    _recover_stale_running()
     try:
         names = sorted(os.listdir(INBOX))
     except OSError:
@@ -284,6 +362,8 @@ def claim_job(os_name, worker_name, android_on_mac=False, host_arch=""):
             continue
         job["_file"] = name
         job["_claimed_by"] = worker_name
+        job["_claimed_at"] = time.time()
+        job["_claim_token"] = uuid.uuid4().hex
         _write_json(dest, job)
         return job
     return None
@@ -464,6 +544,7 @@ def _peek_job(path):
         "typical_sec": TYPICAL_SEC.get(t0, 20 * 60),
         "waiting_for": who,
         "assign": assign,
+        "claimed_by": job.get("_claimed_by") or "",
         "submitted": job.get("submitted") or "",
     }
 
@@ -1019,6 +1100,9 @@ class Handler(BaseHTTPRequestHandler):
                 prog = json.loads(self._body().decode("utf-8") or "{}")
             except Exception as e:
                 return self._send(400, {"error": str(e)})
+            if not _claim_matches(jid, prog.get("worker") or "",
+                                  prog.get("claim") or ""):
+                return self._send(409, {"error": "stale or unknown claim"})
             os.makedirs(RUNNING, exist_ok=True)
             dest = os.path.join(RUNNING, jid + ".progress.json")
             tmp = dest + ".tmp"
@@ -1039,6 +1123,9 @@ class Handler(BaseHTTPRequestHandler):
                 status = json.loads(self._body().decode("utf-8") or "{}")
             except Exception as e:
                 return self._send(400, {"error": str(e)})
+            if not _claim_matches(jid, status.get("worker") or "",
+                                  status.get("claim") or ""):
+                return self._send(409, {"error": "stale or unknown claim"})
             out = os.path.join(OUTBOX, jid)
             os.makedirs(out, exist_ok=True)
             with open(os.path.join(out, "status.json"), "w", encoding="utf-8") as f:
@@ -1072,6 +1159,9 @@ class Handler(BaseHTTPRequestHandler):
             name = os.path.basename((qs.get("name") or [""])[0])
             if not SAFE_ID.match(jid or "") or not name or name in (".", "..", "status.json"):
                 return self._send(400, {"error": "bad artifact path"})
+            if not _claim_matches(jid, (qs.get("worker") or [""])[0],
+                                  (qs.get("claim") or [""])[0]):
+                return self._send(409, {"error": "stale or unknown claim"})
             out = os.path.join(OUTBOX, jid)
             os.makedirs(out, exist_ok=True)
             dest = os.path.join(out, name)
