@@ -206,8 +206,8 @@ def reset_rating(worker_name):
     return rating_public(name)
 
 
-def _better_idle_online(os_name, worker_name):
-    """Name of a higher-rated idle worker of the same OS, else None."""
+def _better_idle_online(job, os_name, worker_name):
+    """Higher-rated idle worker eligible for this job, else None."""
     mine = rating_public(worker_name)["score"]
     now = time.time()
     with _LOCK:
@@ -216,7 +216,11 @@ def _better_idle_online(os_name, worker_name):
         name = (rec.get("name") or "").strip()
         if not name or name == worker_name:
             continue
-        if (rec.get("os") or "") != os_name:
+        rec_os = rec.get("os") or ""
+        if rec_os != os_name:
+            continue
+        if not _can_claim(job, rec_os, bool(rec.get("android")),
+                          rec.get("arch") or ""):
             continue
         last = float(rec.get("last_seen") or 0)
         if last <= 0 or (now - last) > ONLINE_SEC:
@@ -325,7 +329,6 @@ def claim_job(os_name, worker_name, android_on_mac=False, host_arch=""):
     except OSError:
         return None
     me_ok = rating_public(worker_name)["eligible"]
-    better = _better_idle_online(os_name, worker_name) if me_ok else None
     with _LOCK:
         my_versions = list(WORKERS.get(worker_name, {}).get("versions") or [])
     for name in names:
@@ -350,7 +353,7 @@ def claim_job(os_name, worker_name, android_on_mac=False, host_arch=""):
         else:
             if not me_ok:
                 continue
-            if better:
+            if _better_idle_online(job, os_name, worker_name):
                 continue
         os.makedirs(RUNNING, exist_ok=True)
         dest = os.path.join(RUNNING, name)
@@ -492,6 +495,7 @@ HINTS = {
     "android-arm64": "Usually 15–30 min on Mac/Linux with NDK already installed.",
     "android-universal": "Usually 40–70 min — every ABI.",
     "linux-x86_64-deb": "Usually 10–25 min on a warmed Linux box.",
+    "linux-aarch64-deb": "Usually 15–45 min; QEMU emulation can take much longer.",
     "linux-x86_64-rpm": "Usually 10–25 min (needs rpmbuild).",
     "linux-x86_64-appimage": "Usually 12–30 min.",
 }
@@ -506,6 +510,7 @@ TYPICAL_SEC = {
     "android-arm64": 20 * 60,
     "android-universal": 50 * 60,
     "linux-x86_64-deb": 15 * 60,
+    "linux-aarch64-deb": 30 * 60,
     "linux-x86_64-rpm": 15 * 60,
     "linux-x86_64-appimage": 18 * 60,
 }
@@ -623,7 +628,7 @@ def one_job(jid):
 
 
 def note_worker(os_name, worker_name, android=False, busy=None,
-                webhook=None, current_job=None, versions=None):
+                webhook=None, current_job=None, versions=None, arch=None):
     """Remember a /claim or /progress ping. In-memory; resets if queue.py restarts."""
     name = (worker_name or "").strip()
     if not name:
@@ -634,6 +639,8 @@ def note_worker(os_name, worker_name, android=False, busy=None,
         if os_name:
             rec["os"] = os_name
         rec["android"] = bool(android) or bool(rec.get("android"))
+        if arch is not None:
+            rec["arch"] = _norm_arch(arch)
         rec["last_seen"] = time.time()
         if busy is not None:
             rec["busy"] = bool(busy)
@@ -881,6 +888,7 @@ def farm_stats():
             "name": rec.get("name") or "",
             "os": rec.get("os") or "",
             "platform": plat,
+            "arch": _norm_arch(rec.get("arch") or ""),
             "claiming": rec.get("claiming") or list(CLAIM.get(rec.get("os") or "", ()) or ()),
             "android": bool(rec.get("android")),
             "last_seen_sec": age,
@@ -1085,7 +1093,7 @@ class Handler(BaseHTTPRequestHandler):
             note_worker(os_name, worker, android, busy=bool(job),
                         webhook=webhook,
                         current_job=(job.get("id") if job else None),
-                        versions=versions)
+                        versions=versions, arch=host_arch)
             if not job:
                 return self._send(200, {"ok": True, "job": None})
             return self._send(200, {"ok": True, "job": job})
@@ -1185,6 +1193,16 @@ class Handler(BaseHTTPRequestHandler):
         raw = self._body()
         try:
             job = parse_body(raw, qs)
+            assign = _job_assign(job)
+            if assign:
+                with _LOCK:
+                    rec = dict(WORKERS.get(assign) or {})
+                if (rec.get("os") and
+                        not _can_claim(job, rec.get("os"), bool(rec.get("android")),
+                                       rec.get("arch") or "")):
+                    raise ValueError(
+                        "assigned worker %s cannot build targets %s"
+                        % (assign, ", ".join(str(t) for t in job.get("targets") or [])))
             jid, dest = write_job(job)
         except ValueError as e:
             return self._send(400, {"error": str(e)})

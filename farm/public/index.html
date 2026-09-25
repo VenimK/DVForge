@@ -121,7 +121,8 @@ select:focus, input:focus { outline: none; border-color: var(--steel); }
         <option value="macos-arm64-dmg">macOS Apple Silicon — .dmg</option>
         <option value="macos-x86_64-dmg">macOS Intel — .dmg</option>
         <option value="android-arm64">Android — arm64 APK</option>
-        <option value="linux-x86_64-deb">Linux — .deb</option>
+        <option value="linux-x86_64-deb">Linux x86_64 — .deb</option>
+        <option value="linux-aarch64-deb">Linux ARM64 — .deb</option>
         <option value="linux-x86_64-rpm">Linux — .rpm</option>
         <option value="linux-x86_64-appimage">Linux — AppImage</option>
       </select>
@@ -398,17 +399,27 @@ function targetPlat(t) {
   if (t.indexOf("android") === 0) return "android";
   return "";
 }
-function workerFits(w, plat) {
+function normArch(a) {
+  a = (a || "").toLowerCase();
+  if (a === "amd64") return "x86_64";
+  if (a === "arm64") return "aarch64";
+  return a;
+}
+function workerFits(w, target) {
+  const plat = targetPlat(target);
   if (!plat) return true;
   if (plat === "android") return w.platform === "linux" || w.android;
-  return w.platform === plat;
+  if (w.platform !== plat) return false;
+  const arch = target.indexOf("linux-aarch64") === 0 ? "aarch64" :
+               target.indexOf("linux-x86_64") === 0 ? "x86_64" : "";
+  return !arch || normArch(w.arch) === arch;
 }
 function fillWorkers(stats) {
   const sel = $("#assign");
   if (!sel) return;
   const keep = sel.value;
-  const plat = targetPlat(document.querySelector("[name=targets]").value);
-  const list = (stats.workers || []).filter(w => w.name && workerFits(w, plat));
+  const target = document.querySelector("[name=targets]").value;
+  const list = (stats.workers || []).filter(w => w.name && workerFits(w, target));
   sel.innerHTML = "";
   const first = document.createElement("option");
   first.value = "";
@@ -417,7 +428,7 @@ function fillWorkers(stats) {
   list.forEach(w => {
     const o = document.createElement("option");
     o.value = w.name;
-    const bits = [w.name, (w.score_pct != null ? w.score_pct + "%" : "")];
+    const bits = [w.name, w.arch || "", (w.score_pct != null ? w.score_pct + "%" : "")];
     if (w.online) bits.push(w.busy ? "busy" : "online");
     else bits.push("offline");
     if (w.eligible === false) bits.push("blocked");

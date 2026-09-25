@@ -82,7 +82,6 @@ DEPS=(
     build-essential git python3 python3-pip python3-venv curl wget unzip zip tar
     pkg-config libssl-dev libsqlite3-dev libclang-dev
     cmake ninja-build file
-    lib32z1 lib32ncurses6 lib32stdc++6
     rpm imagemagick libarchive-tools
     # RustDesk linux vcpkg + desktop packaging deps
     nasm yasm
@@ -93,6 +92,12 @@ DEPS=(
     libva-dev patchelf
     libffi-dev potrace
 )
+
+for compat_pkg in lib32z1 lib32ncurses6 lib32stdc++6; do
+    if apt-cache show "$compat_pkg" >/dev/null 2>&1; then
+        DEPS+=("$compat_pkg")
+    fi
+done
 
 # Optional fuse package name differs across Debian/Ubuntu releases (Ubuntu 24.04+ / 26.04 uses libfuse2t64)
 for fuse_pkg in libfuse2t64 libfuse2; do
