@@ -81,16 +81,16 @@ class BuildSession:
                 self.subscribers.remove(q)
 
     def start(self, version, target_ids, config, dry_run=False):
-        if self.running:
-            return False, "a build is already running"
         with self.lock:
+            if self.running:
+                return False, "a build is already running"
             self.history = []
             self.result = None
-        self.build = orchestrator.Build(
-            version, target_ids, config, WORKSPACE,
-            log=self._emit, dry_run=dry_run,
-        )
-        self.running = True
+            self.build = orchestrator.Build(
+                version, target_ids, config, WORKSPACE,
+                log=self._emit, dry_run=dry_run,
+            )
+            self.running = True
 
         def _run():
             try:
@@ -143,13 +143,13 @@ class InstallSession:
         return self.running
 
     def start(self, ids):
-        if self.running:
-            return False, "an install is already running"
         with self.lock:
+            if self.running:
+                return False, "an install is already running"
             self.history = []
             self.result = None
-        self._cancel = False
-        self.running = True
+            self._cancel = False
+            self.running = True
 
         def _run():
             try:
@@ -222,12 +222,12 @@ class UpdateSession:
             return []
 
     def start(self, root, apply=False):
-        if self.running:
-            return False, "an update is already running"
         with self.lock:
+            if self.running:
+                return False, "an update is already running"
             self.history = []
             self.result = None
-        self.running = True
+            self.running = True
 
         def _run():
             import shutil as _shutil
@@ -447,7 +447,7 @@ class Handler(BaseHTTPRequestHandler):
             targets = data.get("targets", [])
             if not targets:
                 return self._send_json({"error": "no targets selected"}, 400)
-            version = data.get("version") or "latest"
+            version = data.get("version") or orchestrator.DEFAULT_VERSION
             dry = bool(data.get("dry_run", False))
             cfg = config_gen.load_config(CONFIG_PATH)
             ok, msg = SESSION.start(version, targets, cfg, dry_run=dry)
@@ -723,8 +723,13 @@ class Handler(BaseHTTPRequestHandler):
             path = "/index.html"
         # prevent path traversal
         safe = os.path.normpath(path).lstrip("/\\")
-        full = os.path.join(WEB_DIR, safe)
-        if not full.startswith(WEB_DIR) or not os.path.isfile(full):
+        full = os.path.realpath(os.path.join(WEB_DIR, safe))
+        web_root = os.path.realpath(WEB_DIR)
+        try:
+            inside = os.path.commonpath((web_root, full)) == web_root
+        except ValueError:
+            inside = False
+        if not inside or not os.path.isfile(full):
             self.send_error(404)
             return
         ext = os.path.splitext(full)[1]

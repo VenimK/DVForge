@@ -8,6 +8,7 @@ services:
     environment:
       - DVFORGE_QUEUE_HOST=0.0.0.0
       - DVFORGE_QUEUE_PORT=8766
+      - DVFORGE_FARM=/app/farm
       # Optional: Uncomment and set a secure token if exposed on a network
       # - DVFORGE_FARM_TOKEN=your-secret-token-here
     volumes:

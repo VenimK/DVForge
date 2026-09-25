@@ -278,14 +278,35 @@ class Build:
         except FileNotFoundError:
             exe = cmd if isinstance(cmd, str) else cmd[0]
             raise RuntimeError(f"could not launch '{exe}' — is it installed and on PATH?")
+        output = []
+
+        def _pump_output():
+            try:
+                for line in proc.stdout:
+                    output.append(line)
+            finally:
+                proc.stdout.close()
+
+        reader = threading.Thread(target=_pump_output, daemon=True)
+        reader.start()
         try:
-            for line in proc.stdout:
-                self.log(line.rstrip("\n"))
+            while proc.poll() is None:
+                while output:
+                    self.log(output.pop(0).rstrip("\n"))
                 if self.cancel_event.is_set():
                     proc.terminate()
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
                     raise BuildCancelled()
+                time.sleep(0.05)
+            reader.join(timeout=1)
+            while output:
+                self.log(output.pop(0).rstrip("\n"))
         finally:
-            proc.stdout.close()
+            if proc.poll() is None:
+                proc.kill()
         rc = proc.wait()
         if check and rc != 0:
             raise RuntimeError(f"command failed (exit {rc}): {pretty}")
@@ -2358,13 +2379,16 @@ class Build:
             os.environ["CXXFLAGS"] = (
                 (existing + " ") if existing else "") + "-include cstdint"
         self.log(f"  · CXXFLAGS={os.environ['CXXFLAGS']!r} (GCC 15+ compat)")
-        self.setup_vcpkg("x64-linux")
+        triplet = ("arm64-linux" if any(t.startswith("linux-aarch64")
+                                        for t in self.target_ids)
+                   else "x64-linux")
+        self.setup_vcpkg(triplet)
         self.customize_for("linux")
         # BINARY_NAME change poisons CMakeCache the same way Windows does.
         self._invalidate_stale_flutter_linux()
         # base64 custom_.txt staged for build.py + bundle (SKILL.md §4.4)
-        if not self.dry_run:
-            env = self._env()
+        env = self._env() if not self.dry_run else None
+        if env is not None:
             customize.write_custom_txt(self.src_dir, env, log=self.log)
         # build.py auto-detects distro and calls build_flutter_deb on
         # Debian/Ubuntu. That's fine for .deb targets, but for .rpm and
@@ -2395,7 +2419,7 @@ class Build:
             for arch in ("x64", "arm64"):
                 bundle = os.path.join(self.src_dir, "flutter", "build", "linux",
                                       arch, "release", "bundle")
-                if os.path.isdir(bundle):
+                if env is not None and os.path.isdir(bundle):
                     customize.write_custom_txt(bundle, env, log=self.log)
             # appimage-builder extracts from the .deb, so always build it
             # first when AppImage is requested.
@@ -4308,25 +4332,29 @@ class Build:
         default = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "farm")
         return os.environ.get("DVFORGE_FARM", default)
 
-    def _dispatch_to_farm(self, target_ids):
-        """Submit target(s) to the farm queue and wait for a worker to complete.
-
-        Uses the local shared farm/ folder (farm/inbox -> farm/outbox).
-        A farm worker on an arm64 Linux host will claim the job, run DVForge,
-        and write the finished artifacts to farm/outbox/<job-id>/.
-        """
+    def _queue_farm_job(self, target_ids):
+        """Submit target(s) to the farm queue and return (job id, farm dir)."""
+        if not target_ids:
+            return None
         if self.dry_run:
             self.log(f"  (would dispatch {', '.join(target_ids)} to farm worker)")
-            return
+            return None
 
         farm = self._farm_dir()
         inbox = os.path.join(farm, "inbox")
-        outbox = os.path.join(farm, "outbox")
         if not os.path.isdir(inbox):
             raise RuntimeError(
                 f"farm inbox not found: {inbox}\n"
                 "Set DVFORGE_FARM to the shared farm directory, or run a farm worker "
                 "that can build these targets.")
+
+        cfg = dict(self.config or {})
+        try:
+            from . import config_gen
+            packed = config_gen.pack_portable(
+                cfg, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        except Exception:
+            packed = []
 
         jid = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8]
         job = {
@@ -4334,9 +4362,11 @@ class Build:
             "version": self.version,
             "targets": list(target_ids),
             "dry_run": bool(self.dry_run),
-            "config": self.config,
+            "config": cfg,
             "submitted": time.strftime("%Y-%m-%dT%H:%M:%S"),
         }
+        if packed:
+            job["portable"] = packed
         os.makedirs(inbox, exist_ok=True)
         dest = os.path.join(inbox, jid + ".json")
         tmp = dest + ".tmp"
@@ -4347,8 +4377,12 @@ class Build:
 
         self.log(f"\n=== Farm dispatch ===")
         self.log(f"  queued job {jid} for {', '.join(target_ids)}")
-        self.log(f"  waiting for worker in {outbox}/{jid}/ …")
+        self.log(f"  waiting for worker in {os.path.join(farm, 'outbox')}/{jid}/ …")
+        return jid, farm
 
+    def _wait_for_farm_job(self, jid, farm):
+        """Wait for a queued farm job and copy its artifacts into out_dir."""
+        outbox = os.path.join(farm, "outbox")
         status_path = os.path.join(outbox, jid, "status.json")
         failed_path = os.path.join(farm, "failed", jid + ".json")
         deadline = time.time() + 4 * 3600  # 4 hours
@@ -4392,6 +4426,12 @@ class Build:
             f"timed out waiting for farm worker for {jid} "
             f"(outbox={outbox}). Ensure an arm64 Linux worker is online.")
 
+    def _dispatch_to_farm(self, target_ids):
+        """Submit farm job(s), wait for completion, and collect artifacts."""
+        pending = self._queue_farm_job(target_ids)
+        if pending:
+            self._wait_for_farm_job(*pending)
+
     # -- driver -------------------------------------------------------------
     def execute(self):
         start = time.time()
@@ -4403,35 +4443,38 @@ class Build:
             if self.dry_run:
                 self.log("** DRY RUN — commands are printed, nothing is executed **")
 
-            self._ensure_flutter()
-            self.checkout_source()
-            self._ensure_rust()
-            self._ensure_sccache()
-            self._ensure_llvm()
-            self.generate_bridge()
-
-            # Targets the local host cannot build are handed to a farm worker.
+            # Queue remote work first so it can run while local targets build.
             farm_targets = self._farm_only_targets()
-            if farm_targets:
-                self._dispatch_to_farm(farm_targets)
+            pending_farm = self._queue_farm_job(farm_targets)
 
-            # Run remaining targets locally.
+            # Run remaining targets locally. If everything went to the farm,
+            # this host does not need a RustDesk checkout or local toolchains.
             original_target_ids = self.target_ids
             farm_set = set(farm_targets)
             self.target_ids = [t for t in original_target_ids if t not in farm_set]
             try:
-                plats = self.platforms_needed()
-                dispatch = {
-                    "windows": self.build_windows,
-                    "linux": self.build_linux,
-                    "android": self.build_android,
-                    "macos": self.build_macos,
-                }
-                for p in plats:
-                    self._check_cancel()
-                    dispatch[p]()
+                if self.target_ids:
+                    self._ensure_flutter()
+                    self.checkout_source()
+                    self._ensure_rust()
+                    self._ensure_sccache()
+                    self._ensure_llvm()
+                    self.generate_bridge()
+                    plats = self.platforms_needed()
+                    dispatch = {
+                        "windows": self.build_windows,
+                        "linux": self.build_linux,
+                        "android": self.build_android,
+                        "macos": self.build_macos,
+                    }
+                    for p in plats:
+                        self._check_cancel()
+                        dispatch[p]()
             finally:
                 self.target_ids = original_target_ids
+
+            if pending_farm:
+                self._wait_for_farm_job(*pending_farm)
 
             self._log_sccache_stats()
 
@@ -4462,7 +4505,9 @@ def preflight(target_ids, prereqs_status, host=None):
         if host["os"] not in t["host_os"]:
             problems.append(f"{t['label']}: needs a {' or '.join(t['host_os'])} host")
             continue
-        for tool in detect.required_tools(t, host["os"]):
+        farm_dispatch = (tid == "linux-aarch64-deb" and host["os"] == "Linux"
+                         and host.get("arch") != "aarch64")
+        for tool in ([] if farm_dispatch else detect.required_tools(t, host["os"])):
             st = prereqs_status.get(tool)
             if not st or not st.get("present"):
                 problems.append(f"{t['label']}: missing {tool}")

@@ -36,6 +36,8 @@ DEFAULT_FARM = HERE
 DEFAULT_URL = os.environ.get("DVFORGE_URL", "http://127.0.0.1:8765")
 
 HOST = platform.system()  # Darwin | Windows | Linux
+HOST_ARCH = platform.machine().lower().replace("amd64", "x86_64")
+HOST_ARCH = "aarch64" if HOST_ARCH == "arm64" else HOST_ARCH
 WORKER_NAME = os.environ.get("DVFORGE_WORKER") or platform.node() or HOST
 
 # Target prefix this host will claim.
@@ -175,6 +177,7 @@ def fetch_versions(url):
 def claim_http():
     payload = {
         "os": HOST,
+        "arch": HOST_ARCH,
         "worker": WORKER_NAME,
         "android": CLAIM_ANDROID_ON_MAC,
         "versions": WORKER_VERSIONS,
@@ -197,12 +200,31 @@ def prefixes():
     return tuple(p)
 
 
+def _target_arch_ok(target):
+    if target.startswith("linux-aarch64"):
+        return HOST_ARCH == "aarch64"
+    if target.startswith("linux-x86_64"):
+        return HOST_ARCH == "x86_64"
+    if target.startswith("linux-armv7"):
+        return HOST_ARCH.startswith("armv7")
+    if target.startswith("macos-arm64"):
+        return HOST_ARCH == "aarch64"
+    if target.startswith("macos-x86_64"):
+        return HOST_ARCH == "x86_64"
+    if target.startswith("windows-x86_64"):
+        return HOST_ARCH == "x86_64"
+    return True
+
+
 def can_claim(job):
     targets = job.get("targets") or []
     if not targets:
         return False
     pref = prefixes()
-    return all(any(t.startswith(x) for x in pref) for t in targets)
+    return all(
+        any(str(t).startswith(x) for x in pref) and _target_arch_ok(str(t))
+        for t in targets
+    )
 
 
 def dirs(farm):
@@ -242,6 +264,12 @@ def claim_one(d):
             continue  # other worker got it
         job["_path"] = dest
         job["_file"] = name
+        job["_claimed_by"] = WORKER_NAME
+        tmp = dest + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(job, f, indent=2)
+            f.write("\n")
+        os.replace(tmp, dest)
         return job
     return None
 
@@ -462,39 +490,39 @@ def run_job(job, url, d):
     if not saved.get("ok"):
         raise RuntimeError("could not save config: %s" % saved)
 
-    start_build(url, job, timeout)
-    t0 = time.time()
-    write_progress(job, d, phase="building", elapsed_sec=0, log_tail=[])
+    try:
+        start_build(url, job, timeout)
+        write_progress(job, d, phase="building", elapsed_sec=0, log_tail=[])
 
-    def _tick(elapsed, st):
-        write_progress(
-            job, d,
-            phase="building",
-            elapsed_sec=int(elapsed),
-            log_tail=st.get("log_tail") or [],
-        )
+        def _tick(elapsed, st):
+            write_progress(
+                job, d,
+                phase="building",
+                elapsed_sec=int(elapsed),
+                log_tail=st.get("log_tail") or [],
+            )
 
-    result = wait_build(url, timeout, on_tick=_tick)
-    clear_progress(job, d)
-    if not result.get("ok"):
-        raise RuntimeError("build failed: %s" % result)
+        result = wait_build(url, timeout, on_tick=_tick)
+        clear_progress(job, d)
+        if not result.get("ok"):
+            raise RuntimeError("build failed: %s" % result)
 
-    status = publish(job, result, d)
-    src = job.get("_path")
-    if src and os.path.isfile(src):
-        try:
-            os.remove(src)
-        except OSError:
-            pass
-    log("done %s ok=%s files=%s" % (
-        jid, status["ok"], len(status["artifacts"])))
-
-    if prev and isinstance(prev, dict) and "appname" in prev:
-        try:
-            http_json(url + "/api/config", data=prev)
-        except Exception:
-            pass
-    return status
+        status = publish(job, result, d)
+        src = job.get("_path")
+        if src and os.path.isfile(src):
+            try:
+                os.remove(src)
+            except OSError:
+                pass
+        log("done %s ok=%s files=%s" % (
+            jid, status["ok"], len(status["artifacts"])))
+        return status
+    finally:
+        if isinstance(prev, dict) and prev:
+            try:
+                http_json(url + "/api/config", data=prev)
+            except Exception:
+                pass
 
 def check_and_fail_stale_jobs(farm, d):
     """Detect and fail jobs left in 'running' after an unexpected crash."""

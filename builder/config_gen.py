@@ -160,7 +160,7 @@ def _asset_stem(cfg):
     return name
 
 
-def _resolve_cfg_file(raw, root, kind=""):
+def _resolve_cfg_file(raw, root, kind="", allowed_roots=None):
     """Find a path key relative to *root* first (not the process cwd)."""
     raw = (raw or "").strip()
     if not raw:
@@ -175,17 +175,29 @@ def _resolve_cfg_file(raw, root, kind=""):
         candidates.append(os.path.join(branding, os.path.basename(raw)))
         for ext in (".png", ".svg", ".ico", ".jpg", ".jpeg"):
             candidates.append(os.path.join(branding, kind + ext))
+    allowed = None
+    if allowed_roots is not None:
+        allowed = [os.path.realpath(p) for p in allowed_roots]
     seen = set()
     for c in candidates:
         if not c or c in seen:
             continue
         seen.add(c)
-        if os.path.isfile(c):
-            return os.path.abspath(c)
+        real = os.path.realpath(c)
+        if allowed is not None:
+            def _inside(root_dir):
+                try:
+                    return os.path.commonpath((real, root_dir)) == root_dir
+                except ValueError:
+                    return False
+            if not any(_inside(root_dir) for root_dir in allowed):
+                continue
+        if os.path.isfile(real):
+            return os.path.abspath(real)
     return ""
 
 
-def pack_portable(cfg, root=None):
+def pack_portable(cfg, root=None, allowed_roots=None):
     """Embed icon/logo/signing file bytes into cfg[*base64]. Mutates cfg.
 
     Skips a key when a blob is already present. Returns list of packed keys.
@@ -200,7 +212,8 @@ def pack_portable(cfg, root=None):
             packed.append(path_key)
             continue
         kind_hint = kind if kind in ("icon", "logo") else ""
-        fp = _resolve_cfg_file(cfg.get(path_key) or "", root, kind_hint)
+        fp = _resolve_cfg_file(cfg.get(path_key) or "", root, kind_hint,
+                               allowed_roots=allowed_roots)
         if not fp:
             continue
         try:

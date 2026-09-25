@@ -46,7 +46,7 @@ INBOX = os.path.join(FARM, "inbox")
 OUTBOX = os.path.join(FARM, "outbox")
 FAILED = os.path.join(FARM, "failed")
 RUNNING = os.path.join(FARM, "running")
-SAFE_ID = re.compile(r"^[A-Za-z0-9._-]+$")
+SAFE_ID = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
 
 # Same prefixes as worker.py — HTTP workers claim through /claim instead of NFS.
 CLAIM = {
@@ -80,14 +80,40 @@ def _prefixes(os_name, android_on_mac=False):
     return tuple(p)
 
 
-def _can_claim(job, os_name, android_on_mac=False):
+def _norm_arch(arch):
+    a = (arch or "").lower().replace("amd64", "x86_64")
+    return "aarch64" if a == "arm64" else a
+
+
+def _target_arch_ok(target, host_arch):
+    arch = _norm_arch(host_arch)
+    if target.startswith("linux-aarch64"):
+        return arch == "aarch64"
+    if target.startswith("linux-x86_64"):
+        return arch == "x86_64"
+    if target.startswith("linux-armv7"):
+        return arch.startswith("armv7")
+    if target.startswith("macos-arm64"):
+        return arch == "aarch64"
+    if target.startswith("macos-x86_64"):
+        return arch == "x86_64"
+    if target.startswith("windows-x86_64"):
+        return arch == "x86_64"
+    return True
+
+
+def _can_claim(job, os_name, android_on_mac=False, host_arch=""):
     targets = job.get("targets") or []
     if not targets:
         return False
     pref = _prefixes(os_name, android_on_mac)
     if not pref:
         return False
-    return all(any(str(t).startswith(x) for x in pref) for t in targets)
+    return all(
+        any(str(t).startswith(x) for x in pref) and
+        _target_arch_ok(str(t), host_arch)
+        for t in targets
+    )
 
 
 def _job_assign(job):
@@ -206,7 +232,7 @@ def _better_idle_online(os_name, worker_name):
     return None
 
 
-def claim_job(os_name, worker_name, android_on_mac=False):
+def claim_job(os_name, worker_name, android_on_mac=False, host_arch=""):
     """Rename inbox → running for the best job this worker may take.
 
     Unassigned jobs: blocked workers are skipped; if a higher-rated idle
@@ -235,7 +261,7 @@ def claim_job(os_name, worker_name, android_on_mac=False):
                 job = json.load(f)
         except Exception:
             continue
-        if not _can_claim(job, os_name, android_on_mac):
+        if not _can_claim(job, os_name, android_on_mac, host_arch):
             continue
         # Version gate: skip jobs whose RustDesk version this worker can't build.
         job_ver = (job.get("version") or "1.4.9").lstrip("v")
@@ -258,6 +284,7 @@ def claim_job(os_name, worker_name, android_on_mac=False):
             continue
         job["_file"] = name
         job["_claimed_by"] = worker_name
+        _write_json(dest, job)
         return job
     return None
 
@@ -272,7 +299,11 @@ def _pack_job_config(job):
         if root not in sys.path:
             sys.path.insert(0, root)
         from builder import config_gen
-        packed = config_gen.pack_portable(cfg, root)
+        allowed = (
+            os.path.join(root, "workspace", "branding"),
+            os.path.join(root, "workspace", "signing"),
+        )
+        packed = config_gen.pack_portable(cfg, root, allowed_roots=allowed)
         job["config"] = cfg
         if packed:
             job["portable"] = packed
@@ -283,6 +314,8 @@ def _pack_job_config(job):
 def write_job(job):
     os.makedirs(INBOX, exist_ok=True)
     jid = (job.get("id") or "").strip() or _jid()
+    if not SAFE_ID.match(jid):
+        raise ValueError("invalid job id")
     job["id"] = jid
     job.setdefault("submitted", time.strftime("%Y-%m-%dT%H:%M:%S"))
     _pack_job_config(job)
@@ -968,7 +1001,8 @@ class Handler(BaseHTTPRequestHandler):
             android = bool(data.get("android"))
             webhook = data.get("webhook") or ""
             versions = data.get("versions") or []
-            job = claim_job(os_name, worker, android)
+            host_arch = data.get("arch") or ""
+            job = claim_job(os_name, worker, android, host_arch)
             note_worker(os_name, worker, android, busy=bool(job),
                         webhook=webhook,
                         current_job=(job.get("id") if job else None),
