@@ -208,12 +208,10 @@ def _target_arch_ok(target):
         return HOST_ARCH == "x86_64"
     if target.startswith("linux-armv7"):
         return HOST_ARCH.startswith("armv7")
-    if target.startswith("macos-arm64"):
-        return HOST_ARCH == "aarch64"
-    if target.startswith("macos-x86_64"):
-        return HOST_ARCH == "x86_64"
-    if target.startswith("windows-x86_64"):
-        return HOST_ARCH == "x86_64"
+    if target.startswith("macos-"):
+        return True
+    if target.startswith("windows-"):
+        return True
     return True
 
 
