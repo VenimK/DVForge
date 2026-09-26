@@ -2437,13 +2437,12 @@ class Build:
                  cwd=flutter_dir, check=False)
 
     def _linux_bundle_dir(self):
-        """Find the flutter linux bundle directory."""
-        for arch in ("x64", "arm64"):
-            b = os.path.join(self.src_dir, "flutter", "build", "linux",
-                             arch, "release", "bundle")
-            if os.path.isdir(b):
-                return b
-        return None
+        """Return the Flutter bundle for the requested Linux architecture."""
+        arch = ("arm64" if any(t.startswith("linux-aarch64")
+                              for t in self.target_ids) else "x64")
+        bundle = os.path.join(self.src_dir, "flutter", "build", "linux",
+                              arch, "release", "bundle")
+        return bundle if os.path.isdir(bundle) else None
 
     def _package_linux_deb(self):
         """Package the flutter bundle into a .deb using build.py's logic."""
@@ -2460,8 +2459,28 @@ class Build:
                 self.log("  · patched build.py Linux bundle path: x64 -> arm64")
         # Delegate to build.py with --skip-cargo; the native library and Flutter
         # bundle are already built and custom_.txt is staged in that bundle.
+        deb_arch = ("arm64" if any(t.startswith("linux-aarch64")
+                                  for t in self.target_ids) else "amd64")
         self.run([self._py(), "build.py", "--flutter", "--skip-cargo"],
-                 cwd=self.src_dir, check=False)
+                 cwd=self.src_dir, env={"DEB_ARCH": deb_arch})
+        if self.dry_run:
+            return
+        deb_path = os.path.join(self.src_dir, f"rustdesk-{self.version}.deb")
+        if not os.path.isfile(deb_path):
+            raise RuntimeError("Linux .deb packaging did not produce an artifact")
+        bundle = self._linux_bundle_dir()
+        if bundle and os.path.isfile(os.path.join(bundle, "custom_.txt")):
+            listing = subprocess.check_output(
+                ["dpkg-deb", "--contents", deb_path],
+                encoding="utf-8", errors="replace")
+            if "custom_.txt" not in listing:
+                raise RuntimeError("Linux .deb is missing custom_.txt")
+        actual_arch = subprocess.check_output(
+            ["dpkg-deb", "--field", deb_path, "Architecture"],
+            encoding="utf-8", errors="replace").strip()
+        if actual_arch != deb_arch:
+            raise RuntimeError(
+                f"Linux .deb architecture is {actual_arch}, expected {deb_arch}")
 
     def _output_basename(self):
         """The custom file name for output artifacts (e.g. 'myapp-1.4.9').
