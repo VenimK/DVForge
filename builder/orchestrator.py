@@ -2454,9 +2454,24 @@ class Build:
             old = "build/linux/x64/release/bundle/"
             new = "build/linux/arm64/release/bundle/"
             if old in text:
-                with open(build_py, "w", encoding="utf-8", errors="surrogateescape") as f:
-                    f.write(text.replace(old, new, 1))
+                text = text.replace(old, new, 1)
                 self.log("  · patched build.py Linux bundle path: x64 -> arm64")
+            with open(build_py, "w", encoding="utf-8", errors="surrogateescape") as f:
+                f.write(text)
+        with open(build_py, "r", encoding="utf-8", errors="surrogateescape") as f:
+            text = f.read()
+        copy_bundle = ("    system2(\n"
+                       "        f'cp -r {flutter_build_dir}/* "
+                       "tmpdeb/usr/share/rustdesk/')")
+        copy_custom = ("    system2('cp ../custom_.txt "
+                       "tmpdeb/usr/share/rustdesk/custom_.txt')")
+        if copy_custom not in text:
+            if copy_bundle not in text:
+                raise RuntimeError("could not patch build.py to package custom_.txt")
+            text = text.replace(copy_bundle, copy_bundle + "\n" + copy_custom, 1)
+            with open(build_py, "w", encoding="utf-8", errors="surrogateescape") as f:
+                f.write(text)
+            self.log("  · patched build.py to package custom_.txt")
         # Delegate to build.py with --skip-cargo; the native library and Flutter
         # bundle are already built and custom_.txt is staged in that bundle.
         deb_arch = ("arm64" if any(t.startswith("linux-aarch64")
