@@ -1301,6 +1301,8 @@ def install_one(tid, root, log, cancelled=lambda: False):
                 _run_rustup(["toolchain", "install", pin, "--profile", "minimal"],
                             check=False)
                 _run_rustup(["default", pin], check=False)
+                _run_rustup(["component", "add", "rustfmt",
+                             "--toolchain", pin], check=False)
             log(f"  ✓ Rust ready; cargo bin: {cargo_bin}")
             return {"tool": tid, "home": "", "env": {"vars": {}, "path": [cargo_bin]}}
 
@@ -1323,8 +1325,11 @@ def install_one(tid, root, log, cancelled=lambda: False):
             if rc != 0:
                 raise RuntimeError("rustup-init failed")
         rustup = os.path.join(cargo_bin, "rustup" + (".exe" if WIN else ""))
-        if WIN and os.path.isfile(rustup):
-            subprocess.call([rustup, "default", win_msvc])
+        if os.path.isfile(rustup):
+            if WIN:
+                subprocess.call([rustup, "default", win_msvc])
+            subprocess.call([rustup, "component", "add", "rustfmt",
+                             "--toolchain", win_msvc if WIN else pin])
         log(f"  ✓ Rust installed; cargo bin: {cargo_bin}")
         return {"tool": tid, "home": "", "env": {"vars": {}, "path": [cargo_bin]}}
 

@@ -784,6 +784,10 @@ class Build:
         # where rustup default failed for a bad triple and we stayed on another
         # toolchain).
         self.run(["rustup", "component", "add", "rustfmt"], check=False)
+        if not self.dry_run and not shutil.which("rustfmt", path=self._effective_path()):
+            raise RuntimeError(
+                "rustfmt is required by flutter_rust_bridge_codegen but is not "
+                f"installed for Rust {toolchain}. Run: rustup component add rustfmt")
 
     def _ensure_macos_sdk(self):
         """Point bindgen/libclang at the Apple SDK so system headers resolve.
@@ -1275,6 +1279,10 @@ class Build:
         if not codegen and not self.dry_run:
             raise RuntimeError(
                 "flutter_rust_bridge_codegen not found after cargo install")
+        if not self.dry_run and not shutil.which("dart", path=self._effective_path()):
+            raise RuntimeError(
+                "dart not found on PATH; flutter_rust_bridge_codegen needs it "
+                "to run build_runner and format generated Dart code")
         cmd = [codegen or "flutter_rust_bridge_codegen",
                "--rust-input", "./src/flutter_ffi.rs",
                "--dart-output", "./flutter/lib/generated_bridge.dart",
@@ -2398,37 +2406,21 @@ class Build:
                         for t in linux_targets)
         wants_rpm = "linux-x86_64-rpm" in linux_targets
         wants_appimage = "linux-x86_64-appimage" in linux_targets
-        # If only .deb is requested, let build.py do its default thing.
-        # Otherwise, skip build.py's packaging and do it ourselves.
-        if wants_deb and not wants_rpm and not wants_appimage:
-            self.run([self._py(), "build.py", "--flutter"],
-                     cwd=self.src_dir, check=False)
-            # build.py packages the flutter bundle, so write custom_.txt next
-            # to the binary before the next collection step.
-            if not self.dry_run:
-                bundle = self._linux_bundle_dir()
-                if bundle:
-                    customize.write_custom_txt(bundle, env, log=self.log)
-                else:
-                    self.log("  ! flutter linux bundle not found — custom_.txt not staged")
-        else:
-            # Run cargo + flutter build without packaging, then package ourselves.
-            self._build_linux_core()
-            # Write custom_.txt into the flutter bundle BEFORE packaging,
-            # since rpm/Arch specs copy from the bundle directory.
-            for arch in ("x64", "arm64"):
-                bundle = os.path.join(self.src_dir, "flutter", "build", "linux",
-                                      arch, "release", "bundle")
-                if env is not None and os.path.isdir(bundle):
-                    customize.write_custom_txt(bundle, env, log=self.log)
-            # appimage-builder extracts from the .deb, so always build it
-            # first when AppImage is requested.
-            if wants_deb or wants_appimage:
-                self._package_linux_deb()
-            if wants_rpm:
-                self._package_linux_rpm()
-            if wants_appimage:
-                self._package_linux_appimage()
+        self._build_linux_core()
+        # Write custom_.txt into the flutter bundle BEFORE packaging. The .deb
+        # copies this bundle, and appimage-builder subsequently extracts the .deb.
+        bundle = self._linux_bundle_dir()
+        if env is not None and bundle:
+            customize.write_custom_txt(bundle, env, log=self.log)
+        elif env is not None and not self.dry_run:
+            self.log("  ! flutter linux bundle not found — custom_.txt not staged")
+        # appimage-builder extracts from the .deb, so always build it first.
+        if wants_deb or wants_appimage:
+            self._package_linux_deb()
+        if wants_rpm:
+            self._package_linux_rpm()
+        if wants_appimage:
+            self._package_linux_appimage()
         self._collect(self.src_dir, (".deb", ".rpm", ".AppImage", ".flatpak",
                                      ".pkg.tar.zst"), "linux")
 
@@ -2456,8 +2448,18 @@ class Build:
     def _package_linux_deb(self):
         """Package the flutter bundle into a .deb using build.py's logic."""
         self.log("  · packaging .deb")
-        # Delegate to build.py's build_flutter_deb by running build.py
-        # with --skip-cargo (we already built the lib in _build_linux_core).
+        build_py = os.path.join(self.src_dir, "build.py")
+        if any(t.startswith("linux-aarch64") for t in self.target_ids):
+            with open(build_py, "r", encoding="utf-8", errors="surrogateescape") as f:
+                text = f.read()
+            old = "build/linux/x64/release/bundle/"
+            new = "build/linux/arm64/release/bundle/"
+            if old in text:
+                with open(build_py, "w", encoding="utf-8", errors="surrogateescape") as f:
+                    f.write(text.replace(old, new, 1))
+                self.log("  · patched build.py Linux bundle path: x64 -> arm64")
+        # Delegate to build.py with --skip-cargo; the native library and Flutter
+        # bundle are already built and custom_.txt is staged in that bundle.
         self.run([self._py(), "build.py", "--flutter", "--skip-cargo"],
                  cwd=self.src_dir, check=False)
 

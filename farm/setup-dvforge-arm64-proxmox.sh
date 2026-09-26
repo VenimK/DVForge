@@ -362,7 +362,9 @@ exec /opt/flutter-elinux/bin/flutter-elinux "$@"
 FLUTTER_WRAPPER
 
 chmod +x /usr/local/bin/flutter
+ln -sf /opt/flutter-elinux/flutter/bin/dart /usr/local/bin/dart
 flutter --version
+dart --version
 ARM_FLUTTER
 
 log "Creating worker launcher"
