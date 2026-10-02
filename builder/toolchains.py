@@ -256,7 +256,6 @@ TOOLS = {
         "packages": {
             "macOS":   ("brew", ["install", "potrace"]),
             "Linux":   ("sudo", ["apt", "install", "-y", "potrace"]),
-            "Windows": ("choco", ["install", "-y", "potrace"]),
         },
     },
 }

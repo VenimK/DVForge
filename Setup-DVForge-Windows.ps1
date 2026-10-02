@@ -35,7 +35,7 @@
   Skip the large (~4-6 GB) Visual Studio Build Tools install.
 
 .PARAMETER SkipOptional
-  Skip sccache, ImageMagick, potrace (still installs core Windows build tools).
+  Skip sccache and ImageMagick (still installs core Windows build tools).
 
 .PARAMETER WithJava
   Also install Temurin JDK 17 into .toolchains (only needed for Android-on-Windows).

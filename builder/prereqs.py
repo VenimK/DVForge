@@ -956,7 +956,7 @@ def _install_hint(tool):
             "macOS": "Comes with Xcode command-line tools: xcode-select --install",
         },
         "potrace": {
-            "Windows": "Download from https://potrace.sourceforge.net/#downloading",
+            "Windows": "Optional and not used on Windows; DVForge uses the PNG logo fallback.",
             "Linux": "sudo apt install potrace",
             "macOS": "brew install potrace",
         },
