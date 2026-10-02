@@ -4184,7 +4184,9 @@ class Build:
         if not create_dmg:
             self.log("  ! create-dmg not found — skipping DMG creation")
             return
-        version = self.config.get("version", "") or self.version
+        # The selected RustDesk build version wins; the config file's "version"
+        # field is the app-release string rdgen writes and can be stale.
+        version = self.version or self.config.get("version", "")
         basename = self._output_basename()
         parts = [basename]
         if version:
