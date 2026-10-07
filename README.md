@@ -10,7 +10,7 @@
 
 # DVForge
 
-### Build your own branded RustDesk client on **your** computer — server, key, password, and permissions baked in. **No GitHub. No cloud CI. No pip installs.**
+### Build your own branded RustDesk client on **your** computer — server, key, password, and permissions baked in. **No cloud CI required. Python standard-library web app.**
 
 <p>
 Open a local page in the browser &nbsp;→&nbsp; pick a target &nbsp;→&nbsp; hit build.<br/>
@@ -38,7 +38,7 @@ The finished installer lands in <code>workspace/output/</code>.
 
 ## 📄 One-paragraph summary
 
-**DVForge** is a tiny, zero-dependency (Python standard-library only) local web app that compiles a **customized [RustDesk](https://github.com/rustdesk/rustdesk) remote-desktop client** on your own machine. You point it at your self-hosted RustDesk server, set an app name, icon, baked-in password and permission set, pick a target platform, and it produces a ready-to-distribute installer — a Windows `.exe`/`.msi`, a macOS `.dmg`, Linux `.deb`/`.rpm`/`.AppImage`, or an Android `.apk`. It performs the exact same source customizations a GitHub Actions pipeline would, but everything runs offline on `127.0.0.1`, and the heavy build toolchains (Flutter, Rust, NDK, JDK, …) install into a private, project-local `.toolchains/` folder — **nothing touches your system**.
+**DVForge** is a Python standard-library local web app that compiles a **customized [RustDesk](https://github.com/rustdesk/rustdesk) remote-desktop client** on your own machine. Configure your self-hosted server, branding, password and permissions, then select a supported target to produce a Windows `.exe`/`.msi`, macOS `.dmg`, Linux `.deb`/`.rpm`/`.AppImage`, or Android `.apk`. The interface binds to `127.0.0.1`; toolchain downloads, source checkout and dependency resolution still require network access. Portable SDKs use `.toolchains/`, while explicitly enabled installation may install system packages and request administrator approval.
 
 > **New here? Jump to → [Quick Start](#-quick-start-90-seconds) · [How it works](#-how-it-works) · [FAQ](#-faq) · [Troubleshooting](#-troubleshooting)**
 >
@@ -54,6 +54,7 @@ The finished installer lands in <code>workspace/output/</code>.
 - [Screenshots](#-screenshots)
 - [Why DVForge?](#-why-dvforge)
 - [Feature highlights](#-feature-highlights)
+- [Reliability and wizard improvements](#reliability-and-wizard-improvements)
 - [Quick start (90 seconds)](#-quick-start-90-seconds)
 - [How it works](#-how-it-works)
   - [The three jobs](#the-three-jobs)
@@ -123,7 +124,7 @@ RustDesk is fantastic, but distributing a client that already knows *your* serve
 | Push to GitHub, wait for Actions | Click **Build**, watch the log stream live |
 | Secrets live in the cloud | Everything stays on `127.0.0.1` |
 | One workflow file per platform | One folder, one UI, every platform |
-| System-wide SDK installs | Portable `.toolchains/` — nothing system-wide |
+| System-wide SDK installs | Portable `.toolchains/` where supported; explicit system-package installation |
 | `pip install` a wall of deps | **Zero** pip dependencies (stdlib only) |
 | Opaque runner logs | Full command visibility + **dry-run preview** |
 
@@ -143,10 +144,59 @@ It's built for **people who self-host RustDesk** and want a client that already 
 - 📱 **Android from Linux/macOS** — cross-compile every ABI (`arm64-v8a`, `armeabi-v7a`, `x86_64`, or a universal APK).
 - ✍️ **Code signing** — Windows Authenticode (PFX + timestamp), Android keystore, macOS Developer ID / notarization / self-signed `.p12`. Or generate a self-signed cert from the UI for local tests.
 - 🕵️ **Dry-run / Preview plan** — print every command that *would* run, without compiling. See the whole plan first.
-- 📡 **Live streaming logs** — build output streams to the browser over Server-Sent Events; refresh-safe (logs replay).
+- 📡 **Live streaming logs** — SSE output, optional **Show log**, severity filters, and full-log copying even while the log is hidden. Reconnecting an open build stream replays its history; a fresh page does not automatically resume the entire wizard/session display.
 - 🌐 **Optional build farm** — offload each OS's build to a machine that can actually do it (a Mac builds DMGs, a Windows box builds EXEs), over a shared folder *or* a small HTTP queue.
 - 🖨️ **Open printer adapter** — an included Rust crate that restores remote printing in custom builds (RustDesk's stock printer DLL refuses to run for non-RustDesk-signed executables).
 - 🧹 **Clean uninstall** — dedicated uninstall/clean scripts per OS; your config and branding are preserved by default.
+
+---
+
+## Reliability and wizard improvements
+
+This contribution branch adds the following general-purpose changes. Customer
+profiles, private branding, server-policy patches and credentials are not included.
+
+- **Five-step wizard:** Environment, Config, Targets, Review and Build, with fixed
+  footer navigation and a preflight/output summary before starting compilation.
+- **Dependency preparation:** selected-target requirements, explicit automatic
+  installation and post-install checks. On Linux, password-required installation
+  tries Polkit; without an authentication agent it opens a local terminal for sudo.
+  Passwords never go through the browser or build log. The terminal fallback needs
+  a logged-in Linux desktop session, not an SSH session without a display.
+- **Sidebar installer race fixed:** late installer metadata refreshes prerequisite
+  rows, so per-tool installation and the bulk install button do not disappear
+  depending on which API response finishes first.
+- **Optional log and filters:** all output, errors, warnings, combined diagnostics,
+  or normal output excluding errors/warnings. Counts remain visible with the log hidden.
+- **Progress:** current-command progress where tools report counts/percentages,
+  overall completed-phase percentage, elapsed time and approximate ETA. Unknown
+  command progress is indeterminate. Phase completion is not a time-weighted
+  completion percentage, and ETA can vary significantly between phases.
+- **Bridge/pub safety:** failed dependency resolution stops codegen; package-config
+  JSON and local package roots are validated before reuse. Dry runs do not expect
+  files from commands that were never executed.
+- **Retry and artifact safety:** preserve compatible caches, stop on critical native
+  or packaging failures, reject missing/stale/wrong-architecture packages, and
+  separate outputs by OS, version and architecture.
+- **Existing farm hardening:** stricter transport/result checks; this is not a new
+  generic authenticated worker controller.
+
+**Verification:** the sanitized public copy passes 37 Python regression tests and
+mocked desktop/mobile wizard tests, including delayed installer metadata. Real
+local RustDesk 1.4.9 runs produced all seven selected macOS/Android outputs; earlier
+Linux x86_64 runs produced DEB/RPM packages. The user confirmed Linux authentication
+fallback and sidebar behavior on a Debian 13 derivative. These results do not prove
+every platform, packaging format or client runtime feature works.
+
+**Still open:** Windows runtime/display-driver acceptance, native ARM acceptance,
+DRM/unattended Wayland and generic worker scheduling. The rootless AppImage
+auto-installer is a separate local extension and is **not included in this public
+branch**. On Debian 13, the legacy AppImage recipe still needs a compatible packaging
+environment; deselect AppImage to build DEB/RPM without that requirement.
+
+See [the audit report](docs/COMMUNITY-REPORT.md),
+[issue follow-up](docs/ISSUE-23-UPDATE.md) and
+[contribution instructions](docs/CONTRIBUTION-READY.md).
 
 ---
 
@@ -186,11 +236,13 @@ run.bat
 
 ### 4 · Build
 
-1. **Targets tab** → click a lit target (e.g. *Windows x86_64 (exe)*).
-2. **Config tab** → set your server, key, app name, password, permissions.
-3. **Build tab** → hit **Preview plan** once to see the commands, then **Build**. Watch it stream.
+1. **Environment** → verify requirements; explicitly enable installation if needed.
+2. **Config** → set your server, key, app name, password and permissions, then **Next**.
+3. **Targets** → choose supported targets; optionally use **Preview plan**.
+4. **Review** → check the configuration, target list and output locations.
+5. **Build** → start; enable **Show log** to inspect output or select a severity filter.
 
-Your installer appears in **`workspace/output/v1.4.9/`**. Done. 🎉
+Your installer appears in **`workspace/output/<os>/<version>/<architecture>/`**.
 
 ---
 
@@ -202,7 +254,7 @@ Your installer appears in **`workspace/output/v1.4.9/`**. Done. 🎉
 
 DVForge is three cooperating layers:
 
-1. **`web/`** — a hand-written browser GUI (HTML + CSS + vanilla JS, no framework) with a hardware-capability aesthetic. Three tabs: **Targets**, **Config**, **Build**, plus a left rail for toolchains and updates.
+1. **`web/`** — HTML + CSS + vanilla JS, with five wizard steps: **Environment**, **Config**, **Targets**, **Review**, **Build**, plus a left rail for toolchains and updates.
 2. **`app.py`** — a `ThreadingHTTPServer` built entirely on the Python standard library. It serves the static GUI, exposes a small JSON API, and fans out live build/install logs over **Server-Sent Events (SSE)**. No Flask, no FastAPI, no pip.
 3. **`builder/`** — the engine. Detection, toolchain management, config generation, source customization, and build orchestration (see [Project layout](#-project-layout) for the module map).
 
@@ -225,8 +277,8 @@ DVForge is three cooperating layers:
 When you hit **Build**, `orchestrator.py` runs (roughly) this sequence:
 
 ```
-1. Clean checkout    →  git clone RustDesk @ tag v1.4.9 into workspace/rustdesk-src
-                        (any previous tree is removed first — customizations mutate it)
+1. Prepare checkout →  select the supported RustDesk revision in workspace/rustdesk-src
+                        (preserve compatible caches; reset source customizations safely)
 2. Apply patches     →  allowCustom (strip signature check), hidecm, xoffline,
                         removeNewVersionNotif, removeSetupServerTip, privacyScreen, …
 3. Bake config       →  sed/patch server, key, API, app/company name, URLs, flags
@@ -235,7 +287,7 @@ When you hit **Build**, `orchestrator.py` runs (roughly) this sequence:
                         (Android: also embedded into MainService.kt + native_model.dart)
 5. Bridge codegen    →  flutter_rust_bridge_codegen (local, 1.80.1)
 6. Compile           →  cargo + flutter build (per target: exe/msi/dmg/deb/rpm/apk)
-7. Collect           →  copy finished installers to workspace/output/v<version>/
+7. Verify & collect  →  workspace/output/<os>/<version>/<architecture>/
 ```
 
 **Dry-run / Preview plan** prints every command in this sequence **without executing** the compile — run it once to understand exactly what will happen on your machine.
@@ -336,7 +388,15 @@ The server binds to `127.0.0.1` only — it is **not** exposed to your network b
 
 **Config tab — "Baked-in config."** Server / key / API, branding (name, icon, logo, accent, theme, slogan), password & approve mode, the full permission matrix, connection direction, and all the [feature tweaks](#-patches--tweaks-reference). A **live preview** shows the exact baked-in payload as you type.
 
-**Build tab — "Build."** Select target(s), optionally **Preview plan** (dry-run), then **Build**. The console streams every command; **Cancel** stops a run. On success, artifacts are listed with an **open folder** button.
+**Environment and Review.** Environment checks the requirements before continuing.
+Automatic dependency installation is explicit; Review shows selected targets and
+output paths before starting. Next/Back, Start and Cancel live in the fixed footer.
+
+**Build step.** Two progress rows show the current command and complete session,
+elapsed time and approximate ETA. Enable **Show log** to reveal the console. Filter
+all output, errors, warnings, both, or normal output. **Copy log** retains the full
+unfiltered log. On success, verified artifacts are listed; **Open folder** opens
+the output location.
 
 ---
 
@@ -506,17 +566,15 @@ DVForge can produce **signed** installers, or generate self-signed material from
 
 ## 📤 Output
 
-Finished installers are collected here, versioned by the RustDesk tag:
+Finished installers are separated by OS, RustDesk version and architecture:
 
 ```
-workspace/output/v1.4.9/
-├── YourApp-1.4.9-aarch64.dmg
-├── YourApp-1.4.9.exe
-├── YourApp-1.4.9.msi
-├── YourApp-1.4.9.deb
-├── YourApp-1.4.9.rpm
-├── YourApp-arm64-v8a-release.apk
-└── …
+workspace/output/
+├── macos/1.4.9/aarch64/YourApp-1.4.9-aarch64.dmg
+├── windows/1.4.9/x86_64/YourApp-1.4.9.exe
+├── linux/1.4.9/x86_64/YourApp-1.4.9.deb
+├── android/1.4.9/aarch64/YourApp-arm64-v8a-release.apk
+└── android/1.4.9/universal/YourApp-release.apk
 ```
 
 ---
@@ -657,7 +715,7 @@ DVForge/
 │   ├── rustdesk-src/            #   cloned + customized RustDesk source
 │   ├── branding/                #   your icons/logos
 │   ├── signing/                 #   generated signing material
-│   └── output/v<version>/       #   ✅ finished installers
+│   └── output/<os>/<version>/<arch>/ # verified installers
 │
 ├── .toolchains/                 # (created on install) portable SDKs + env.json
 │
@@ -679,6 +737,7 @@ DVForge/
 |---|---|
 | `GET /api/host` | Detected hardware + OS spec |
 | `GET /api/prereqs` | Toolchain detection results |
+| `GET /api/environment` | Wizard environment requirements and readiness |
 | `GET /api/matrix` | Capability matrix (which targets are buildable) |
 | `GET /api/config` | Current `RustDesk.json` |
 | `GET /api/config/status` | Config validity / status |
@@ -702,6 +761,7 @@ DVForge/
 | `POST /api/config` | Save config (unpacks embedded icon/logo/signing blobs) |
 | `POST /api/preview` | Render the baked-in `custom_.txt` preview |
 | `POST /api/build/preflight` | Validate before building |
+| `POST /api/environment/install` | Prepare selected-target dependencies when explicitly requested |
 | `POST /api/build/start` | Start a build (`dry_run` supported) |
 | `POST /api/build/cancel` | Cancel the running build |
 | `POST /api/toolchains/install` | Install a toolchain / "install missing" |
@@ -741,7 +801,12 @@ Hard-won fixes from real Windows/macOS/Linux test rounds (see `HANDOFF.md` for t
 | `WinError 740` on LLVM install | The official LLVM installer requires admin. DVForge runs it **elevated via one UAC prompt** — approve it. LLVM is only needed for Windows *desktop* builds. |
 | `WinError 2` on a tool (e.g. `flutter_rust_bridge_codegen`) | A tool isn't on PATH. `run()` resolves executables via `shutil.which` and adds `~/.cargo/bin`; if a tool is genuinely missing you'll get a clear message — install it from the toolchain panel. |
 | `'charmap' codec can't decode 0x90` | Old Unicode crash on non-cp1252 build output — fixed (all subprocess output is decoded utf-8 / `errors="replace"`). Update to latest. |
-| `rustdesk-src already exists` | Checkout is now always clean — any previous source tree is removed first (customizations mutate it, so reuse would corrupt the build). |
+| `rustdesk-src already exists` | Reuse is managed by the builder: source customizations must match the selected revision while compatible build caches are preserved. Do not delete the whole workspace as a routine retry step. |
+| Sidebar says "Auto install" but no button appears | Fixed a loading race between prerequisite detection and installer metadata. Update this branch, restart the server, refresh the page, or click **re-scan**. |
+| `sudo: a password is required` | Dependency preparation requests Polkit approval or opens a local terminal. Keep DVForge running as the normal desktop user. |
+| `No authentication agent found` | The terminal fallback needs a Linux desktop display and a terminal emulator. Start DVForge from the local desktop session rather than SSH without a display. |
+| AppImage recipe requires `apt-key` on Debian 13 | DEB/RPM do not require this tool. Deselect AppImage or use a compatible packaging environment. The separate local container extension is not included in this contribution branch. |
+| `flutter pub get` failed / unusable package config | Fix the preceding solver/network/SDK error. Codegen stops instead of producing dummy bindings; do not blindly delete all caches. |
 | Android `.sh` scripts fail on Windows | They need bash; DVForge auto-finds **Git Bash** (`<Git>\bin\bash.exe`). If missing, install Git for Windows. Or build Android via **WSL2**. |
 | `ConnectionAbortedError` / `WinError 10053` spam | Normal SSE disconnect when you close the browser tab — harmless, now swallowed. |
 | A download URL 404s | URLs are official but can move. The console prints the **exact URL** — it's a one-line fix in `builder/toolchains.py`. |
@@ -783,7 +848,8 @@ Or simply delete `.toolchains/` to reset all portable tool downloads.
 <details>
 <summary><b>Do I need GitHub or any cloud account?</b></summary>
 
-No. DVForge builds entirely locally. The only network access is downloading toolchains and cloning the RustDesk source once.
+No cloud account is required for local builds. Network access is still needed for
+toolchains, source checkout, package resolution and any selected online services.
 </details>
 
 <details>
@@ -833,7 +899,7 @@ RustDesk's printer DLL only runs for RustDesk-signed executables. Use the includ
 ## 🧱 Design principles
 
 - **Zero pip dependencies** — the server is pure Python stdlib. Nothing to install, nothing to break, trivial to audit.
-- **Nothing system-wide** — every heavy SDK lives in a project-local `.toolchains/`. Delete the folder to reset. Your OS stays clean.
+- **Portable where possible** — SDKs use `.toolchains/`; system dependencies may require explicit administrator-approved package installation.
 - **Local-only by default** — the server binds `127.0.0.1`. The farm is opt-in and documented with a security checklist.
 - **Honest capability board** — the UI never offers a build this machine can't do; it tells you exactly which tool is missing.
 - **Full transparency** — dry-run prints every command; the console streams the real thing live.
@@ -845,7 +911,7 @@ RustDesk's printer DLL only runs for RustDesk-signed executables. Use the includ
 
 > A machine-oriented map so an LLM or agent can understand and operate this repo without spelunking.
 
-**What this project is:** a local, offline builder that compiles a customized RustDesk remote-desktop client. No cloud CI. Pure-stdlib Python server + vanilla-JS browser GUI + a `builder/` engine.
+**What this project is:** a local builder that compiles a customized RustDesk remote-desktop client. No cloud CI required, but dependency/source downloads need network access. Pure-stdlib Python server + vanilla-JS browser GUI + a `builder/` engine.
 
 **Entry point:** `app.py` — `ThreadingHTTPServer`, serves `web/`, exposes the JSON+SSE API in [API reference](#-api-reference). Runs `toolchains.apply_persisted_env(ROOT)` at startup to load `.toolchains/env.json` before detection. Default port `8765` (`RDLB_PORT`), `--no-browser` to suppress auto-open. Bind is `127.0.0.1`.
 
@@ -857,7 +923,10 @@ RustDesk's printer DLL only runs for RustDesk-signed executables. Use the includ
 - `toolchains.py` — portable download/install registry; writes/loads `.toolchains/env.json`.
 - `config_gen.py` — `configs/RustDesk.json` → compiled-in `CUSTOM_*` vars **and** base64 `custom_.txt` (runtime). **Byte-identical to upstream `load-config.py`.**
 - `customize.py` — applies all source patches, the Android native-embed, and the signature-check strip.
-- `orchestrator.py` — full pipeline: clean checkout → patch → bake → bridge codegen → compile → collect to `workspace/output/v<version>/`. Supports dry-run + cancel + live-log callback.
+- `orchestrator.py` — checkout, customization, validated bridge generation, compilation and verified artifacts in `workspace/output/<os>/<version>/<architecture>/`. Supports dry-run, cancellation and live logs.
+- `environment.py` / `terminal_approval.py` — target-specific requirements, explicit installation and local Linux administrator approval without browser-handled passwords.
+- `pub_config.py` / `artifacts.py` — dependency-state and artifact validation.
+- `web/wizard.js` / `web/build-view.js` — wizard navigation, optional filtered log and progress display.
 - `signing.py` — self-signed Windows/macOS/Android material.
 
 **Key invariants (do not violate):**
