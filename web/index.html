@@ -58,13 +58,25 @@
   <!-- ── main ── -->
   <main class="main">
     <nav class="tabs" role="tablist">
-      <button class="tab is-active" data-tab="targets" role="tab">Targets</button>
-      <button class="tab" data-tab="config" role="tab">Config</button>
-      <button class="tab" data-tab="console" role="tab">Build</button>
+      <button class="tab is-active" data-tab="environment" role="tab">1. Environment</button>
+      <button class="tab" data-tab="config" role="tab" disabled>2. Config</button>
+      <button class="tab" data-tab="targets" role="tab" disabled>3. Targets</button>
+      <button class="tab" data-tab="review" role="tab" disabled>4. Review</button>
+      <button class="tab" data-tab="console" role="tab" disabled>5. Build</button>
     </nav>
+    <section class="panel is-active" id="tab-environment" role="tabpanel">
+      <header class="panel-head"><h1>Build Environment</h1></header>
+      <ul class="prereqs" id="environment-requirements"><li>Checking build environment...</li></ul>
+      <label class="dry"><input type="checkbox" id="auto-install" checked>Automatic dependency installation</label>
+      <div class="tray-actions">
+        <button class="btn ghost" id="prepare-environment">Prepare environment</button>
+        <button class="btn primary" id="environment-next" disabled>Next</button>
+      </div>
+      <p id="environment-status" role="status"></p>
+    </section>
 
     <!-- TARGETS -->
-    <section class="panel is-active" id="tab-targets" role="tabpanel">
+    <section class="panel" id="tab-targets" role="tabpanel">
       <header class="panel-head">
         <h1>What can this machine build?</h1>
         <p class="lede" id="matrix-lede">Lit cells are ready to build right now. Outlined cells
@@ -90,7 +102,7 @@
             <span>Dry run (print commands only)</span>
           </label>
           <button class="btn ghost" id="btn-plan" disabled>Preview plan</button>
-          <button class="btn primary" id="btn-build" disabled>Start build</button>
+          <button class="btn primary" id="btn-build" disabled>Review</button>
         </div>
       </div>
     </section>
@@ -102,6 +114,14 @@
         <p class="lede">These values are compiled into the client and written to
           <code>custom_.txt</code>. The password and permissions live in the base64 payload.</p>
       </header>
+      <label class="ver">RustDesk version
+        <select id="version">
+          <option value="1.5.0">1.5.0 (master)</option>
+          <option value="1.4.9" selected>1.4.9</option>
+        </select>
+      </label>
+      <button class="btn primary" id="config-next">Next</button>
+      <p id="config-validation" role="status"></p>
 
       <div class="config-grid">
         <div class="form">
@@ -389,6 +409,12 @@
       </div>
     </section>
 
+    <section class="panel" id="tab-review" role="tabpanel">
+      <header class="panel-head"><h1>Review Build</h1></header>
+      <div id="review-summary"></div>
+      <button class="btn ghost" id="review-back">Back</button>
+      <button class="btn primary" id="review-start" disabled>Start build</button>
+    </section>
     <!-- CONSOLE -->
     <section class="panel" id="tab-console" role="tabpanel">
       <header class="panel-head">
@@ -399,12 +425,8 @@
       <div class="config-banner" id="config-banner" hidden></div>
 
       <div class="build-bar">
-        <label class="ver">RustDesk version
-          <select id="version">
-            <option value="1.5.0">1.5.0 (latest, from master)</option>
-            <option value="1.4.9" selected>1.4.9 (stable)</option>
-          </select>
-        </label>
+        <span id="current-stage">Idle</span>
+        <span id="current-target"></span>
         <span class="build-status" id="build-status">idle</span>
         <span class="build-timer" id="build-timer"></span>
         <button class="btn ghost" id="btn-copy-log" title="Copy the entire build log to the clipboard">Copy log</button>
@@ -413,7 +435,12 @@
         <button class="btn danger" id="btn-cancel" disabled>Cancel</button>
       </div>
 
-      <pre class="console" id="console"><span class="con-hint">Select targets, then Start build. Output streams here.</span></pre>
+      <div class="progress-stack">
+        <div class="progress-row"><strong>Current step</strong><span id="step-percent">—</span><progress id="step-progress" max="100" aria-label="Current step"></progress><span id="step-elapsed">Elapsed 00:00</span><span id="step-eta">ETA —</span></div>
+        <div class="progress-row"><strong>Build session</strong><span id="session-percent">0%</span><progress id="session-progress" max="100" value="0" aria-label="Build session"></progress><span id="session-elapsed">Elapsed 00:00</span><span id="session-eta">ETA —</span><small id="session-phases"></small></div>
+      </div>
+      <div class="log-controls"><label><input type="checkbox" id="show-log"> Show log</label><span id="log-counts">0 errors · 0 warnings</span></div>
+      <div id="log-view" hidden><label class="log-filter">Filter <select id="log-filter"><option value="all">All output</option><option value="error">Errors</option><option value="warning">Warnings</option><option value="diagnostics">Errors and warnings</option><option value="normal">Hide errors and warnings</option></select></label><pre class="console" id="console"></pre></div>
 
       <div class="artifacts" id="artifacts"></div>
     </section>
@@ -422,5 +449,7 @@
 
 <script src="advanced-keys.js"></script>
 <script src="app.js"></script>
+<script src="wizard.js"></script>
+<script src="build-view.js"></script>
 </body>
 </html>

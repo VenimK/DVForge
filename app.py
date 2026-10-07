@@ -18,6 +18,7 @@ import os
 import platform
 import queue
 import secrets
+import shutil
 import sys
 import threading
 import time
@@ -26,7 +27,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from builder import detect, prereqs, config_gen, orchestrator, toolchains, signing  # noqa: E402
+from builder import detect, prereqs, config_gen, orchestrator, toolchains, signing, environment  # noqa: E402
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(ROOT, "web")
@@ -80,7 +81,7 @@ class BuildSession:
             if q in self.subscribers:
                 self.subscribers.remove(q)
 
-    def start(self, version, target_ids, config, dry_run=False):
+    def start(self, version, target_ids, config, dry_run=False, auto_install=False):
         with self.lock:
             if self.running:
                 return False, "a build is already running"
@@ -94,7 +95,20 @@ class BuildSession:
 
         def _run():
             try:
+                if not dry_run:
+                    self._emit("=== Environment preflight ===")
+                    report = environment.ensure(target_ids, ROOT, self._emit,
+                                                auto_install=auto_install,
+                                                cancelled=self.build.cancel_event.is_set)
+                    if not report["ok"]:
+                        self.result = {"ok": False, "stage": "environment", "artifacts": [],
+                                       "error": "\n".join(report["problems"])}
+                        self._emit("!! BUILD FAILED: " + self.result["error"])
+                        return
                 self.result = self.build.execute()
+            except Exception as exc:
+                self.result = {"ok": False, "error": str(exc), "artifacts": []}
+                self._emit("!! BUILD FAILED: " + str(exc))
             finally:
                 self.running = False
                 self._emit("\x00DONE")     # sentinel to close SSE cleanly
@@ -142,7 +156,7 @@ class InstallSession:
         self._cancel = True
         return self.running
 
-    def start(self, ids):
+    def start(self, ids, targets=None):
         with self.lock:
             if self.running:
                 return False, "an install is already running"
@@ -153,8 +167,14 @@ class InstallSession:
 
         def _run():
             try:
-                self.result = toolchains.install_many(
-                    ids, ROOT, self._emit, cancelled=lambda: self._cancel)
+                if targets is not None:
+                    report = environment.ensure(targets, ROOT, self._emit, auto_install=True,
+                                                cancelled=lambda: self._cancel)
+                    self.result = {"installed": [], "errors": [] if report["ok"] else
+                                   [["environment", p] for p in report["problems"]]}
+                else:
+                    self.result = toolchains.install_many(
+                        ids, ROOT, self._emit, cancelled=lambda: self._cancel)
                 # refresh env for this process so a follow-up scan sees new tools
                 toolchains.apply_persisted_env(ROOT)
             except Exception as e:  # noqa: BLE001
@@ -320,11 +340,14 @@ class Handler(BaseHTTPRequestHandler):
     # ---- helpers ----
     def _send_json(self, obj, status=200):
         body = json.dumps(obj).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
 
     def _read_json(self):
         length = int(self.headers.get("Content-Length", 0))
@@ -332,13 +355,60 @@ class Handler(BaseHTTPRequestHandler):
             return {}
         return json.loads(self.rfile.read(length).decode() or "{}")
 
+    def _trusted_local_request(self):
+        try:
+            host = urlparse("http://" + (self.headers.get("Host") or ""))
+            if host.hostname not in ("localhost", "127.0.0.1", "::1"):
+                raise ValueError("non-local Host")
+            origin = self.headers.get("Origin")
+            if origin:
+                parsed = urlparse(origin)
+                if (parsed.scheme != "http" or parsed.netloc != host.netloc
+                        or parsed.port != self.server.server_address[1]):
+                    raise ValueError("cross-origin API request")
+            return True
+        except ValueError:
+            self._send_json({"error": "Local same-origin API access required"}, 403)
+            return False
+
     # ---- GET ----
     def do_GET(self):
         path = urlparse(self.path).path
+        if path.startswith("/api/") and not self._trusted_local_request():
+            return
         if path == "/api/host":
             return self._send_json(detect.host_info())
+        if path == "/api/artifact":
+            from builder.artifacts import download_path
+            from urllib.parse import parse_qs
+            try:
+                requested = parse_qs(urlparse(self.path).query).get("path", [""])[0]
+                artifact = download_path(WORKSPACE, requested)
+            except (OSError, ValueError):
+                return self._send_json({"error": "Unknown artifact"}, 404)
+            try:
+                with open(artifact, "rb") as stream:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/octet-stream")
+                    self.send_header("Content-Length", str(os.fstat(stream.fileno()).st_size))
+                    self.send_header("Content-Disposition", "attachment")
+                    self.end_headers()
+                    shutil.copyfileobj(stream, self.wfile)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return
+        if path == "/api/environment":
+            host = detect.host_info()
+            primary = next((t["id"] for t in detect.TARGETS
+                            if host["os"] in t["host_os"] and t["arch"] == host["arch"]
+                            and t["platform"] != "android"), None)
+            return self._send_json({**environment.report([primary] if primary else [], host),
+                                    "targets": [primary] if primary else []})
         if path == "/api/prereqs":
-            return self._send_json(prereqs.summary())
+            host = detect.host_info()
+            potential = [t["id"] for t in detect.TARGETS if host["os"] in t["host_os"]
+                         and (t["platform"] != "linux" or t["arch"] == host["arch"])]
+            return self._send_json(environment.report(potential, host)["requirements"])
         if path == "/api/matrix":
             host = detect.host_info()
             pr = {p["id"]: p for p in prereqs.summary()}
@@ -411,6 +481,8 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- POST ----
     def do_POST(self):
+        if not self._trusted_local_request():
+            return
         path = urlparse(self.path).path
         try:
             data = self._read_json()
@@ -435,22 +507,33 @@ class Handler(BaseHTTPRequestHandler):
             })
 
         if path == "/api/build/preflight":
-            targets = data.get("targets", [])
-            pr = {p["id"]: p for p in prereqs.summary()}
-            ok, problems = orchestrator.preflight(targets, pr)
+            try:
+                targets = detect.validate_target_ids(data.get("targets", []))
+            except ValueError as exc:
+                return self._send_json({"error": str(exc)}, 400)
+            report = environment.report(targets)
             b = orchestrator.Build(data.get("version", "1.4.9"), targets,
                                    config_gen.load_config(CONFIG_PATH), WORKSPACE,
                                    dry_run=True)
-            return self._send_json({"ok": ok, "problems": problems, "plan": b.plan()})
+            from builder.artifacts import output_dir
+            return self._send_json({**report, "plan": b.plan(),
+                                   "outputs": [output_dir(WORKSPACE, t["platform"], b.version, t["arch"])
+                                       for t in detect.TARGETS if t["id"] in targets]})
 
         if path == "/api/build/start":
-            targets = data.get("targets", [])
-            if not targets:
-                return self._send_json({"error": "no targets selected"}, 400)
+            if INSTALL.running:
+                return self._send_json({"error": "Dependency installation is running"}, 409)
+            try:
+                targets = detect.validate_target_ids(data.get("targets", []))
+            except ValueError as exc:
+                return self._send_json({"error": str(exc)}, 400)
             version = data.get("version") or orchestrator.DEFAULT_VERSION
+            if version not in orchestrator.VERSION_PROFILES:
+                return self._send_json({"error": "unsupported version"}, 400)
             dry = bool(data.get("dry_run", False))
             cfg = config_gen.load_config(CONFIG_PATH)
-            ok, msg = SESSION.start(version, targets, cfg, dry_run=dry)
+            ok, msg = SESSION.start(version, targets, cfg, dry_run=dry,
+                                    auto_install=bool(data.get("auto_install", False)))
             return self._send_json({"ok": ok, "message": msg}, 200 if ok else 409)
 
         if path == "/api/build/cancel":
@@ -560,11 +643,11 @@ class Handler(BaseHTTPRequestHandler):
             out_root = os.path.join(WORKSPACE, "output")
             if target:
                 # Only allow paths inside the workspace — no arbitrary browsing.
-                ap = os.path.abspath(target)
-                if os.path.commonpath([ap, os.path.abspath(WORKSPACE)]) != \
-                        os.path.abspath(WORKSPACE):
+                ap = os.path.realpath(target)
+                if os.path.commonpath([ap, os.path.realpath(out_root)]) != \
+                        os.path.realpath(out_root):
                     return self._send_json(
-                        {"error": "path is outside the workspace"}, 400)
+                        {"error": "path is outside the artifact output"}, 400)
                 target = ap
             else:
                 # newest version dir under output/, else output/ itself
@@ -596,6 +679,15 @@ class Handler(BaseHTTPRequestHandler):
             if not ids:
                 return self._send_json({"error": "no tools selected"}, 400)
             ok, msg = INSTALL.start(ids)
+            return self._send_json({"ok": ok, "message": msg}, 200 if ok else 409)
+        if path == "/api/environment/install":
+            try:
+                targets = detect.validate_target_ids(data.get("targets", []))
+            except ValueError as exc:
+                return self._send_json({"error": str(exc)}, 400)
+            if SESSION.running:
+                return self._send_json({"error": "A build is running"}, 409)
+            ok, msg = INSTALL.start([], targets=targets)
             return self._send_json({"ok": ok, "message": msg}, 200 if ok else 409)
 
         if path == "/api/toolchains/cancel":

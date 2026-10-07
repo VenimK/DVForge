@@ -507,7 +507,9 @@ def _extract(archive, kind, dest, log):
         _extract_dmg(archive, dest, log)
     else:  # tar.* (xz/gz auto-detected by mode 'r:*')
         with tarfile.open(archive, "r:*") as t:
-            t.extractall(dest)
+            if not hasattr(tarfile, "data_filter"):
+                raise RuntimeError("Safe toolchain extraction requires Python with tarfile.data_filter (3.12+ or a security-backported release)")
+            t.extractall(dest, filter="data")
 
 
 def _extract_zip(archive, dest, log):
@@ -779,9 +781,10 @@ def _bootstrap_android_sdk(sdk_home, root, log, cancelled):
         log(f"  · sdkmanager JAVA_HOME={jhome}")
     else:
         log("  ! no JDK found — sdkmanager needs Java. Install JDK 17 first.")
+    command = sdkmanager_command(sm, sdk_home, jhome)
     try:
         subprocess.run(
-            [sm, f"--sdk_root={sdk_home}", "--licenses"],
+            command + ["--licenses"],
             input="y\n" * 30, env=env, check=False,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             encoding="utf-8", errors="replace", timeout=180)
@@ -790,7 +793,7 @@ def _bootstrap_android_sdk(sdk_home, root, log, cancelled):
     log("  · sdkmanager " + " ".join(SDK_PACKAGES))
     try:
         proc = subprocess.run(
-            [sm, f"--sdk_root={sdk_home}"] + list(SDK_PACKAGES),
+            command + list(SDK_PACKAGES),
             env=env, check=False,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             encoding="utf-8", errors="replace", timeout=900)
@@ -802,11 +805,22 @@ def _bootstrap_android_sdk(sdk_home, root, log, cancelled):
         if line.strip():
             log("    " + line)
     _chmod_sdk_binaries(sdk_home)
-    if not os.path.isdir(plat):
+    if proc.returncode != 0 or not all(os.path.isdir(p) for p in (plat, pt, bt)):
         raise RuntimeError(
             "sdkmanager did not install platforms/android-34 "
             f"(exit {proc.returncode})")
     log("  ✓ Android SDK platforms + build-tools installed")
+
+
+def sdkmanager_command(launcher, sdk_home, java_home):
+    """Avoid the Unix launcher's eval-based classpath expansion."""
+    tools_home = os.path.dirname(os.path.dirname(launcher))
+    classpath = os.path.join(tools_home, "lib", "sdkmanager-classpath.jar")
+    if not WIN and java_home and os.path.isfile(classpath):
+        return [os.path.join(java_home, "bin", "java"),
+                f"-Dcom.android.sdklib.toolsdir={tools_home}", "-classpath", classpath,
+                "com.android.sdklib.tool.sdkmanager.SdkManagerCli", f"--sdk_root={sdk_home}"]
+    return [launcher, f"--sdk_root={sdk_home}"]
 
 
 def find_flutter_home(root):

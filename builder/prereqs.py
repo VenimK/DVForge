@@ -130,7 +130,6 @@ def check_flutter():
     home = toolchains.find_flutter_home(root)
     p = None
     if home:
-        toolchains.repair_flutter_permissions(home)
         cand = os.path.join(home, "bin", "flutter.bat" if _system() == "Windows"
                             else "flutter")
         if os.path.isfile(cand):
@@ -466,7 +465,9 @@ def check_xcode():
         return _status(False, note="macOS only.")
     p = _which("xcodebuild")
     if p:
-        return _status(True, _run_version(["xcodebuild", "-version"]) or "Xcode", p)
+        version = _run_version(["xcodebuild", "-version"])
+        return _status(bool(version), version or "", p,
+                       hint="Select a full Xcode installation with xcode-select; command-line tools alone are insufficient")
     return _status(False, hint=_install_hint("xcode"))
 
 
@@ -940,7 +941,7 @@ def _install_hint(tool):
             "Linux": "sudo apt install rpm  (or: sudo dnf install rpm-build)",
         },
         "appimage_builder": {
-            "Linux": "sudo apt install libarchive-tools libfuse2 && sudo pip3 install setuptools_scm<10 && sudo pip3 install git+https://github.com/rustdesk-org/appimage-builder.git",
+            "Linux": "Use a dedicated Python virtual environment for appimage-builder and quote 'setuptools_scm<10'. Legacy recipes also require apt-key; Debian 13 needs a compatible packaging container.",
         },
         "sccache": {
             "Windows": "cargo install sccache",
