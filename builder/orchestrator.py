@@ -18,6 +18,8 @@ import glob as _glob
 import json
 import os
 import re
+import shlex
+import hashlib
 import shutil
 import subprocess
 import sys
@@ -107,6 +109,7 @@ SOURCE_CACHE_KEEP = (
     # then made generate_bridge() skip and macOS builds fail.
     "flutter/macos/Runner/bridge_generated.h",
     "flutter/ios/Runner/bridge_generated.h",
+    ".ecz-bridge-validated.json",
     "windows-x64-release.zip",
     "windows-x64-release",
 )
@@ -188,11 +191,13 @@ class Build:
         self.cancel_event = threading.Event()
 
         self.src_dir = os.path.join(self.workspace, "rustdesk-src")
-        self.out_dir = os.path.join(self.workspace, "output", f"v{self.version}")
+        from .artifacts import output_dir
+        self.out_dir = output_dir(self.workspace, "windows", self.version, "x86_64")
         self.patches_dir = os.path.abspath(
             os.path.join(os.path.dirname(__file__), "..", "patches"))
         self.host = detect.host_info()
         self.artifacts = []
+        self.target_results = {tid: "pending" for tid in target_ids}
         self._llvm_home = None
         self._ffigen_cpath = ""
         self._flutter_bindir = None
@@ -238,9 +243,12 @@ class Build:
             cmd = ["sed", "-i", expression, path]
         return self.run(cmd, cwd=cwd, check=check)
 
-    def run(self, cmd, cwd=None, env=None, shell=False, check=True, log_as=None):
+    def run(self, cmd, cwd=None, env=None, shell=False, check=True, log_as=None,
+            reject_diagnostics=False):
         pretty = log_as if log_as is not None else (
-            cmd if isinstance(cmd, str) else " ".join(str(c) for c in cmd))
+            cmd if isinstance(cmd, str) else
+            subprocess.list2cmdline([str(c) for c in cmd]) if os.name == "nt" else
+            shlex.join(str(c) for c in cmd))
         self.log(f"$ {pretty}")
         if self.dry_run:
             return 0
@@ -279,10 +287,17 @@ class Build:
             exe = cmd if isinstance(cmd, str) else cmd[0]
             raise RuntimeError(f"could not launch '{exe}' — is it installed and on PATH?")
         output = []
+        from collections import deque
+        recent = deque(maxlen=30)
+        diagnostics = []
 
         def _pump_output():
             try:
                 for line in proc.stdout:
+                    recent.append(line.rstrip())
+                    if reject_diagnostics and ("[SEVERE]" in line or
+                                               "[ERROR]" in line):
+                        diagnostics.append(line.strip())
                     output.append(line)
             finally:
                 proc.stdout.close()
@@ -309,8 +324,35 @@ class Build:
                 proc.kill()
         rc = proc.wait()
         if check and rc != 0:
-            raise RuntimeError(f"command failed (exit {rc}): {pretty}")
+            raise RuntimeError(f"command failed (exit {rc}): {pretty}\n" + "\n".join(recent))
+        if diagnostics:
+            raise RuntimeError("command reported errors despite exit zero: " +
+                               " | ".join(diagnostics[:3]))
         return rc
+
+    def _validate_build_paths(self):
+        """Reject known unsupported paths before expensive toolchain work."""
+        paths = {"source": self.src_dir}
+        tool_paths = ["VCPKG_ROOT"]
+        if any(t.startswith("android-") for t in self.target_ids):
+            tool_paths += ["ANDROID_NDK_HOME", "ANDROID_SDK_ROOT"]
+        for key in tool_paths:
+            if os.environ.get(key):
+                paths[key] = os.environ[key]
+        problems = []
+        for name, value in paths.items():
+            real = os.path.realpath(value)
+            if any(c.isspace() for c in real):
+                problems.append(f"{name} contains whitespace: {real}")
+            if self._is_macos_host() and real.startswith("/Volumes/"):
+                problems.append(f"{name} is on a mounted volume: {real}")
+        if problems:
+            message = ("Unsupported build paths. Use prepare-local.py to create "
+                       "a local no-space copy before building.\n" + "\n".join(problems))
+            if self.dry_run:
+                self.log("  ! " + message)
+            else:
+                raise RuntimeError(message)
 
     # -- high-level plan ----------------------------------------------------
     def platforms_needed(self):
@@ -554,12 +596,11 @@ class Build:
         # build must start from a pristine *source* tree. Compile caches
         # (cargo target/, flutter/build, engine zip) are gitignored and
         # safe to keep — wiping them was the main rebuild tax.
+        if self.dry_run:
+            self.log(f"  (would prepare {self.src_dir}, keeping compile caches)")
+            return
         os.makedirs(self.workspace, exist_ok=True)
         if os.path.exists(self.src_dir):
-            if self.dry_run:
-                self.log(f"  (would reset {self.src_dir} to {self._git_ref()}, "
-                         "keeping cargo/flutter caches)")
-                return
             if self._try_reuse_source():
                 return
             self.log("  · reuse failed — parking caches and cloning fresh")
@@ -750,7 +791,7 @@ class Build:
         self.log(f"  · ensuring Rust {toolchain}")
         rustc = shutil.which("rustc", path=self._effective_path())
         rustc_ver = ""
-        if rustc:
+        if rustc and not self.dry_run:
             try:
                 rustc_ver = subprocess.check_output(
                     [rustc, "--version"], timeout=15,
@@ -764,7 +805,7 @@ class Build:
             if rustfmt:
                 self.log(f"  · {rustc_ver} already active — skip rustup")
                 return
-        self.run(["rustup", "toolchain", "install", toolchain], check=False)
+        self.run(["rustup", "toolchain", "install", toolchain], check=True)
         # Host std is always needed; for macOS also ensure the selected Mac target.
         targets = {host_triple}
         if any("macos" in t for t in self.target_ids):
@@ -774,16 +815,16 @@ class Build:
                 targets.update({"aarch64-apple-darwin", "x86_64-apple-darwin"})
         for target in sorted(targets):
             self.run(["rustup", "target", "add", target, "--toolchain", toolchain],
-                     check=False)
-        self.run(["rustup", "default", toolchain], check=False)
+                     check=True)
+        self.run(["rustup", "default", toolchain], check=True)
         # rustfmt is required by flutter_rust_bridge_codegen; without it the
         # codegen aborts and the build continues with stale/dummy bridge code.
         self.run(["rustup", "component", "add", "rustfmt", "--toolchain", toolchain],
-                 check=False)
+                 check=True)
         # Also ensure the currently-active default has rustfmt (covers the case
         # where rustup default failed for a bad triple and we stayed on another
         # toolchain).
-        self.run(["rustup", "component", "add", "rustfmt"], check=False)
+        self.run(["rustup", "component", "add", "rustfmt"], check=True)
         if not self.dry_run and not shutil.which("rustfmt", path=self._effective_path()):
             raise RuntimeError(
                 "rustfmt is required by flutter_rust_bridge_codegen but is not "
@@ -865,7 +906,13 @@ class Build:
         # Use --sysroot= (not "-isysroot PATH"). clap treats a following
         # token that starts with -i as the short flag -i
         # ("unexpected argument '-i' found") and skips codegen entirely.
-        return (f"--sysroot={sdk} -D_DARWIN_C_SOURCE "
+        resource = ""
+        if self._llvm_home:
+            clang = os.path.join(self._llvm_home, "bin", "clang")
+            resource = subprocess.check_output([clang, "-print-resource-dir"],
+                                               text=True, timeout=15).strip()
+        resource_flag = f' "-resource-dir={resource}"' if resource else ""
+        return (f'"--sysroot={sdk}"{resource_flag} -D_DARWIN_C_SOURCE '
                 f"-D__DARWIN_C_LEVEL=__DARWIN_C_FULL")
 
     def _strip_llvm_bin_from_path(self):
@@ -903,6 +950,9 @@ class Build:
         "Failed to send data to or receive data from server". That must never
         abort a build — fall back to uncached rustc instead.
         """
+        if self.dry_run:
+            self.log("  (would check sccache; no server changes in dry run)")
+            return
         sccache = shutil.which("sccache", path=self._effective_path())
         if not sccache:
             self._clear_sccache_wrapper()
@@ -977,7 +1027,7 @@ class Build:
         sccache = shutil.which("sccache", path=self._effective_path())
         if not sccache:
             return
-        if not self._is_sccache_wrapper(os.environ.get("RUSTC_WRAPPER", "")):
+        if self.dry_run or not self._is_sccache_wrapper(os.environ.get("RUSTC_WRAPPER", "")):
             return
         self.log("\n=== sccache statistics ===")
         for args in (["--show-stats"], ["--show-adv-stats"]):
@@ -996,15 +1046,7 @@ class Build:
                 self.log(f"  ! could not run sccache {' '.join(args)}: {e}")
 
     def _ensure_llvm(self):
-        """Always prefer LLVM from .toolchains/llvm for bindgen/ffigen.
-
-        Must run BEFORE generate_bridge() — ffigen needs libclang from the
-        portable LLVM 15.0.6 tree. Without it (or without host headers on
-        CPATH), the codegen emits dummy/broken Dart bindings.
-
-        Policy: if `.toolchains/llvm` is installed, it ALWAYS wins over any
-        pre-existing LIBCLANG_PATH / system clang so builds stay reproducible.
-        """
+        """Prefer matching Xcode LLVM on macOS, portable LLVM elsewhere."""
         # Always wire the Apple SDK first on macOS — even if LIBCLANG_PATH is
         # already set, bindgen still needs a sysroot for stdlib.h etc.
         self._ensure_macos_sdk()
@@ -1126,7 +1168,8 @@ class Build:
         candidates = []
         home = toolchains.find_flutter_home(root)
         if home:
-            toolchains.repair_flutter_permissions(home, self.log)
+            if not self.dry_run:
+                toolchains.repair_flutter_permissions(home, self.log)
             pinned = os.path.join(home, "bin", exe_name)
             if os.path.isfile(pinned):
                 candidates.append(pinned)
@@ -1146,6 +1189,11 @@ class Build:
                 candidates.append(extra)
 
         chosen, out = None, ""
+        if self.dry_run:
+            if candidates:
+                self._flutter_bindir = os.path.dirname(os.path.abspath(candidates[0]))
+            self.log("  (would verify Flutter 3.24.5; no SDK repair or cache initialization)")
+            return
         for exe in candidates:
             ok, text = self._flutter_version_output(exe)
             if not ok:
@@ -1190,9 +1238,9 @@ class Build:
             self.log(f"  · {dart_line}")
         self.log(f"  · flutter = {chosen}")
         flutter_ver = self._parse_flutter_version(out)
-        if flutter_ver and flutter_ver[:2] != (3, 24):
-            self.log(f"  ! warning: official CI pins Flutter {FLUTTER_VERSION}; "
-                     "other 3.x versions may hit widget/engine mismatches")
+        if flutter_ver and flutter_ver != (3, 24, 5):
+            raise RuntimeError(f"Flutter {FLUTTER_VERSION} is required for these source profiles; "
+                               f"selected {'.'.join(map(str, flutter_ver))}")
 
     def _bridge_header_paths(self):
         mac = os.path.join(self.src_dir, "flutter", "macos", "Runner",
@@ -1208,7 +1256,7 @@ class Build:
             shutil.copy2(mac_h, ios_h)
 
     def _bridge_outputs_fresh(self):
-        """True if rust/dart/C outputs exist and are not older than flutter_ffi.rs.
+        """Reuse only outputs fingerprinted after error-free generation.
 
         The C header is a required Xcode input (SWIFT_OBJC_BRIDGING_HEADER).
         Checking only rust+dart let a kept compile cache skip codegen after
@@ -1223,11 +1271,58 @@ class Build:
         if not all(os.path.isfile(p) for p in needed):
             return False
         try:
-            src_m = os.path.getmtime(rust_in)
-            return all(os.path.getmtime(p) >= src_m
-                       for p in (rust_out, dart_out, mac_h))
-        except OSError:
+            with open(self._bridge_stamp(), encoding="utf-8") as f:
+                if json.load(f) != self._bridge_signature():
+                    return False
+            from .pub_config import validate
+            validate(os.path.join(self.src_dir, "flutter", ".dart_tool", "package_config.json"))
+            return True
+        except (OSError, ValueError, RuntimeError):
             return False
+
+    def _bridge_stamp(self):
+        return os.path.join(self.src_dir, ".ecz-bridge-validated.json")
+
+    def _bridge_signature(self):
+        files = ("src/flutter_ffi.rs", "src/bridge_generated.rs",
+                 "flutter/lib/generated_bridge.dart",
+                 "flutter/macos/Runner/bridge_generated.h",
+                 "Cargo.toml", "Cargo.lock", "flutter/pubspec.yaml", "flutter/pubspec.lock")
+        digests = {}
+        for rel in files:
+            path = os.path.join(self.src_dir, rel)
+            if os.path.isfile(path):
+                with open(path, "rb") as f:
+                    digests[rel] = hashlib.sha256(f.read()).hexdigest()
+        rc, revision = self._git_capture(["rev-parse", "HEAD"])
+        return {"schema": 1, "version": self.version, "llvm": self._llvm_home,
+                "flutter": self._flutter_bindir, "sdk": os.environ.get("SDKROOT"),
+                "source_revision": revision if rc == 0 else None, "files": digests}
+
+    def _bridge_codegen_env(self, flutter_dir):
+        env = {"RUST_LOG": "info", "CPATH": None,
+               "C_INCLUDE_PATH": None, "CPLUS_INCLUDE_PATH": None}
+        if not self._is_macos_host():
+            cpath = getattr(self, "_ffigen_cpath", "")
+            if cpath:
+                env.update(CPATH=cpath, C_INCLUDE_PATH=cpath)
+            return env
+        if self.dry_run:
+            return env
+        flutter = shutil.which("flutter", path=self._effective_path())
+        dart = shutil.which("dart", path=self._effective_path())
+        tools = os.path.join(self._cache_park_dir(), "bridge-tools")
+        os.makedirs(tools, exist_ok=True)
+        for name in ("flutter", "dart"):
+            destination = os.path.join(tools, name)
+            shutil.copy2(os.path.join(os.path.dirname(__file__), f"bridge_{name}.sh"), destination)
+            os.chmod(destination, 0o755)
+        env.update(PATH=tools + os.pathsep + self._effective_path(),
+                   ECZ_REAL_FLUTTER=flutter, ECZ_REAL_DART=dart,
+                   ECZ_DART_PACKAGES=os.path.join(flutter_dir, ".dart_tool", "package_config.json"),
+                   ECZ_FFIGEN_WRAPPER=os.path.join(os.path.dirname(__file__), "ffigen_wrapper.dart"),
+                   ECZ_BRIDGE_DIAGNOSTICS=os.path.join(self._cache_park_dir(), "bridge-diagnostics"))
+        return env
 
     def generate_bridge(self):
         self.log("\n=== 2. Generate flutter_rust_bridge ===")
@@ -1251,30 +1346,11 @@ class Build:
         # emits dummy code with an unresolvable Dart_Handle type and the build
         # fails with E0412.
         flutter_dir = os.path.join(self.src_dir, "flutter")
-        self.run(["flutter", "pub", "get"], cwd=flutter_dir, check=True)
+        from . import pub_config
         pkg_config = os.path.join(flutter_dir, ".dart_tool", "package_config.json")
-        if not os.path.isfile(pkg_config):
-            self.log("  ! flutter pub get did not create package_config.json")
-            self.log("  · retrying dependency resolution with the selected Dart SDK …")
-            self.run(["dart", "pub", "get"], cwd=flutter_dir, check=False)
-        if not os.path.isfile(pkg_config):
-            # flutter pub get exited 0 but didn't create the package config.
-            # Run flutter doctor to help diagnose — common causes: broken
-            # Flutter install, missing Dart SDK, pub cache corruption,
-            # or an old Flutter that reports 3.24+ but has a broken pub.
-            self.log("  · running flutter doctor for diagnostics …")
-            self.run(["flutter", "doctor", "-v"], cwd=flutter_dir, check=False)
-            raise RuntimeError(
-                "flutter pub get did not create .dart_tool/package_config.json; "
-                "bridge codegen would emit dummy bindings.\n"
-                "Common causes:\n"
-                "  1. Flutter is broken or partially installed — reinstall "
-                f"Flutter {FLUTTER_VERSION} from the Toolchain tab.\n"
-                "  2. Pub cache is corrupted — run: flutter pub cache repair\n"
-                "  3. Network/proxy blocked pub.dev — check connectivity.\n"
-                "  4. Flutter version too old — ensure Dart >= 3.5.0 "
-                "(Flutter >= 3.24.5).\n"
-                "See flutter doctor output above for details.")
+        pub_config.resolve(pkg_config,
+                           lambda cmd, **kwargs: self.run(cmd, cwd=flutter_dir, **kwargs),
+                           dry_run=self.dry_run)
         codegen = shutil.which("flutter_rust_bridge_codegen", path=self._effective_path())
         if not codegen and not self.dry_run:
             raise RuntimeError(
@@ -1306,12 +1382,11 @@ class Build:
         # Clang-specific headers break GCC compilations of zstd-sys / ring.
         # On macOS we rely on --sysroot instead: a CPATH that lists LLVM 15's
         # resource dir first is exactly what triggers uint8_t-in-resource.h.
-        codegen_env = {}
-        ffigen_cpath = getattr(self, "_ffigen_cpath", "")
-        if ffigen_cpath and not self._is_macos_host():
-            codegen_env["CPATH"] = ffigen_cpath
-            codegen_env["C_INCLUDE_PATH"] = ffigen_cpath
-        self.run(cmd, cwd=self.src_dir, check=True, env=codegen_env)
+        codegen_env = self._bridge_codegen_env(flutter_dir)
+        if not self.dry_run and os.path.isfile(self._bridge_stamp()):
+            os.remove(self._bridge_stamp())
+        self.run(cmd, cwd=self.src_dir, check=True, env=codegen_env,
+                 reject_diagnostics=True)
         rust_bridge = os.path.join(self.src_dir, "src", "bridge_generated.rs")
         dart_bridge = os.path.join(self.src_dir, "flutter", "lib",
                                    "generated_bridge.dart")
@@ -1330,6 +1405,8 @@ class Build:
                     "codegen did not write flutter/macos/Runner/bridge_generated.h — "
                     "Xcode would fail with 'Build input file cannot be found'")
             self._copy_mac_bridge_header_to_ios()
+            with open(self._bridge_stamp(), "w", encoding="utf-8") as f:
+                json.dump(self._bridge_signature(), f, indent=2)
             self.log(f"  ✓ {os.path.relpath(rust_bridge, self.src_dir)}")
 
     def customize_for(self, platform):
@@ -1389,6 +1466,8 @@ class Build:
 
     def _cargo_bin_version_text(self, name):
         """`name --version` stdout, or empty if the binary is missing."""
+        if self.dry_run:
+            return ""
         exe = shutil.which(name, path=self._effective_path())
         if not exe:
             return ""
@@ -1412,16 +1491,14 @@ class Build:
         cmd = ["cargo", "install", name, "--version", version, "--locked"]
         if extra:
             cmd.extend(extra)
-        self.run(cmd, check=False)
+        self.run(cmd, check=True)
 
     def setup_vcpkg(self, triplet):
         """Check out the pinned vcpkg commit and install RustDesk's native deps
         (ffmpeg, hwcodec, etc.) for `triplet`. Needs VCPKG_ROOT set."""
         root = os.environ.get("VCPKG_ROOT")
         if not root:
-            self.log("  ! VCPKG_ROOT not set — skipping vcpkg dep install. "
-                     "Set it to your vcpkg checkout so ffmpeg/hwcodec resolve.")
-            return
+            raise RuntimeError("VCPKG_ROOT not set; native dependencies cannot be installed")
         self.log(f"  vcpkg deps ({triplet}) from {root}")
         vcpkg_exe = os.path.join(root, "vcpkg.exe" if self.host["os"] == "Windows" else "vcpkg")
         rc, head = self._git_capture(["rev-parse", "HEAD"], cwd=root)
@@ -1434,15 +1511,15 @@ class Build:
                      "skip fetch/bootstrap")
         else:
             self.run(["git", "-C", root, "fetch", "--depth", "1", "origin",
-                      commit], check=False)
-            self.run(["git", "-C", root, "checkout", commit], check=False)
+                      commit], check=True)
+            self.run(["git", "-C", root, "checkout", commit], check=True)
             # After switching commits the vcpkg binary is stale — re-bootstrap it.
             bootstrap = os.path.join(root,
                                      "bootstrap-vcpkg.bat" if self.host["os"] == "Windows"
                                      else "bootstrap-vcpkg.sh")
             if os.path.isfile(bootstrap):
                 self.log("  · re-bootstrapping vcpkg (stale after checkout)")
-                self.run([bootstrap, "-disableMetrics"], cwd=root, check=False)
+                self.run([bootstrap, "-disableMetrics"], cwd=root, check=True)
         # RustDesk's vcpkg.json declares ffmpeg as a "host" dependency.
         # vcpkg installs host deps for the host triplet (default: x64-windows),
         # but hwcodec's build.rs hardcodes x64-windows-static/include.
@@ -1457,13 +1534,10 @@ class Build:
         # libavcodec/avcodec.h. Isolate each triplet, then symlink it back
         # to installed/{triplet} where scrap/hwcodec look.
         install_root, pkg_dir = self._vcpkg_isolate_triplet(root, triplet)
-        marker = os.path.join(pkg_dir, "include", "libavcodec", "avcodec.h")
-        if os.path.isfile(marker):
-            self.log(f"  · {triplet} ffmpeg headers already present — skip install")
-        else:
-            self.run([vcpkg_exe, "install", "--triplet", triplet,
-                      f"--x-install-root={install_root}"],
-                     cwd=self.src_dir, check=True, env=env)
+        # vcpkg validates the full manifest and reuses installed/binary packages.
+        self.run([vcpkg_exe, "install", "--triplet", triplet,
+                  f"--x-install-root={install_root}"],
+                 cwd=self.src_dir, check=True, env=env)
         self._vcpkg_publish_triplet(root, triplet, pkg_dir)
 
     def _vcpkg_isolate_triplet(self, vcpkg_root, triplet):
@@ -1471,6 +1545,8 @@ class Build:
         iso_parent = os.path.join(vcpkg_root, "installed-triplets", triplet)
         pkg = os.path.join(iso_parent, triplet)
         combined_pkg = os.path.join(vcpkg_root, "installed", triplet)
+        if self.dry_run:
+            return iso_parent, pkg
         os.makedirs(iso_parent, exist_ok=True)
         # One-time migrate: previous combined tree → isolated (keep ffmpeg).
         if (os.path.isdir(combined_pkg) and not os.path.islink(combined_pkg)
@@ -1485,6 +1561,8 @@ class Build:
 
     def _vcpkg_publish_triplet(self, vcpkg_root, triplet, pkg_dir):
         """Make VCPKG_ROOT/installed/{triplet} point at the isolated package."""
+        if self.dry_run:
+            return
         combined = os.path.join(vcpkg_root, "installed")
         dest = os.path.join(combined, triplet)
         if not os.path.isdir(pkg_dir):
@@ -1678,6 +1756,10 @@ class Build:
                 "MSBuild not found. Install VS Build Tools (Desktop C++ / MSBuild) "
                 "or add MSBuild to PATH. Prereqs use vswhere; this step does too.")
         self.log(f"  · MSBuild: {msbuild}")
+        for relative in (os.path.join("en-us", "Package.msi"), "Package.msi"):
+            old = os.path.join(msi_dir, "Package", "bin", "x64", "Release", relative)
+            if os.path.isfile(old):
+                os.remove(old)
         rc = self.run([msbuild, "msi.sln",
                        "-p:Configuration=Release", "-p:Platform=x64",
                        "/p:TargetVersion=Windows10",
@@ -1706,6 +1788,7 @@ class Build:
             shutil.copy2(msi_src, msi_dest)
             self._sign_windows_file(msi_dest)
             self.artifacts.append(msi_dest)
+            self.target_results["windows-x86_64-msi"] = "validated"
             self.log(f"  ✓ artifact: {msi_dest}")
         else:
             raise RuntimeError(
@@ -2237,7 +2320,11 @@ class Build:
         # the packed exe is built from a Release folder that doesn't have
         # custom_.txt yet and ships with no baked-in branding/password/perms.
         build_args = [self._py(), "build.py", "--hwcodec", "--flutter", "--vram",
-                      "--skip-portable-pack"]
+                      "--skip-portable-pack", "--skip-cargo"]
+        self.run(["cargo", "build", "--locked", "--release"],
+                 cwd=os.path.join(self.src_dir, "libs", "virtual_display", "dylib"))
+        self.run(["cargo", "build", "--locked", "--features", "flutter,hwcodec,vram",
+                  "--lib", "--release"], cwd=self.src_dir)
         self.run(build_args, cwd=self.src_dir)
 
         release = os.path.join(self.src_dir, "flutter", "build", "windows",
@@ -2245,6 +2332,13 @@ class Build:
         # category B: base64 custom_.txt next to the binary — must land in
         # `release` BEFORE the portable packer runs (see comment above).
         if not self.dry_run:
+            from .artifacts import pe_arch
+            for name in ("dylib_virtual_display.dll", f"{self._output_basename()}.exe"):
+                path = os.path.join(release, name)
+                if name.endswith(".exe") and not os.path.isfile(path):
+                    path = os.path.join(release, "rustdesk.exe")
+                if pe_arch(path) != "x86_64":
+                    raise RuntimeError(f"Wrong Windows binary architecture: {path}")
             env = self._env()
             customize.write_custom_txt(release, env, log=self.log)
             self._ensure_windows_printer_driver(release)
@@ -2271,7 +2365,8 @@ class Build:
                 os.path.join(self.workspace, "rustdesk-src",
                              f"rustdesk-{version}-install.exe"),
             ]
-            portable_exe = next((p for p in candidates if os.path.isfile(p)), None)
+            portable_exe = (next((p for p in candidates if os.path.isfile(p)), None)
+                            if not self.dry_run else None)
             if portable_exe:
                 os.makedirs(self.out_dir, exist_ok=True)
                 dest = os.path.join(
@@ -2281,7 +2376,8 @@ class Build:
                 self.artifacts.append(dest)
                 self.log(f"  ✓ artifact: {dest}")
             else:
-                self.log("  ! portable exe not found — portable pack may have failed")
+                if not self.dry_run:
+                    raise RuntimeError("Requested portable EXE was not produced")
             # Also copy the Release directory as a fallback (loose files)
             self._collect_dir(release, "windows", "Release")
 
@@ -2363,10 +2459,19 @@ class Build:
                     break
         self.log(f"  · portable startup exe: {exe_name}")
         portable_dir = os.path.join(self.src_dir, "libs", "portable")
+        packer_exe = os.path.join(self.src_dir, "target", "release",
+                                  "rustdesk-portable-packer.exe")
+        dest = os.path.join(self.src_dir, f"{basename}-{version}-install.exe")
+        if not self.dry_run:
+            for old in (packer_exe, dest):
+                if os.path.isfile(old):
+                    os.remove(old)
         self.run([self._py(), "-m", "pip", "install", "-r", "requirements.txt"],
-                 cwd=portable_dir, check=False)
+                 cwd=portable_dir, check=True)
         self.run([self._py(), "generate.py", "-f", release, "-o", ".",
                   "-e", exe_name], cwd=portable_dir)
+        if self.dry_run:
+            return
         packer_exe = os.path.join(self.src_dir, "target", "release",
                                   "rustdesk-portable-packer.exe")
         dest = os.path.join(self.src_dir, f"{basename}-{version}-install.exe")
@@ -2374,7 +2479,8 @@ class Build:
             shutil.move(packer_exe, dest)
             self.log(f"  ✓ packed portable exe -> {dest}")
         else:
-            self.log(f"  ! packer did not produce {packer_exe}")
+            if not self.dry_run:
+                raise RuntimeError(f"Packer did not produce {packer_exe}")
 
     def build_linux(self):
         self.log("\n=== Build Linux ===")
@@ -2383,10 +2489,10 @@ class Build:
         # Force-include it globally so vcpkg/RustDesk C++ builds compile
         # without manually patching every upstream file.
         existing = os.environ.get("CXXFLAGS", "")
-        if "-include cstdint" not in existing:
+        if "-include cstdint" not in existing and not self.dry_run:
             os.environ["CXXFLAGS"] = (
                 (existing + " ") if existing else "") + "-include cstdint"
-        self.log(f"  · CXXFLAGS={os.environ['CXXFLAGS']!r} (GCC 15+ compat)")
+        self.log(f"  · CXXFLAGS={os.environ.get('CXXFLAGS', '')!r} (GCC 15+ compat)")
         triplet = ("arm64-linux" if any(t.startswith("linux-aarch64")
                                         for t in self.target_ids)
                    else "x64-linux")
@@ -2417,12 +2523,22 @@ class Build:
         # appimage-builder extracts from the .deb, so always build it first.
         if wants_deb or wants_appimage:
             self._package_linux_deb()
+            if wants_deb:
+                self._collect(self.src_dir, (".deb",), "linux",
+                              names={f"rustdesk-{self.version}.deb"})
         if wants_rpm:
             self._package_linux_rpm()
         if wants_appimage:
             self._package_linux_appimage()
-        self._collect(self.src_dir, (".deb", ".rpm", ".AppImage", ".flatpak",
-                                     ".pkg.tar.zst"), "linux")
+        names = set()
+        if wants_deb:
+            names.add(f"rustdesk-{self.version}.deb")
+        if wants_rpm:
+            names.update(f"{self._output_basename()}-{self.version}{suffix}.rpm"
+                         for suffix in ("", "-suse"))
+        if wants_appimage:
+            names.add(f"{self._output_basename()}-{self.version}.AppImage")
+        self._collect(self.src_dir, (".deb", ".rpm", ".AppImage"), "linux", names=names)
 
     def _build_linux_core(self):
         """Run cargo build + flutter build linux without packaging."""
@@ -2431,10 +2547,20 @@ class Build:
             features += ",hwcodec"
         self.run(["cargo", "build", "--locked", "--features", features,
                   "--lib", "--release"],
-                 cwd=self.src_dir, check=False)
+                 cwd=self.src_dir, check=True)
         flutter_dir = os.path.join(self.src_dir, "flutter")
         self.run(["flutter", "build", "linux", "--release"],
-                 cwd=flutter_dir, check=False)
+                 cwd=flutter_dir, check=True)
+        if not self.dry_run:
+            from .artifacts import elf_arch
+            bundle = self._linux_bundle_dir()
+            binary = os.path.join(bundle or "", self._output_basename())
+            if not os.path.isfile(binary):
+                binary = os.path.join(bundle or "", "rustdesk")
+            expected = "aarch64" if any(t.startswith("linux-aarch64")
+                                       for t in self.target_ids) else "x86_64"
+            if elf_arch(binary) != expected:
+                raise RuntimeError(f"Linux executable architecture does not match {expected}")
 
     def _linux_bundle_dir(self):
         """Return the Flutter bundle for the requested Linux architecture."""
@@ -2447,6 +2573,11 @@ class Build:
     def _package_linux_deb(self):
         """Package the flutter bundle into a .deb using build.py's logic."""
         self.log("  · packaging .deb")
+        if self.dry_run:
+            self.run([self._py(), "build.py", "--flutter", "--skip-cargo"],
+                     cwd=self.src_dir, env={"DEB_ARCH": "arm64" if
+                     "linux-aarch64-deb" in self.target_ids else "amd64"})
+            return
         build_py = os.path.join(self.src_dir, "build.py")
         if any(t.startswith("linux-aarch64") for t in self.target_ids):
             with open(build_py, "r", encoding="utf-8", errors="surrogateescape") as f:
@@ -2476,6 +2607,9 @@ class Build:
         # bundle are already built and custom_.txt is staged in that bundle.
         deb_arch = ("arm64" if any(t.startswith("linux-aarch64")
                                   for t in self.target_ids) else "amd64")
+        deb_path = os.path.join(self.src_dir, f"rustdesk-{self.version}.deb")
+        if not self.dry_run and os.path.isfile(deb_path):
+            os.remove(deb_path)
         self.run([self._py(), "build.py", "--flutter", "--skip-cargo"],
                  cwd=self.src_dir, env={"DEB_ARCH": deb_arch})
         if self.dry_run:
@@ -2525,12 +2659,13 @@ class Build:
         basename = self._output_basename()
         bundle = self._linux_bundle_dir()
         if not bundle:
-            self.log("  ! no flutter linux bundle found — skipping .rpm")
-            return
+            if not self.dry_run:
+                raise RuntimeError("No Flutter Linux bundle for RPM packaging")
         rpm_tool = shutil.which("rpmbuild", path=self._effective_path())
         if not rpm_tool:
-            self.log("  ! rpmbuild not found — skipping .rpm")
-            return
+            if not self.dry_run:
+                raise RuntimeError("rpmbuild not found")
+            rpm_tool = "rpmbuild"
         # Determine arch and the bundle path segment used in the spec.
         arch = "x86_64"
         arch_seg = "x64"
@@ -2547,36 +2682,43 @@ class Build:
         ):
             spec = os.path.join(self.src_dir, "res", spec_name)
             if not os.path.isfile(spec):
-                self.log(f"  ! res/{spec_name} not found — skipping {suffix or 'fedora'} .rpm")
-                continue
+                if not self.dry_run:
+                    raise RuntimeError(f"Missing RPM spec: {spec_name}")
             # Update version in the spec
             self._sed_i(f"s/Version:    .*/Version:    {version}/g", spec,
-                        cwd=self.src_dir, check=False)
+                        cwd=self.src_dir, check=True)
             # For aarch64, patch the hardcoded x64 bundle path
             if arch_seg != "x64":
                 self._sed_i(f"s|linux/x64|linux/{arch_seg}|g", spec,
-                            cwd=self.src_dir, check=False)
+                            cwd=self.src_dir, check=True)
+            # Isolate packaging from the user's ~/rpmbuild and old RPMs.
+            rpm_root = os.path.join(self.workspace, "packaging", "rpm", spec_name)
+            if not self.dry_run:
+                if os.path.isdir(rpm_root):
+                    shutil.rmtree(rpm_root)
+                for sub in ("BUILD", "BUILDROOT", "RPMS", "SOURCES", "SPECS", "SRPMS", "db"):
+                    os.makedirs(os.path.join(rpm_root, sub), exist_ok=True)
             # Build binary RPM only (-bb), matching CI
-            self.run([rpm_tool, "-bb", spec],
-                     cwd=self.src_dir, check=False,
+            self.run([rpm_tool, "--define", f"_topdir {rpm_root}",
+                      "--define", f"_dbpath {os.path.join(rpm_root, 'db')}", "-bb", spec],
+                     cwd=self.src_dir, check=True,
                      env=rpm_env)
+            if self.dry_run:
+                continue
             # Collect the built RPM (rpmbuild always names it rustdesk-*.rpm)
-            rpm_glob = os.path.expanduser(
-                f"~/rpmbuild/RPMS/{arch}/rustdesk-*.rpm")
+            rpm_glob = os.path.join(rpm_root, "RPMS", arch, "rustdesk-*.rpm")
             rpms = _glob.glob(rpm_glob)
-            if rpms:
+            if len(rpms) == 1:
+                from .artifacts import verify_package
+                verify_package(rpms[0], arch)
                 name = f"{basename}-{version}{suffix}.rpm"
                 dest = os.path.join(self.src_dir, name)
                 shutil.move(rpms[0], dest)
                 built.append(dest)
-                os.makedirs(self.out_dir, exist_ok=True)
-                out = os.path.join(self.out_dir, name)
-                shutil.copy2(dest, out)
-                self.artifacts.append(out)
                 self.log(f"  ✓ created {name}")
-                self.log(f"  ✓ artifact: {out}")
+                self._collect(self.src_dir, (".rpm",), "linux", names={name})
             else:
-                self.log(f"  ! no .rpm found in ~/rpmbuild/RPMS/{arch}/ for {spec_name}")
+                raise RuntimeError(f"Expected exactly one fresh RPM for {spec_name}, got {len(rpms)}")
 
     def _package_linux_appimage(self):
         """Package the flutter bundle into an .AppImage using appimage-builder.
@@ -2589,6 +2731,10 @@ class Build:
         self.log("  · packaging .AppImage")
         version = self.version
         basename = self._output_basename()
+        if self.dry_run:
+            self.run(["appimage-builder", "--skip-tests", "--recipe",
+                      "appimage/AppImageBuilder-x86_64.yml"], cwd=self.src_dir)
+            return
         # appimage-builder needs a .deb to extract — build it first if we
         # haven't already.  build.py always produces rustdesk-{ver}.deb.
         deb_path = os.path.join(self.src_dir, f"rustdesk-{version}.deb")
@@ -2597,8 +2743,7 @@ class Build:
             self._package_linux_deb()
         deb_path = os.path.join(self.src_dir, f"rustdesk-{version}.deb")
         if not os.path.isfile(deb_path):
-            self.log("  ! .deb build failed — cannot create AppImage without it")
-            return
+            raise RuntimeError("AppImage requires a successfully packaged .deb")
         # Determine arch from the target
         arch = "x86_64"
         if any(t == "linux-aarch64-deb" for t in self.target_ids):
@@ -2606,39 +2751,33 @@ class Build:
         recipe = os.path.join(self.src_dir, "appimage",
                               f"AppImageBuilder-{arch}.yml")
         if not os.path.isfile(recipe):
-            self.log(f"  ! {recipe} not found — skipping .AppImage")
-            return
+            raise RuntimeError(f"Missing AppImage recipe: {recipe}")
         # Install appimage-builder if not present
         builder = shutil.which("appimage-builder", path=self._effective_path())
         if not builder:
-            self.log("  · installing appimage-builder...")
-            self.run(["pip3", "install", "setuptools_scm<10"], check=False)
-            self.run(["pip3", "install",
-                      "git+https://github.com/rustdesk-org/appimage-builder.git"],
-                     check=False)
-            builder = shutil.which("appimage-builder", path=self._effective_path())
-        if not builder:
-            self.log("  ! appimage-builder not found — skipping .AppImage")
-            return
+            raise RuntimeError("appimage-builder missing; install it in a dedicated Python venv")
         # Copy the .deb into the appimage dir (the recipe expects rustdesk.deb)
         appimage_dir = os.path.join(self.src_dir, "appimage")
         shutil.copy2(deb_path, os.path.join(appimage_dir, "rustdesk.deb"))
+        import glob as _glob
+        pattern = os.path.join(appimage_dir, f"*-{version}-{arch}.AppImage")
+        for old in _glob.glob(pattern):
+            os.remove(old)
         # Run appimage-builder
         self.run([builder, "--skip-tests", "--recipe", recipe],
-                 cwd=appimage_dir, check=False)
+                 cwd=appimage_dir, check=True)
         # Find and move the built AppImage
         import glob as _glob
         pattern = os.path.join(appimage_dir, f"*-{version}-{arch}.AppImage")
         imgs = _glob.glob(pattern)
-        if not imgs:
-            # fallback: any AppImage in the dir
-            imgs = _glob.glob(os.path.join(appimage_dir, "*.AppImage"))
-        if imgs:
+        if len(imgs) == 1:
+            from .artifacts import verify_package
+            verify_package(imgs[0], arch)
             dest = os.path.join(self.src_dir, f"{basename}-{version}.AppImage")
             shutil.move(imgs[0], dest)
             self.log(f"  ✓ created {basename}-{version}.AppImage")
         else:
-            self.log("  ! AppImage not found after build")
+            raise RuntimeError(f"Expected exactly one fresh AppImage, got {len(imgs)}")
 
     def _android_gradle_env(self, jdk17=None):
         """JAVA_HOME + ANDROID_SDK_ROOT for flutter build apk / Gradle."""
@@ -2660,6 +2799,9 @@ class Build:
 
     def _accept_android_sdk_licenses(self, jdk17=None):
         """Find the Android SDK and accept all licenses so Gradle doesn't fail."""
+        if self.dry_run:
+            self.log("  (dry run: would check Android SDK licenses)")
+            return
         # 1) Detect SDK path from env, local.properties, or common locations
         sdk = (os.environ.get("ANDROID_SDK_ROOT")
                or os.environ.get("ANDROID_HOME")
@@ -2743,10 +2885,21 @@ class Build:
         env = dict(os.environ)
         if jdk17:
             env["JAVA_HOME"] = jdk17
+        cmd = [sdkmanager, "--licenses"]
+        # The Unix launcher expands toolsdir through eval without quoting spaces.
+        tools_home = os.path.dirname(os.path.dirname(sdkmanager))
+        classpath = os.path.join(tools_home, "lib", "sdkmanager-classpath.jar")
+        java_home = jdk17 or env.get("JAVA_HOME", "")
+        if not is_win and java_home and os.path.isfile(classpath):
+            cmd = [os.path.join(java_home, "bin", "java"),
+                   f"-Dcom.android.sdklib.toolsdir={tools_home}",
+                   "-classpath", classpath,
+                   "com.android.sdklib.tool.sdkmanager.SdkManagerCli",
+                   f"--sdk_root={sdk}", "--licenses"]
         self.log(f"  · running sdkmanager --licenses ({sdk})")
         try:
             proc = subprocess.run(
-                [sdkmanager, "--licenses"],
+                cmd,
                 cwd=sdk, env=env, check=False,
                 input="y\n" * 20,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -2754,8 +2907,10 @@ class Build:
             )
             for line in proc.stdout.splitlines():
                 self.log(line)
+            if proc.returncode != 0:
+                raise RuntimeError(f"sdkmanager --licenses exited {proc.returncode}")
         except Exception as exc:
-            self.log(f"  ! sdkmanager --licenses failed: {exc}")
+            raise RuntimeError(f"sdkmanager --licenses failed: {exc}") from exc
         self.log("  ✓ Android SDK licenses accepted")
 
     def _ndk_host_tag(self, ndk_home=""):
@@ -2791,6 +2946,77 @@ class Build:
             return tags[0]
         return preferred[0]
 
+    def _prepare_android_dependencies(self):
+        if not self._is_macos_host():
+            return
+        manifest = os.path.join(self.src_dir, "vcpkg.json")
+        if self.dry_run:
+            self.log("  · (dry-run) omit unsupported macOS mfx-dispatch host dependency")
+            return
+        if not os.path.isfile(manifest):
+            return
+        with open(manifest, encoding="utf-8") as f:
+            data = json.load(f)
+        dependencies = data.get("dependencies", [])
+        supported = [d for d in dependencies if not (
+            isinstance(d, dict) and d.get("name") == "mfx-dispatch" and d.get("host") is True)]
+        if supported != dependencies:
+            # Keep the Android target library; only its unsupported host copy goes.
+            data["dependencies"] = supported
+            with open(manifest, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+                f.write("\n")
+            self.log("  · omitted macOS mfx-dispatch host dependency; Android target retained")
+
+    def _prepare_android_kotlin_tools(self):
+        """Match 1.4.9's Kotlin 2.1 metadata without migrating the entire Gradle stack."""
+        if self.version != "1.4.9":
+            return
+        settings = os.path.join(self.src_dir, "flutter", "android", "settings.gradle")
+        if not os.path.isfile(settings):
+            return
+        with open(settings, encoding="utf-8") as f:
+            text = f.read()
+        if not re.search(r'id\s+"org.jetbrains.kotlin.android"\s+version\s+"2\.1\.', text):
+            return
+        if not re.search(r'id\s+"com.android.application"\s+version\s+"7\.(3\.1|4\.2)"', text):
+            return
+        if self.dry_run:
+            self.log("  · (dry-run) use AGP 7.4.2 + R8 8.6.17 for Kotlin 2.1")
+            return
+        original = text
+        text = re.sub(r'(id\s+"com.android.application"\s+version\s+)"7\.3\.1"',
+                      r'\1"7.4.2"', text, count=1)
+        marker = "// DVForge: R8 compatible with Kotlin 2.1 metadata"
+        if marker not in text:
+            block = '''
+    // DVForge: R8 compatible with Kotlin 2.1 metadata
+    buildscript {
+        repositories { google(); mavenCentral() }
+        dependencies { classpath("com.android.tools:r8:8.6.17") }
+    }
+'''
+            text, count = re.subn(r'(pluginManagement\s*\{)', lambda m: m[1] + block,
+                                 text, count=1)
+            if not count:
+                raise RuntimeError("Cannot configure R8: pluginManagement missing in settings.gradle")
+        if text != original:
+            with open(settings, "w", encoding="utf-8") as f:
+                f.write(text)
+            self.log("  · AGP 7.4.2 + R8 8.6.17 selected for Kotlin 2.1 metadata")
+
+    def _publish_android_vcpkg_triplet(self, root, triplet, package_dir):
+        if not self.dry_run:
+            if not os.path.isdir(package_dir):
+                raise RuntimeError(f"Android dependencies missing: {package_dir}")
+            destination = os.path.join(root, "installed", triplet)
+            if os.path.isdir(destination) and not os.path.islink(destination):
+                if not os.path.samefile(destination, package_dir):
+                    backup = destination + f".ecz-preserved-{time.time_ns()}"
+                    shutil.move(destination, backup)
+                    self.log(f"  · retained previous dependency tree: {backup}")
+        self._vcpkg_publish_triplet(root, triplet, package_dir)
+
     def _patch_android_deps_script(self, path, host_tag):
         """1.4.9 build_android_deps.sh hardcodes linux-x86_64 and GNU readlink -f."""
         if self.dry_run or not os.path.isfile(path) or not host_tag:
@@ -2798,6 +3024,17 @@ class Build:
         with open(path, encoding="utf-8", errors="replace") as f:
             text = f.read()
         orig = text
+        if 'DVFORGE_VCPKG_INSTALL_ROOT' not in text:
+            text, count = re.subn(
+                r'--x-install-root="\$VCPKG_ROOT/installed"',
+                '--x-install-root="${DVFORGE_VCPKG_INSTALL_ROOT:-$VCPKG_ROOT/installed}"',
+                text, count=1)
+            if not count:
+                raise RuntimeError("Cannot isolate Android dependencies: unknown vcpkg install command")
+        # Keep arm-neon's package name and status consistent. Publish the alias in Python.
+        text = re.sub(r'if \[ -d "\$VCPKG_ROOT/installed/arm-neon-android" \]; then.*?\nfi',
+                      '# DVForge publishes arm-android without renaming package contents.',
+                      text, flags=re.DOTALL)
         text, n_tag = re.subn(
             r'HOST_TAG="[^"]*"', f'HOST_TAG="{host_tag}"', text, count=1)
         if self._is_macos_host() and "readlink -f" in text:
@@ -2974,19 +3211,13 @@ class Build:
         if jdk17:
             self.log(f"  · using JDK 17: {jdk17}")
         else:
-            self.log("  ! JDK 17 not found — Android build may fail with "
-                     "JVM-target mismatch. Install JDK 17 (board install, "
-                     "brew install openjdk@17, or --with-android).")
+            if not self.dry_run:
+                raise RuntimeError("JDK 17 is required for Android; install it before building")
 
-        # Clean stale Gradle caches from prior JDK 21 attempts
-        gradle_cache = os.path.expanduser("~/.gradle/caches")
-        if os.path.isdir(gradle_cache):
-            for stale in _glob.glob(os.path.join(gradle_cache, "7.*")) + \
-                          _glob.glob(os.path.join(gradle_cache, "8.*")):
-                shutil.rmtree(stale, ignore_errors=True)
-            init_gradle = os.path.expanduser("~/.gradle/init.gradle")
-            if os.path.isfile(init_gradle):
-                os.remove(init_gradle)
+        # Keep global Gradle caches and init scripts, including other projects'.
+
+        self._prepare_android_dependencies()
+        self._prepare_android_kotlin_tools()
 
         # Accept Android SDK licenses (Gradle fails if licenses aren't accepted)
         self._accept_android_sdk_licenses(jdk17)
@@ -3037,9 +3268,9 @@ class Build:
             commit = self._vcpkg_commit()
             self.log(f"  · vcpkg checkout {commit[:8]}")
             self.run(["git", "-C", vcpkg_root, "fetch", "--depth", "1",
-                      "origin", commit], check=False)
+                      "origin", commit], check=True)
             self.run(["git", "-C", vcpkg_root, "checkout", commit],
-                     check=False)
+                     check=True)
 
         # (rust_target, flutter_target, abi, ndk_script, jni_arch, cc_prefix)
         archs = {
@@ -3049,7 +3280,7 @@ class Build:
         }
         wanted = [a for a in self.target_ids if a in archs]
         universal = "android-universal" in self.target_ids
-        if universal and not wanted:
+        if universal:
             wanted = list(archs.keys())  # universal needs all three arch libs
 
         self._ensure_android_16k_pages()
@@ -3076,19 +3307,29 @@ class Build:
                 self.log("  · installing vcpkg Android deps")
                 bash = self._bash()
                 deps_env = {}
+                triplet = {"arm64-v8a": "arm64-android", "armeabi-v7a": "arm-neon-android",
+                           "x86_64": "x64-android"}[abi]
+                package_dir = None
+                if vcpkg_root:
+                    install_root, package_dir = self._vcpkg_isolate_triplet(vcpkg_root, triplet)
+                    deps_env["DVFORGE_VCPKG_INSTALL_ROOT"] = install_root
                 if ndk_home:
                     deps_env["ANDROID_NDK_HOME"] = ndk_home
                     deps_env["ANDROID_NDK_ROOT"] = ndk_home
                     deps_env["ANDROID_NDK"] = ndk_home
                 if bash or self.dry_run:
                     self.run([bash or "bash", deps_script, abi],
-                             cwd=self.src_dir, check=False,
+                             cwd=self.src_dir, check=True,
                              env=deps_env or None)
+                    if package_dir:
+                        self._publish_android_vcpkg_triplet(vcpkg_root, triplet, package_dir)
+                        if triplet == "arm-neon-android":
+                            self._publish_android_vcpkg_triplet(vcpkg_root, "arm-android", package_dir)
             else:
-                self.log("  ! flutter/build_android_deps.sh not found — "
-                         "hwcodec may fail without vcpkg FFmpeg headers")
+                if not self.dry_run:
+                    raise RuntimeError("flutter/build_android_deps.sh is missing")
 
-            self.run(["rustup", "target", "add", target], check=False)
+            self.run(["rustup", "target", "add", target], check=True)
             self._ensure_cargo_install("cargo-ndk", "3.1.2")
             script = os.path.join(self.src_dir, "flutter", ndk)
             self._patch_android_ndk_script(script)
@@ -3120,61 +3361,63 @@ class Build:
             if ndk_env.get("AR"):
                 self.log(f"  · AR={ndk_env['AR']}")
             if ndk_sysroot:
-                ndk_env["BINDGEN_EXTRA_CLANG_ARGS"] = f"--sysroot={ndk_sysroot}"
-                ndk_env[f"BINDGEN_EXTRA_CLANG_ARGS_{target.replace('-', '_')}"] = f"--sysroot={ndk_sysroot}"
+                sysroot_flag = shlex.quote(f"--sysroot={ndk_sysroot}")
+                ndk_env["BINDGEN_EXTRA_CLANG_ARGS"] = sysroot_flag
+                ndk_env[f"BINDGEN_EXTRA_CLANG_ARGS_{target.replace('-', '_')}"] = sysroot_flag
                 # Per-target CFLAGS/LDFLAGS for autotools-based crates that
                 # read CFLAGS_<target> (libsodium-sys via cc crate).
                 target_underscored = target.replace('-', '_')
-                ndk_env[f"CFLAGS_{target_underscored}"] = f"--sysroot={ndk_sysroot}"
-                ndk_env[f"CXXFLAGS_{target_underscored}"] = f"--sysroot={ndk_sysroot}"
+                ndk_env[f"CFLAGS_{target_underscored}"] = sysroot_flag
+                ndk_env[f"CXXFLAGS_{target_underscored}"] = sysroot_flag
                 ndk_env[f"LDFLAGS_{target_underscored}"] = (
-                    f"--sysroot={ndk_sysroot} -Wl,-z,max-page-size=16384")
+                    f"{sysroot_flag} -Wl,-z,max-page-size=16384")
                 self.log(f"  · NDK env: ANDROID_NDK_HOME={ndk_home}")
                 self.log(f"  · sysroot for {target}: {ndk_sysroot}")
-            # Stale Darwin-ar libsodium.a will keep failing until rebuilt.
-            if self._is_macos_host():
-                self.run(["cargo", "clean", "-p", "libsodium-sys",
-                          "--target", target],
-                         cwd=self.src_dir, check=False,
-                         env=ndk_env or None)
             if bash or self.dry_run:
-                self.run([bash or "bash", script], cwd=self.src_dir, check=False,
+                self.run([bash or "bash", script], cwd=self.src_dir, check=True,
                          env=ndk_env if ndk_env else None)
             else:
-                self.log("  ! bash not found — RustDesk's NDK build scripts are shell "
-                         "scripts. On Windows install Git Bash (bundled with Git for "
-                         "Windows) so these can run.")
+                raise RuntimeError("bash is required for Android native builds")
 
             # Copy the built .so and libc++_shared.so into jniLibs (matches CI)
             jni = os.path.join(self.src_dir, "flutter", "android", "app", "src",
                                "main", "jniLibs", abi)
-            os.makedirs(jni, exist_ok=True)
             so_src = os.path.join(self.src_dir, "target", target, "release",
                                   "liblibrustdesk.so")
-            if os.path.isfile(so_src):
+            if not self.dry_run and not os.path.isfile(so_src):
+                raise RuntimeError(f"Native build did not produce {so_src}")
+            if not self.dry_run:
+                with open(so_src, "rb") as library:
+                    header = library.read(20)
+                machines = {"arm64-v8a": 183, "armeabi-v7a": 40, "x86_64": 62}
+                if (len(header) < 20 or header[:4] != b"\x7fELF" or header[5] != 1 or
+                        int.from_bytes(header[18:20], "little") != machines[abi]):
+                    raise RuntimeError(f"Invalid native library architecture for {abi}: {so_src}")
+                os.makedirs(jni, exist_ok=True)
                 shutil.copy2(so_src, os.path.join(jni, "librustdesk.so"))
                 self.log(f"  ✓ copied librustdesk.so → jniLibs/{abi}/")
             if ndk_sysroot:
                 cpp_shared = os.path.join(
                     ndk_sysroot, "usr", "lib", jni_arch, "libc++_shared.so")
-                if os.path.isfile(cpp_shared):
+                if not self.dry_run and os.path.isfile(cpp_shared):
                     shutil.copy2(cpp_shared, os.path.join(jni, "libc++_shared.so"))
                     self.log(f"  ✓ copied libc++_shared.so → jniLibs/{abi}/")
 
             gradle_env = self._android_gradle_env(jdk17)
-            if not universal:
+            if tid in self.target_ids:
                 self.run(["flutter", "build", "apk", "--release",
                           "--target-platform", ftarget, "--split-per-abi"],
-                         cwd=os.path.join(self.src_dir, "flutter"), check=False,
+                         cwd=os.path.join(self.src_dir, "flutter"), check=True,
                          env=gradle_env or None)
+                self._collect(apk_dir, (".apk",), "android",
+                              names={f"app-{abi}-release.apk"})
         if universal:
             self.log("\n-- Android universal (all ABIs) --")
             gradle_env = self._android_gradle_env(jdk17)
             self.run(["flutter", "build", "apk", "--release"],
-                     cwd=os.path.join(self.src_dir, "flutter"), check=False,
+                     cwd=os.path.join(self.src_dir, "flutter"), check=True,
                      env=gradle_env or None)
-        self._collect(apk_dir, (".apk",), "android",
-                      names=self._android_expected_apk_names())
+            self._collect(apk_dir, (".apk",), "android", names={"app-release.apk"})
 
     def build_macos(self):
         self.log("\n=== Build macOS ===")
@@ -3201,14 +3444,14 @@ class Build:
 
         host_triple = self._host_rust_triple()
         toolchain = f"{MAC_RUST_VERSION}-{host_triple}"
-        self.run(["rustup", "toolchain", "install", toolchain], check=False)
+        self.run(["rustup", "toolchain", "install", toolchain], check=True)
         rust_targets = {host_triple}
         for s in specs:
             rust_targets.update(s["rust"])
         for target in sorted(rust_targets):
             self.run(["rustup", "target", "add", target,
-                      "--toolchain", toolchain], check=False)
-        self.run(["rustup", "default", toolchain], check=False)
+                      "--toolchain", toolchain], check=True)
+        self.run(["rustup", "default", toolchain], check=True)
         self._patch_macos_podfile()
         self._patch_macos_build_py()
         self._patch_macos_build_py_arch_env()
@@ -3216,8 +3459,8 @@ class Build:
 
         for spec in specs:
             self._build_one_macos(spec)
-
-        self._collect(self.src_dir, (".dmg",), "macos")
+            expected = f"{self._output_basename()}-{self.version}-{spec['suffix']}.dmg"
+            self._collect(self.src_dir, (".dmg",), "macos", names={expected})
 
     def _flutter_sdk_roots(self):
         """Flutter SDK homes that Xcode / dart might actually exec."""
@@ -3448,6 +3691,46 @@ class Build:
             return [catalog["macos-x86_64-dmg"]]
         return [catalog["macos-arm64-dmg"]]
 
+    def _patch_macos_lipo_phases(self, project_file=None):
+        if self.dry_run:
+            return
+        project_file = project_file or os.path.join(
+            self.src_dir, "flutter", "macos", "Runner.xcodeproj", "project.pbxproj")
+        if not os.path.isfile(project_file):
+            return
+        with open(project_file, encoding="utf-8") as f:
+            text = f.read()
+        marker = "# DVForge lipo runtime PATH"
+        prefix = (marker + '\nif [ -n "$ECZ_MACOS_TOOLS" ]; then\n'
+                  '  export PATH="$ECZ_MACOS_TOOLS:$PATH"\n'
+                  '  export ECZ_REAL_LIPO\nfi\n')
+        def patch_script(match):
+            script = json.loads(match[2])
+            if "macos_assemble.sh" not in script or marker in script:
+                return match[0]
+            return match[1] + json.dumps(prefix + script) + ";"
+        updated = re.sub(r'(?m)^(\s*shellScript = )("(?:\\.|[^"\\])*");', patch_script, text)
+        if updated != text:
+            with open(project_file, "w", encoding="utf-8") as f:
+                f.write(updated)
+            self.log("  · Flutter Run Script phases prepend the lipo wrapper at runtime")
+
+    def _macos_flutter_lipo_env(self):
+        if self.dry_run:
+            return {}
+        real_lipo = subprocess.check_output(["xcrun", "--find", "lipo"], text=True).strip()
+        tools = os.path.join(self._cache_park_dir(), "macos-tools")
+        os.makedirs(tools, exist_ok=True)
+        shim = os.path.join(tools, "lipo")
+        shutil.copy2(os.path.join(os.path.dirname(__file__), "macos_lipo.sh"), shim)
+        os.chmod(shim, 0o755)
+        self._patch_macos_lipo_phases()
+        path = os.pathsep.join((tools, os.path.dirname(real_lipo), self._effective_path()))
+        # Xcode sets a separate PATH for its Run Script phases.
+        return {"PATH": path, "FLUTTER_XCODE_PATH": path,
+                "ECZ_REAL_LIPO": real_lipo, "FLUTTER_XCODE_ECZ_REAL_LIPO": real_lipo,
+                "ECZ_MACOS_TOOLS": tools, "FLUTTER_XCODE_ECZ_MACOS_TOOLS": tools}
+
     def _build_one_macos(self, spec):
         """Cargo (+ lipo) for spec['rust'], then Flutter Xcode for spec['flutter']."""
         self.log(f"\n-- macOS {spec['suffix']} --")
@@ -3473,13 +3756,9 @@ class Build:
             rc = self.run(cmd, cwd=self.src_dir, check=False, env=env)
             if rc != 0:
                 self.log("  ! cargo failed — retry once (no sccache, jobs=1, "
-                         "fresh target dir)")
+                         "keep target dir)")
                 env["RUSTC_WRAPPER"] = None
                 env["CARGO_BUILD_JOBS"] = "1"
-                tdir = os.path.join(cargo_dir, triple)
-                if os.path.isdir(tdir) and not self.dry_run:
-                    self.log(f"  · wiping {tdir}")
-                    _force_rmtree(tdir)
                 rc = self.run(cmd, cwd=self.src_dir, check=False, env=env)
             if rc != 0:
                 raise RuntimeError(
@@ -3488,9 +3767,7 @@ class Build:
         self._stage_macos_binaries(spec["rust"], cargo_dir)
 
         self._prepare_macos_flutter_derived_dir()
-        if not self.dry_run:
-            self.log("  · cleaning flutter/build/macos (arch switch)")
-            self._wipe_macos_flutter_derived_dir()
+        self.log("  · keeping Flutter derived data for incremental compilation")
 
         # Run flutter ourselves. build.py interpolates ARCHS into an
         # unquoted `os.system(...)` string, so
@@ -3512,6 +3789,7 @@ class Build:
             "FLUTTER_XCODE_CLANG_ENABLE_EXPLICIT_MODULES": "NO",
             "COMPILER_INDEX_STORE_ENABLE": "NO",
         }
+        flutter_env.update(self._macos_flutter_lipo_env())
         if self._src_on_volumes():
             self.log(f"  · MODULE_CACHE_DIR = {module_cache} (boot disk)")
         self.log(f"  · Flutter ARCHS={spec['flutter']!r} "
@@ -3520,14 +3798,16 @@ class Build:
             ["flutter", "build", "macos", "--release"],
             cwd=flutter_dir, check=False, env=flutter_env)
         if rc != 0 and not self.dry_run:
-            self.log("  ! flutter macos failed — retry once (fresh derived data)")
-            self._wipe_macos_flutter_derived_dir()
+            self.log("  ! flutter macos failed — retry once (keep derived data)")
             rc = self.run(
                 ["flutter", "build", "macos", "--release"],
                 cwd=flutter_dir, check=False, env=flutter_env)
         if self.dry_run:
             self.log("  (dry run — skip app completeness check / dmg)")
             return
+
+        if rc != 0:
+            raise RuntimeError(f"flutter build macos failed (exit {rc})")
 
         app_name = self.config.get("appname", "RustDesk") or "RustDesk"
         product = self._macos_product_name()
@@ -3563,7 +3843,8 @@ class Build:
     def _macos_boot_cache(self, name):
         d = os.path.join(os.path.expanduser("~"), "Library", "Caches",
                          "dvforge", name, self.version)
-        os.makedirs(d, exist_ok=True)
+        if not self.dry_run:
+            os.makedirs(d, exist_ok=True)
         return d
 
     def _ensure_macos_cargo_dir(self):
@@ -4093,13 +4374,13 @@ class Build:
         if not named_ok:
             self.log(f"  · ad-hoc codesigning {os.path.basename(app_bundle)}")
             self.run(["codesign", "--force", "--deep", "--sign", "-",
-                      app_bundle], check=False)
+                      app_bundle], check=True)
         rc = self.run(["codesign", "--verify", "--verbose=1",
-                       app_bundle], check=False)
+                       app_bundle], check=True)
         if rc == 0:
             self.log("  ✓ codesign verified")
         else:
-            self.log("  ! codesign verification failed — app may be killed on launch")
+            raise RuntimeError("codesign verification failed; refusing to package an invalid app")
 
     def _sign_macos_dmg(self, dmg_path):
         identity = (self.config.get("signMacIdentity") or "").strip()
@@ -4177,13 +4458,10 @@ class Build:
         app = os.path.join(self.src_dir, "flutter", "build", "macos",
                            "Build", "Products", "Release", app_basename)
         if not self._macos_app_complete(app):
-            self.log(f"  ! {app_basename} is missing or empty — skipping DMG "
-                     "(a failed Flutter build used to yield a ~13 KB stub)")
-            return
+            raise RuntimeError(f"{app_basename} is missing or incomplete; cannot package DMG")
         create_dmg = shutil.which("create-dmg", path=self._effective_path())
         if not create_dmg:
-            self.log("  ! create-dmg not found — skipping DMG creation")
-            return
+            raise RuntimeError("create-dmg not found; requested DMG cannot be packaged")
         # The selected RustDesk build version wins; the config file's "version"
         # field is the app-release string rdgen writes and can be stale.
         version = self.version or self.config.get("version", "")
@@ -4197,7 +4475,9 @@ class Build:
         dmg_path = os.path.join(self.src_dir, dmg_name)
         flutter_dir = os.path.join(self.src_dir, "flutter")
         tmp_dmg = os.path.join(flutter_dir, f"{basename}.dmg")
-        self.run([
+        if os.path.isfile(tmp_dmg):
+            os.remove(tmp_dmg)
+        rc = self.run([
             create_dmg,
             "--volname", f"{app_name} Installer",
             "--window-pos", "200", "120",
@@ -4208,30 +4488,13 @@ class Build:
             "--hide-extension", app_basename,
             tmp_dmg, app,
         ], cwd=flutter_dir, check=False)
-        produced = tmp_dmg if os.path.isfile(tmp_dmg) else ""
-        if not produced:
-            try:
-                newest = None
-                newest_mtime = 0
-                for name in os.listdir(flutter_dir):
-                    if not name.endswith(".dmg"):
-                        continue
-                    p = os.path.join(flutter_dir, name)
-                    try:
-                        st = os.stat(p)
-                    except OSError:
-                        continue
-                    if st.st_size > 1_000_000 and st.st_mtime >= newest_mtime:
-                        newest, newest_mtime = p, st.st_mtime
-                produced = newest or ""
-            except OSError:
-                produced = ""
+        produced = tmp_dmg if rc == 0 and os.path.isfile(tmp_dmg) else ""
         if not produced:
             self.log("  · create-dmg did not finish a .dmg — hdiutil fallback")
             self.run([
                 "hdiutil", "create", "-volname", f"{app_name} Installer",
                 "-srcfolder", app, "-ov", "-format", "UDZO", dmg_path,
-            ], check=False)
+            ], check=True)
             produced = dmg_path if os.path.isfile(dmg_path) else ""
         if produced and os.path.abspath(produced) != os.path.abspath(dmg_path):
             shutil.move(produced, dmg_path)
@@ -4239,7 +4502,7 @@ class Build:
             self.log(f"  ✓ created {dmg_name}")
             self._sign_macos_dmg(dmg_path)
         else:
-            self.log("  ! no .dmg produced after create-dmg/hdiutil")
+            raise RuntimeError("No DMG produced after create-dmg/hdiutil")
 
     # ---- artifact collection ---------------------------------------------
     def _clear_files(self, directory, exts):
@@ -4274,10 +4537,17 @@ class Build:
         return names
 
     def _collect(self, root, exts, platform, names=None):
-        os.makedirs(self.out_dir, exist_ok=True)
-        if self.dry_run or not os.path.isdir(root):
+        if self.dry_run:
             self.log(f"  (would collect {'/'.join(exts)} from {root})")
             return
+        if not os.path.isdir(root):
+            raise RuntimeError(f"Artifact directory is missing: {root}")
+        if names is not None:
+            available = {f for _, _, files in os.walk(root) for f in files}
+            missing = set(names) - available
+            if missing:
+                raise RuntimeError("Requested artifacts missing: " + ", ".join(sorted(missing)))
+        os.makedirs(self.out_dir, exist_ok=True)
         appname = self.config.get("appname", "RustDesk")
         basename = self._output_basename()
         # Only collect files whose base name starts with the app name,
@@ -4302,6 +4572,10 @@ class Build:
                 if not f.lower().startswith(prefixes):
                     continue
                 src = os.path.join(dp, f)
+                self.out_dir = self._artifact_dir(platform, f)
+                if platform == "linux":
+                    from .artifacts import verify_package
+                    verify_package(src, os.path.basename(self.out_dir))
                 try:
                     if f.lower().endswith(".dmg") and os.path.getsize(src) < 1_000_000:
                         self.log(f"  · skip stub dmg {src} ({os.path.getsize(src)} bytes)")
@@ -4325,17 +4599,26 @@ class Build:
                     continue
                 shutil.copy2(src, dest)
                 self.artifacts.append(dest)
+                arch = os.path.basename(self.out_dir)
+                for target in detect.TARGETS:
+                    if (target["id"] in self.target_results and target["platform"] == platform
+                            and target["arch"] == arch and target["ext"] != "rpm"
+                            and f.lower().endswith("." + target["ext"].lower())):
+                        self.target_results[target["id"]] = "validated"
                 self.log(f"  ✓ artifact: {dest}")
                 found += 1
         if not found:
-            self.log(f"  ! no {'/'.join(exts)} artifacts found under {root}")
+            raise RuntimeError(f"No {'/'.join(exts)} artifacts found under {root}")
 
     def _collect_dir(self, root, platform, outname):
         """Copy an entire build directory into the output, preserving structure."""
-        os.makedirs(self.out_dir, exist_ok=True)
+        self.out_dir = self._artifact_dir(platform, outname)
         if self.dry_run or not os.path.isdir(root):
+            if not self.dry_run:
+                raise RuntimeError(f"Missing {platform} build directory: {root}")
             self.log(f"  (would collect {platform} directory from {root})")
             return
+        os.makedirs(self.out_dir, exist_ok=True)
         dest = os.path.join(self.out_dir, outname)
         if os.path.exists(dest):
             shutil.rmtree(dest)
@@ -4352,6 +4635,20 @@ class Build:
                 self.log(f"  · renamed rustdesk.exe -> {basename}.exe")
         self.artifacts.append(dest)
         self.log(f"  ✓ artifact: {dest}")
+
+    def _artifact_dir(self, platform, name=""):
+        from .artifacts import output_dir
+        arch = "x86_64"
+        if platform == "linux" and any(t.startswith("linux-aarch64") for t in self.target_ids):
+            arch = "aarch64"
+        elif platform == "android":
+            arch = ("aarch64" if "arm64-v8a" in name else
+                    "armv7" if "armeabi-v7a" in name else
+                    "x86_64" if "x86_64" in name else "universal")
+        elif platform == "macos":
+            arch = ("universal" if name.endswith("-universal.dmg") else
+                    "aarch64" if name.endswith(("-arm64.dmg", "-aarch64.dmg")) else "x86_64")
+        return output_dir(self.workspace, platform, self.version, arch)
 
     # -- farm dispatch ------------------------------------------------------
     def _farm_only_targets(self):
@@ -4376,6 +4673,8 @@ class Build:
             return None
         if self.dry_run:
             self.log(f"  (would dispatch {', '.join(target_ids)} to farm worker)")
+            for tid in target_ids:
+                self.target_results[tid] = "planned"
             return None
 
         farm = self._farm_dir()
@@ -4416,6 +4715,8 @@ class Build:
         self.log(f"\n=== Farm dispatch ===")
         self.log(f"  queued job {jid} for {', '.join(target_ids)}")
         self.log(f"  waiting for worker in {os.path.join(farm, 'outbox')}/{jid}/ …")
+        for tid in target_ids:
+            self.target_results[tid] = "running"
         return jid, farm
 
     def _wait_for_farm_job(self, jid, farm):
@@ -4435,15 +4736,32 @@ class Build:
                     time.sleep(poll_interval)
                     continue
                 if status.get("ok"):
+                    if status.get("id") != jid or status.get("targets") != ["linux-aarch64-deb"]:
+                        raise RuntimeError("Remote result job/target mismatch")
+                    from .artifacts import output_dir, sha256, verify_package
+                    destination = output_dir(self.workspace, "linux", self.version, "aarch64")
+                    records = {m["name"]: m for m in status.get("artifact_metadata", [])}
                     copied = 0
                     for art in status.get("artifacts") or []:
                         art_path = os.path.join(outbox, jid, os.path.basename(art))
+                        if not art_path.endswith(".deb"):
+                            raise RuntimeError("Unexpected ARM64 worker artifact type")
                         if os.path.isfile(art_path):
-                            os.makedirs(self.out_dir, exist_ok=True)
-                            shutil.copy2(art_path, self.out_dir)
-                            dest_art = os.path.join(self.out_dir, os.path.basename(art_path))
+                            record = records.get(os.path.basename(art_path))
+                            if not record or record.get("sha256") != sha256(art_path):
+                                raise RuntimeError("Remote artifact checksum missing or mismatched; update the worker")
+                            verify_package(art_path, "aarch64")
+                            os.makedirs(destination, exist_ok=True)
+                            dest_art = os.path.join(destination, os.path.basename(art_path))
+                            shutil.copy2(art_path, dest_art)
+                            if sha256(dest_art) != record["sha256"]:
+                                os.remove(dest_art)
+                                raise RuntimeError("Remote artifact changed during transfer")
                             self.artifacts.append(dest_art)
                             copied += 1
+                    if copied == 0:
+                        raise RuntimeError("Remote job reported success without artifacts")
+                    self.target_results["linux-aarch64-deb"] = "validated"
                     self.log(f"  ✓ farm worker completed {jid} ({copied} artifacts)")
                     return
                 error = status.get("error") or "unknown farm worker failure"
@@ -4488,16 +4806,32 @@ class Build:
             # Run remaining targets locally. If everything went to the farm,
             # this host does not need a RustDesk checkout or local toolchains.
             original_target_ids = self.target_ids
+            progress_completed = 0
+            local_platforms = {t["platform"] for t in detect.TARGETS
+                               if t["id"] in original_target_ids and t["id"] not in farm_targets}
+            progress_total = (7 if local_platforms else 1) + len(local_platforms) + (1 if pending_farm else 0)
+            def finish_phase():
+                nonlocal progress_completed
+                progress_completed += 1
+                self.log(f"Progress: {progress_completed}/{progress_total} phases")
+            self.log(f"Progress: 0/{progress_total} phases")
             farm_set = set(farm_targets)
             self.target_ids = [t for t in original_target_ids if t not in farm_set]
             try:
                 if self.target_ids:
+                    self._validate_build_paths()
                     self._ensure_flutter()
+                    finish_phase()
                     self.checkout_source()
+                    finish_phase()
                     self._ensure_rust()
+                    finish_phase()
                     self._ensure_sccache()
+                    finish_phase()
                     self._ensure_llvm()
+                    finish_phase()
                     self.generate_bridge()
+                    finish_phase()
                     plats = self.platforms_needed()
                     dispatch = {
                         "windows": self.build_windows,
@@ -4507,12 +4841,23 @@ class Build:
                     }
                     for p in plats:
                         self._check_cancel()
+                        self.out_dir = self._artifact_dir(p)
+                        group = [t["id"] for t in detect.TARGETS if t["platform"] == p and t["id"] in self.target_ids]
+                        self.log("-- " + ", ".join(group) + " --")
+                        for target in detect.TARGETS:
+                            if target["platform"] == p and target["id"] in self.target_ids:
+                                self.target_results[target["id"]] = "running"
                         dispatch[p]()
+                        finish_phase()
+                        for target in detect.TARGETS:
+                            if target["platform"] == p and target["id"] in self.target_ids:
+                                self.target_results[target["id"]] = "planned" if self.dry_run else "validated"
             finally:
                 self.target_ids = original_target_ids
 
             if pending_farm:
                 self._wait_for_farm_job(*pending_farm)
+                finish_phase()
 
             self._log_sccache_stats()
 
@@ -4521,13 +4866,24 @@ class Build:
             self.log(f"Artifacts ({len(self.artifacts)}):")
             for a in self.artifacts:
                 self.log(f"  {a}")
-            return {"ok": True, "artifacts": self.artifacts, "seconds": elapsed}
+            from .artifacts import metadata
+            artifact_metadata = [metadata(a) for a in self.artifacts]
+            if not self.target_ids or len(farm_set) == len(original_target_ids):
+                progress_total = progress_completed + 1
+            finish_phase()
+            return {"ok": True, "artifacts": self.artifacts, "seconds": elapsed,
+                    "artifact_metadata": artifact_metadata,
+                    "targets": self.target_results}
         except BuildCancelled:
             self.log("\n!! build cancelled by user")
-            return {"ok": False, "cancelled": True, "artifacts": self.artifacts}
+            return {"ok": False, "cancelled": True, "artifacts": self.artifacts,
+                    "targets": {t: ("cancelled" if s in ("pending", "running") else s)
+                                for t, s in self.target_results.items()}}
         except Exception as e:
             self.log(f"\n!! BUILD FAILED: {e}")
-            return {"ok": False, "error": str(e), "artifacts": self.artifacts}
+            return {"ok": False, "error": str(e), "artifacts": self.artifacts,
+                    "targets": {t: ("failed" if s == "running" else "not-started" if s == "pending" else s)
+                                for t, s in self.target_results.items()}}
 
 
 def preflight(target_ids, prereqs_status, host=None):

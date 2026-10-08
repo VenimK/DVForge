@@ -25,6 +25,7 @@ Or a full job object:
 from __future__ import print_function
 
 import argparse
+import hmac
 import json
 import mimetypes
 import os
@@ -953,12 +954,9 @@ class Handler(BaseHTTPRequestHandler):
         if not TOKEN:
             return True
         got = self.headers.get("Authorization") or ""
-        if got == "Bearer " + TOKEN:
+        if hmac.compare_digest(got, "Bearer " + TOKEN):
             return True
-        if (self.headers.get("X-Farm-Token") or "") == TOKEN:
-            return True
-        qs = parse_qs(urlparse(self.path).query)
-        if (qs.get("token") or [""])[0] == TOKEN:
+        if hmac.compare_digest(self.headers.get("X-Farm-Token") or "", TOKEN):
             return True
         self._send(401, {"error": "need Authorization: Bearer <token>"})
         return False
@@ -1227,6 +1225,8 @@ def main():
     p.add_argument("--port", type=int, default=int(os.environ.get("DVFORGE_QUEUE_PORT", "8766")))
     p.add_argument("--farm", default=FARM)
     args = p.parse_args()
+    if args.host not in ("127.0.0.1", "localhost", "::1") and len(TOKEN) < 32:
+        p.error("Non-loopback queues require DVFORGE_FARM_TOKEN of at least 32 characters and a TLS reverse proxy")
     global INBOX, OUTBOX, FAILED, RUNNING, RATINGS_FILE
     farm = os.path.abspath(args.farm)
     INBOX = os.path.join(farm, "inbox")

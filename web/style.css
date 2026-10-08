@@ -647,6 +647,30 @@ legend { font-size: 11px; letter-spacing: .14em; text-transform: uppercase; colo
 
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
 
+/* Five-step navigation and long artifact paths must not widen the page. */
+.app { grid-template-columns: 320px minmax(0, 1fr); }
+.main, .form, .config-grid, .adv-wrap { min-width: 0; }
+.tabs, .tray, .tray-actions { flex-wrap: wrap; }
+.tab { letter-spacing: 0; }
+.tab:disabled { color: var(--ink-faint); cursor: default; }
+.panel-head h1 { letter-spacing: 0; }
+#review-summary { overflow-wrap: anywhere; }
+#review-summary h2 { font-size: 16px; }
+#review-summary dd { margin: 4px 0 14px; }
+.artifact, .artifact a { min-width: 0; overflow-wrap: anywhere; }
+.artifact a { color: var(--steel); }
+@media (max-width: 700px) {
+  .app { display: flex; flex-direction: column; }
+  .main { order: 0; width: 100%; padding: 0 16px 32px; }
+  .rig { order: 1; position: static; height: auto; width: 100%; }
+  .tabs { position: static; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .tab { font-size: 12px; padding: 10px 4px; }
+  .tray, .tray-actions { gap: 12px; }
+  .build-bar { gap: 10px; }
+  .console { height: 400px; padding: 12px; }
+  input, select, textarea { max-width: 100%; }
+}
+
 /* ── config-missing banner (Build tab) ─────────────────── */
 .config-banner {
   margin-bottom: 16px; padding: 14px 16px;
@@ -672,3 +696,18 @@ legend { font-size: 11px; letter-spacing: .14em; text-transform: uppercase; colo
 .build-bar { gap: 12px; flex-wrap: wrap; }
 .build-bar #btn-copy-log { margin-left: auto; }
 .build-bar .btn { padding: 6px 12px; font-size: 12.5px; }
+
+:root { --wizard-footer-height: 80px; }
+body { padding-bottom: var(--wizard-footer-height); }
+.wizard-footer { position: fixed; bottom: 0; left: 0; right: 0; z-index: 50; background: var(--bg, #16181b); border-top: 1px solid #444; padding: 14px 24px calc(14px + env(safe-area-inset-bottom)); }
+.wizard-footer > div:not([hidden]) { display: flex; justify-content: flex-end; gap: 12px; flex-wrap: wrap; max-width: 1400px; margin: auto; }
+.wizard-footer [hidden], #log-view[hidden] { display: none; }
+.progress-stack { margin: 20px 0; }
+.progress-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px 20px; padding: 14px 0; border-bottom: 1px solid #444; }
+.progress-row progress { grid-column: 1 / -1; width: 100%; height: 12px; accent-color: #56bda3; }
+.progress-row small { grid-column: 1 / -1; opacity: .7; }
+.log-controls { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin: 18px 0; }
+.log-controls label { display: flex; align-items: center; gap: 8px; }
+.log-filter { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.log-filter select { width: auto; max-width: 100%; }
+@media (max-width: 700px) { .wizard-footer { padding: 12px 16px; } .wizard-footer .btn { padding: 10px 12px; } }
