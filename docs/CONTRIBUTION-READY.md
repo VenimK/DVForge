@@ -5,12 +5,16 @@ This directory is separate from the private working builder. It contains upstrea
 sample configurations, not customer configurations. Customer profile integration
 and server-policy customization are intentionally excluded.
 
-Public-copy verification: 37 Python tests and mocked desktop/mobile wizard tests
+Public-copy verification: 43 Python tests and mocked desktop/mobile wizard tests
 passed. Upstream sample configurations match HEAD exactly. A read-only scan of
 101 source/documentation files found no matches for 20 customer-specific values
 from the private JSON files (servers, keys, password, identifiers and branding).
 No toolchains, workspace, transfer archives or customer profile files were copied.
 This is a broad review branch, not a claim that every platform has been tested.
+
+The AppImage rootless packaging installer is now included. Its automated tests
+pass, but actual container preparation and a complete AppImage build remain
+pending user acceptance. Do not present that path as a verified release target.
 
 Post docs/ISSUE-23-UPDATE.md as a comment on the existing audit issue. Review the
 diff before committing. Prefer splitting this broad contribution into smaller PRs

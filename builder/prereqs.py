@@ -480,7 +480,14 @@ def check_rpmbuild():
 
 def check_appimage_builder():
     p = _which("appimage-builder")
+    from . import appimage_container
+    if p and appimage_container.is_wrapper(p):
+        if appimage_container.ready():
+            return _status(True, "rootless packaging container", p)
+        return _status(False, hint="Auto install: prepare the AppImage packaging container")
     if p:
+        if not _which("apt-key"):
+            return _status(False, hint="Auto install: legacy AppImage builder requires the packaging container on this host")
         return _status(True, "appimage-builder", p)
     return _status(False, hint=_install_hint("appimage_builder"))
 

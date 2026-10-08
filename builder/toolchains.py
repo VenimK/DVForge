@@ -261,7 +261,10 @@ TOOLS = {
 }
 
 # which detection id each tool satisfies (prereqs.py ids)
-SATISFIES = {"flutter": "flutter", "llvm": "llvm", "android_ndk": "android_ndk",
+TOOLS["appimage_builder"] = {"label": "AppImage packaging (rootless container)",
+                             "kind": "appimage_container", "marker": "bin/appimage-builder"}
+
+SATISFIES = {"appimage_builder": "appimage_builder", "flutter": "flutter", "llvm": "llvm", "android_ndk": "android_ndk",
              "android_sdk": "android_sdk",
              "java": "java", "vcpkg": "vcpkg", "rust": "rust",
              "vs_buildtools": "msbuild", "nuget": "nuget", "dotnet": "dotnet",
@@ -411,6 +414,9 @@ def installable(host_os=None, host_arch=None):
     out = {}
     for tid, spec in TOOLS.items():
         ok, reason = True, ""
+        if spec["kind"] == "appimage_container" and (host_os != "Linux" or host_arch != "x86_64"):
+            out[tid] = {"label": spec["label"], "ok": False, "reason": "AppImage packaging requires Linux x86_64"}
+            continue
         # Android APKs are Linux/macOS. Windows is still blocked (MSYS2 Perl
         # breaks openssl-sys), so don't offer NDK/SDK installers there.
         if tid in ("android_ndk", "android_sdk") and host_os == "Windows":
@@ -1141,6 +1147,12 @@ def install_one(tid, root, log, cancelled=lambda: False):
     home_target = os.path.join(base, tid)
 
     log(f"\n=== Installing {spec['label']} ===")
+
+    if spec["kind"] == "appimage_container":
+        from . import appimage_container
+        if host_os != "Linux" or host_arch != "x86_64":
+            raise RuntimeError("AppImage packaging requires Linux x86_64")
+        return appimage_container.install(home_target, log, cancelled)
 
     if spec["kind"] == "cargo":
         # Tools installed via `cargo install` (e.g. sccache).

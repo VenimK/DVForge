@@ -31,6 +31,10 @@ branch based on DVForge main at d150d4d. Nothing has been merged upstream yet.
   step percentages depend on actual tool-reported progress. Unknown progress is
   indeterminate. ETA is an approximation, especially with uneven phase lengths.
 - Limited hardening of the existing farm transport and result validation.
+- Added the AppImage sidebar auto-installer: rootless Podman packaging with
+  Ubuntu 22.04 and a pinned RustDesk appimage-builder revision. Host compilation
+  stays unchanged. Registration/readiness/wrapper/mount tests pass; real image
+  preparation and full AppImage acceptance are still pending.
 - Fixed a sidebar loading race: install buttons are re-rendered when installer
   metadata arrives after prerequisite detection. A delayed-response browser
   regression test covers this; the user also confirmed the sidebar works.

@@ -96,8 +96,13 @@ def check(tool):
     st["label"] = prereqs.LABELS.get(tool, tool)
     if tool == "flutter" and st.get("present") and "3.24.5" not in st.get("version", ""):
         st.update(present=False, note="Pinned Flutter 3.24.5 required")
-    if tool == "appimage_builder" and not shutil.which("apt-key"):
-        st.update(present=False, hint="Legacy AppImage recipe requires apt-key; use a compatible Debian/Ubuntu build container, not a dummy apt-key shim")
+    if tool == "appimage_builder":
+        from . import appimage_container
+        path = shutil.which("appimage-builder")
+        if appimage_container.is_wrapper(path):
+            st.update(present=appimage_container.ready(), hint="Use Auto install to prepare the rootless AppImage packaging container")
+        elif not shutil.which("apt-key"):
+            st.update(present=False, hint="Use Auto install to prepare the rootless AppImage packaging container")
     return st
 
 

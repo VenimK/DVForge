@@ -180,8 +180,13 @@ profiles, private branding, server-policy patches and credentials are not includ
   separate outputs by OS, version and architecture.
 - **Existing farm hardening:** stricter transport/result checks; this is not a new
   generic authenticated worker controller.
+- **AppImage auto-install:** the sidebar can prepare a rootless Podman packaging
+  image for Linux x86_64. On Debian/Ubuntu it installs missing Podman dependencies
+  through the existing approval flow, then prepares an Ubuntu 22.04 image with a
+  pinned RustDesk appimage-builder revision. Only packaging runs in the container;
+  compilation caches stay on the host. No dummy host `apt-key` shim is added.
 
-**Verification:** the sanitized public copy passes 37 Python regression tests and
+**Verification:** the sanitized public copy passes 43 Python regression tests and
 mocked desktop/mobile wizard tests, including delayed installer metadata. Real
 local RustDesk 1.4.9 runs produced all seven selected macOS/Android outputs; earlier
 Linux x86_64 runs produced DEB/RPM packages. The user confirmed Linux authentication
@@ -189,10 +194,11 @@ fallback and sidebar behavior on a Debian 13 derivative. These results do not pr
 every platform, packaging format or client runtime feature works.
 
 **Still open:** Windows runtime/display-driver acceptance, native ARM acceptance,
-DRM/unattended Wayland and generic worker scheduling. The rootless AppImage
-auto-installer is a separate local extension and is **not included in this public
-branch**. On Debian 13, the legacy AppImage recipe still needs a compatible packaging
-environment; deselect AppImage to build DEB/RPM without that requirement.
+DRM/unattended Wayland and generic worker scheduling. The AppImage container
+installer is included, but its real image preparation and complete AppImage build
+are **not yet acceptance-tested**. Automated tests cover installer registration,
+sidebar readiness, wrapper creation and source-only mounts. Deselect AppImage to
+build DEB/RPM without preparing this packaging environment.
 
 See [the audit report](docs/COMMUNITY-REPORT.md),
 [issue follow-up](docs/ISSUE-23-UPDATE.md) and
@@ -805,7 +811,7 @@ Hard-won fixes from real Windows/macOS/Linux test rounds (see `HANDOFF.md` for t
 | Sidebar says "Auto install" but no button appears | Fixed a loading race between prerequisite detection and installer metadata. Update this branch, restart the server, refresh the page, or click **re-scan**. |
 | `sudo: a password is required` | Dependency preparation requests Polkit approval or opens a local terminal. Keep DVForge running as the normal desktop user. |
 | `No authentication agent found` | The terminal fallback needs a Linux desktop display and a terminal emulator. Start DVForge from the local desktop session rather than SSH without a display. |
-| AppImage recipe requires `apt-key` on Debian 13 | DEB/RPM do not require this tool. Deselect AppImage or use a compatible packaging environment. The separate local container extension is not included in this contribution branch. |
+| AppImage recipe requires `apt-key` on Debian 13 | Use the sidebar AppImage **install** action or **Auto install** to prepare the rootless packaging container. Debian/Ubuntu setup may request administrator approval for Podman packages. Actual AppImage acceptance remains pending. DEB/RPM do not require this environment. |
 | `flutter pub get` failed / unusable package config | Fix the preceding solver/network/SDK error. Codegen stops instead of producing dummy bindings; do not blindly delete all caches. |
 | Android `.sh` scripts fail on Windows | They need bash; DVForge auto-finds **Git Bash** (`<Git>\bin\bash.exe`). If missing, install Git for Windows. Or build Android via **WSL2**. |
 | `ConnectionAbortedError` / `WinError 10053` spam | Normal SSE disconnect when you close the browser tab — harmless, now swallowed. |
