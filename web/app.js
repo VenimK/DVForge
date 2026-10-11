@@ -2,7 +2,7 @@
 
 const $  = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
-const api = (p, opts) => fetch(p, opts).then(async r => {
+const api = (p, opts) => fetch(p, { signal: AbortSignal.timeout(60000), ...opts }).then(async r => {
   let data = {};
   try { data = await r.json(); } catch { data = { error: r.statusText || "bad response" }; }
   if (r.status === 404 && String(p).startsWith("/api/signing/")) {
@@ -19,7 +19,16 @@ const state = {
 };
 
 /* ── tabs ─────────────────────────────────────────────── */
+function showStep(step) {
+  const tab = $(`.tab[data-tab="${step}"]`);
+  tab.disabled = false;
+  $$(".tab").forEach(x => x.classList.remove("is-active"));
+  $$(".panel").forEach(x => x.classList.remove("is-active"));
+  tab.classList.add("is-active");
+  $("#tab-" + step).classList.add("is-active");
+}
 $$(".tab").forEach(t => t.addEventListener("click", () => {
+  if (t.disabled) return;
   $$(".tab").forEach(x => x.classList.remove("is-active"));
   $$(".panel").forEach(x => x.classList.remove("is-active"));
   t.classList.add("is-active");
@@ -51,6 +60,7 @@ state.installable = {};
 state.localTotal = "";
 
 function renderPrereqs(list) {
+  state.prerequisites = list;
   $("#prereqs").innerHTML = list.map(p => {
     const ok = p.present;
     const inst = state.installable[p.id];
@@ -103,6 +113,9 @@ async function loadToolchains() {
     // so the sidebar rows can find their installer. Value keeps the real tool id.
     t.tools.forEach(x => state.installable[x.satisfies || x.id] = x);
     state.localTotal = t.local_total || "";
+    // Detection and installer metadata load concurrently on boot. Refresh rows
+    // when metadata arrives last so install buttons are not lost to that race.
+    if (state.prerequisites) renderPrereqs(state.prerequisites);
   } catch { state.installable = {}; }
 }
 
@@ -144,6 +157,7 @@ async function installTools(ids) {
     await loadToolchains();
     await api("/api/prereqs").then(renderPrereqs);
     await loadMatrix();
+    await loadEnvironment();
     $("#install-log-title").textContent = "done. tools wired into this session.";
   });
   es.onerror = () => {};
@@ -151,7 +165,8 @@ async function installTools(ids) {
 
 $("#install-missing").addEventListener("click", () => {
   const ids = Object.values(state.installable)
-    .filter(x => x.installable && !x.present && x.id !== "vs_buildtools")
+    .filter(x => x.installable && !x.present && x.id !== "vs_buildtools" &&
+            state.prerequisites?.some(p => p.id === x.id || (p.id === "msbuild" && x.id === "vs_buildtools")))
     .map(x => x.id);
   installTools(ids);
 });
@@ -189,7 +204,7 @@ function renderBoard() {
     else if (t.buildable && !t.ready) kind = "need";
 
     let reason = "";
-    if (kind === "need") reason = `⚠ install first: ${t.missing_tools.join(", ")}`;
+    if (kind === "need") reason = t.blocked_reason || `Missing: ${t.missing_tools.join(", ")}`;
     else if (kind === "blocked") reason = t.blocked_reason;
     else if (t.blocked_reason) reason = t.blocked_reason;  // e.g. cross-compile note
 
@@ -200,7 +215,7 @@ function renderBoard() {
         <span class="led"></span>
       </div>
       <div class="cell-label">${esc(t.label)}</div>
-      <div class="cell-arch">${t.arch} · .${t.ext}</div>
+      <div class="cell-arch">${t.arch} · .${t.ext} · ${esc(t.route || "unsupported")}</div>
       <div class="cell-note">${esc(t.note || "")}</div>
       ${reason ? `<div class="cell-reason">${esc(reason)}</div>` : ""}
       <div class="cell-check"></div>
@@ -208,6 +223,10 @@ function renderBoard() {
   }).join("");
 
   $$(".cell.ready").forEach(c => c.addEventListener("click", () => toggleSel(c.dataset.id)));
+  $$(".cell.need").forEach(c => {
+    const target = state.targets.find(t => t.id === c.dataset.id);
+    if (!target.farm_dispatch) c.addEventListener("click", () => toggleSel(c.dataset.id));
+  });
   updateTray();
 }
 
@@ -851,6 +870,15 @@ function renderConfigBanner(st) {
 /* ── build console ────────────────────────────────────── */
 const con = $("#console");
 function conLine(text) {
+  if (window.buildView) {
+    if (window.buildView.consume(text)) return;
+    window.buildView.append(text);
+  }
+  const stage = text.trim().match(/^=== (.*?) ===$/);
+  if (stage) $("#current-stage").textContent = stage[1];
+  const target = text.trim().match(/^-- (.*?) --$/);
+  if (target) $("#current-target").textContent = target[1];
+  if (window.buildView) return;
   const span = document.createElement("span");
   let cls = "";
   if (text.startsWith("$ ")) cls = "con-cmd";
@@ -872,13 +900,14 @@ function setStatus(s) {
     s === "running" ? "running" : s === "done" ? "done" : s === "failed" ? "failed" : "");
 }
 function startTimer() {
+  window.buildView?.start();
   startedAt = Date.now();
   timerHandle = setInterval(() => {
     const s = Math.floor((Date.now() - startedAt) / 1000);
     $("#build-timer").textContent = `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
   }, 500);
 }
-function stopTimer() { clearInterval(timerHandle); }
+function stopTimer() { clearInterval(timerHandle); window.buildView?.stop(); }
 
 function openStream() {
   const es = new EventSource("/api/build/stream");
@@ -897,6 +926,12 @@ async function onBuildEnd() {
   const r = st.result || {};
   setStatus(r.ok ? "done" : (r.cancelled ? "idle" : "failed"));
   renderArtifacts(r.artifacts || []);
+  if (r.targets) {
+    const statuses = document.createElement("ul");
+    statuses.innerHTML = Object.entries(r.targets).map(([target, status]) =>
+      `<li>${esc(target)}: ${esc(status)}</li>`).join("");
+    $("#artifacts").appendChild(statuses);
+  }
   // Remember where the output landed so "Open folder" goes straight there.
   // An artifact may be the packed .exe (open its parent) or the Release
   // folder itself (open it directly).
@@ -914,7 +949,8 @@ async function onBuildEnd() {
 
 function renderArtifacts(list) {
   $("#artifacts").innerHTML = list.map(a =>
-    `<div class="artifact">${esc(a)}</div>`).join("");
+    `<div class="artifact">${/\.(exe|msi|apk|dmg|deb|rpm|appimage|zip)$/i.test(a) ?
+      `<a href="/api/artifact?path=${encodeURIComponent(a)}">${esc(a)}</a>` : esc(a)}</div>`).join("");
 }
 
 /* ── copy log / copy errors / open folder ─────────────── */
@@ -954,10 +990,12 @@ async function copyText(text, btn) {
 // The DOM is the log. Pull the full text, or just the error lines (the same
 // lines conLine() marked .con-err, so "Copy errors" matches what's shown red).
 function fullLogText() {
+  if (window.buildView) return window.buildView.text();
   return Array.from(con.childNodes)
     .map(n => n.textContent).join("").replace(/\n+$/, "\n");
 }
 function errorLogText() {
+  if (window.buildView) return window.buildView.text("error");
   const errs = Array.from(con.querySelectorAll("span.con-err"))
     .map(n => n.textContent.replace(/\n$/, ""));
   return errs.length ? errs.join("\n") + "\n" : "";
@@ -992,8 +1030,13 @@ $("#btn-open-folder").addEventListener("click", async e => {
   }
 });
 
-$("#btn-build").addEventListener("click", () => startBuild(false));
-$("#btn-plan").addEventListener("click", () => startBuild(true));
+function reportStartError(error) {
+  conLine("!! Start failed: " + (error.message || String(error)));
+  setStatus("failed");
+  updateTray();
+}
+$("#btn-build").addEventListener("click", () => reviewBuild().catch(reportStartError));
+$("#btn-plan").addEventListener("click", () => startBuild(true).catch(reportStartError));
 $("#btn-cancel").addEventListener("click", () =>
   api("/api/build/cancel", { method: "POST" }));
 
@@ -1006,26 +1049,32 @@ async function startBuild(dry) {
   $("#tab-console").classList.add("is-active");
 
   con.innerHTML = "";
+  window.buildView?.reset();
   renderArtifacts([]);
   const payload = {
     version: $("#version").value.trim() || "latest",
     targets: [...state.selected],
     dry_run: dry || $("#dry-run").checked,
+    auto_install: $("#auto-install").checked,
   };
 
   // preflight (non-dry): warn about missing tools but let the user proceed
   if (!payload.dry_run) {
+    conLine("Checking selected targets before starting...");
     const pf = await api("/api/build/preflight", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
+    if (pf.error) throw new Error(pf.error);
     if (!pf.ok) {
       conLine("! preflight found missing toolchains:");
-      pf.problems.forEach(p => conLine("    - " + p));
+      (pf.problems || []).forEach(p => conLine("    - " + p));
       conLine("  (fix these in the Toolchain panel, or use Dry run to preview)\n");
+      if (!payload.auto_install) throw new Error("Environment preflight failed; build was not started");
     }
   }
 
+  conLine("Sending build start request...");
   const r = await api("/api/build/start", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -1051,6 +1100,7 @@ async function loadMatrix() {
   const m = await api("/api/matrix");
   renderSpec(m.host);
   state.targets = m.targets;
+  state.host = m.host;
   renderBoard();
   const ready = m.targets.filter(t => t.ready).length;
   const buildable = m.targets.filter(t => t.buildable).length;
@@ -1062,19 +1112,25 @@ async function loadMatrix() {
 async function boot() {
   buildToggles();
   initAdvancedKeys();
-  await loadToolchains();
-  await Promise.all([
-    loadMatrix(),
-    api("/api/prereqs").then(renderPrereqs),
+  await Promise.allSettled([
+    loadToolchains(),
+    loadMatrix().catch(() => {
+      $("#matrix-lede").textContent = "Toolchain check failed. Restart DVForge and re-scan.";
+    }),
+    api("/api/prereqs").then(renderPrereqs).catch(() => {
+      $("#prereqs").textContent = "Toolchain check timed out. Restart DVForge and re-scan.";
+    }),
     api("/api/config").then(fillConfig),
     api("/api/config/status").then(renderConfigBanner),
   ]);
+  await loadEnvironment();
 }
 $("#recheck").addEventListener("click", async () => {
   $("#prereqs").innerHTML = '<li class="muted">re-scanning…</li>';
   await loadToolchains();
   await api("/api/prereqs").then(renderPrereqs);
   await loadMatrix();
+  await loadEnvironment();
 });
 
 boot();

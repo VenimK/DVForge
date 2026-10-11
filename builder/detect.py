@@ -224,6 +224,13 @@ TARGETS = [
 ]
 
 
+def validate_target_ids(ids):
+    known = {target["id"] for target in TARGETS}
+    if not isinstance(ids, list) or not ids or any(not isinstance(t, str) or t not in known for t in ids):
+        raise ValueError("Select a non-empty list of known targets")
+    return list(dict.fromkeys(ids))
+
+
 def build_matrix(host=None, prereqs=None):
     """
     Returns a list of targets, each annotated with:
@@ -256,8 +263,7 @@ def build_matrix(host=None, prereqs=None):
 
         # arm64 desktop Linux is farm-dispatched from x86_64 hosts; the local
         # orchestrator does not need the Linux toolchain for that target.
-        farm_dispatch = (t["id"] == "linux-aarch64-deb" and
-                         host_os_name == "Linux" and host_arch != "aarch64")
+        farm_dispatch = t["platform"] in ("linux", "windows") and t["arch"] != host_arch
 
         # toolchain readiness
         needed = [] if farm_dispatch else required_tools(t, host_os_name)
@@ -270,9 +276,11 @@ def build_matrix(host=None, prereqs=None):
         row["missing_tools"] = missing
         row["required_tools"] = needed
         row["farm_dispatch"] = farm_dispatch
-        row["ready"] = buildable and not missing
+        row["route"] = ("remote" if farm_dispatch else "cross" if
+                        t["platform"] == "macos" and t["arch"] != host_arch else "local")
+        row["ready"] = buildable and not missing and not farm_dispatch
         if farm_dispatch:
-            row["note"] = (row.get("note", "") + " Queued for an arm64 Linux farm worker.").strip()
+            row["blocked_reason"] = f"Remote {t['arch']} worker required; availability must be verified."
         if missing and not row["blocked_reason"]:
             row["blocked_reason"] = "Missing: " + ", ".join(missing)
         rows.append(row)
@@ -281,26 +289,26 @@ def build_matrix(host=None, prereqs=None):
 
 def required_tools(target, host_os_name):
     """Which prereq ids a given target needs."""
-    common = ["git", "python", "rust"]
+    common = ["git", "python", "rust", "cmake", "ninja", "nasm"]
     p = target["platform"]
     if p == "windows":
-        tools = common + ["flutter", "llvm", "vcpkg"]
+        tools = common + ["flutter", "llvm", "vcpkg", "clang", "msbuild", "rust_target"]
         if target["ext"] == "msi":
             # MSI packaging: VS MSBuild builds msi.sln; nuget restores
             # CustomActions packages; dotnet resolves WixToolset.Sdk 4.x.
             tools += ["msbuild", "nuget", "dotnet"]
         return tools
     if p == "linux":
-        tools = common + ["flutter", "clang", "vcpkg"]
+        tools = common + ["flutter", "clang", "llvm", "vcpkg", "pkgconfig"]
         if target["ext"] == "rpm":
             tools += ["rpmbuild"]
         if target["ext"] == "AppImage":
             tools += ["appimage_builder"]
         return tools
     if p == "macos":
-        return common + ["flutter", "xcode"]
+        return common + ["flutter", "xcode", "create_dmg", "cocoapods", "pkgconfig"]
     if p == "android":
-        tools = common + ["flutter", "android_ndk", "android_sdk", "java"]
+        tools = common + ["flutter", "llvm", "android_ndk", "android_sdk", "java", "pkgconfig"]
         # On a Windows host the Rust host toolchain is MSVC, so building anything
         # (even Android — its build scripts/proc-macros compile for the host)
         # needs link.exe from the VC++ Build Tools. Reflect that honestly.

@@ -86,10 +86,17 @@ def git_apply(src_dir, patch_path, log=None):
             log(f"    · applied patch {os.path.basename(patch_path)}")
         return True
     except subprocess.CalledProcessError as e:
+        reverse = subprocess.run(["git", "apply", "--reverse", "--check", patch_path],
+                                 cwd=src_dir, capture_output=True, text=True)
+        if reverse.returncode == 0:
+            if log:
+                log(f"    patch already applied: {os.path.basename(patch_path)}")
+            return True
         if log:
             log(f"    ! patch skipped ({os.path.basename(patch_path)}): "
                 f"{(e.stderr or '').strip()[:120]}")
-        return False
+        raise RuntimeError(f"Patch does not match source: {patch_path}: "
+                           f"{(e.stderr or '').strip()[:300]}") from e
 
 
 def _short(s, n=42):

@@ -5,7 +5,7 @@ Each PC runs this worker. --with-app starts local DVForge if :8765 is down.
 The Mac that hosts the farm API also passes --with-queue (starts queue.py
 on :8766 if needed). One command, no second terminal.
 
-  python3 farm/worker.py --with-app --with-queue --queue https://api.nas86.eu --token SECRET
+  python3 farm/worker.py --with-app --queue https://build.example.org --token SECRET
 
 Mac claims macos-* (add --android to also take APKs).
 Windows claims windows-* only.
@@ -20,6 +20,7 @@ Jobs the other OS must build stay in inbox/.
 from __future__ import print_function
 
 import argparse
+import hashlib
 import json
 import os
 import platform
@@ -378,12 +379,19 @@ def publish(job, result, d):
     out = os.path.join(out_root, jid)
     os.makedirs(out, exist_ok=True)
     copied = []
+    metadata = []
     for art in result.get("artifacts") or []:
         if not art or not os.path.isfile(art):
             continue
         dest = os.path.join(out, os.path.basename(art))
         shutil.copy2(art, dest)
         copied.append(dest)
+        digest = hashlib.sha256()
+        with open(dest, "rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        metadata.append({"name": os.path.basename(dest), "bytes": os.path.getsize(dest),
+                         "sha256": digest.hexdigest()})
     status = {
         "id": jid,
         "ok": bool(result.get("ok")),
@@ -394,6 +402,7 @@ def publish(job, result, d):
         "claim": job.get("_claim_token") or "",
         "seconds": result.get("seconds"),
         "artifacts": copied,
+        "artifact_metadata": metadata,
         "error": result.get("error") or result.get("message") or "",
         "finished": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
@@ -719,7 +728,7 @@ def stop_app(proc):
 
 
 def queue_listen():
-    host = os.environ.get("DVFORGE_QUEUE_HOST", "0.0.0.0")
+    host = os.environ.get("DVFORGE_QUEUE_HOST", "127.0.0.1")
     port = int(os.environ.get("DVFORGE_QUEUE_PORT", "8766"))
     return host, port
 
@@ -805,13 +814,24 @@ def loop(farm, url, once):
         time.sleep(5)
 
 
+def validate_queue_url(url, token):
+    parsed = urllib.parse.urlparse(url)
+    local = parsed.hostname in ("127.0.0.1", "localhost", "::1")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError("Queue URL must not contain credentials, query parameters or fragments")
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise ValueError("Invalid queue URL")
+    if not local and (parsed.scheme != "https" or len(token) < 32):
+        raise ValueError("Remote queues require HTTPS and a token of at least 32 characters")
+
+
 def main():
     global CLAIM_ANDROID_ON_MAC, QUEUE_BASE, QUEUE_TOKEN
     p = argparse.ArgumentParser()
     p.add_argument("--farm", default=os.environ.get("DVFORGE_FARM", DEFAULT_FARM))
     p.add_argument("--url", default=DEFAULT_URL)
     p.add_argument("--queue", default=os.environ.get("DVFORGE_QUEUE", ""),
-                   help="https://api.nas86.eu — no NAS mount needed")
+                   help="Administrator-configured HTTPS queue URL")
     p.add_argument("--token", default=os.environ.get("DVFORGE_FARM_TOKEN", ""),
                    help="same token as the website / queue")
     p.add_argument("--once", action="store_true")
@@ -835,8 +855,13 @@ def main():
         sys.exit(
             "queue URL was not expanded: %s\n"
             "PowerShell does not honor set / %%VAR%%. Run:\n"
-            "  python worker.py --with-app --queue https://api.nas86.eu --token YOUR_TOKEN"
+            "  python worker.py --with-app --queue https://build.example.org --token YOUR_TOKEN"
             % QUEUE_BASE)
+    if QUEUE_BASE:
+        try:
+            validate_queue_url(QUEUE_BASE, QUEUE_TOKEN)
+        except ValueError as exc:
+            p.error(str(exc))
     farm = os.path.abspath(args.farm)
     url = args.url.rstrip("/")
     lock_path = acquire_lock()
