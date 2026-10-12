@@ -106,14 +106,14 @@ macOS (this Mac also hosts the farm API — one command):
 
 ```bash
 cd /Users/venimk/DVForge/farm
-python3 worker.py --with-app --with-queue --queue "https://api.nas86.eu" --token "testingfase"
+python3 worker.py --with-app --with-queue --queue "https://api.nas86.eu" --token "testingfase000000000000000000000"
 ```
 
 Linux:
 
 ```bash
 cd /path/to/DVForge/farm
-python3 worker.py --with-app --queue "https://api.nas86.eu" --token "testingfase"
+python3 worker.py --with-app --queue "https://api.nas86.eu" --token "testingfase000000000000000000000"
 ```
 
 `--with-app` starts `python3 app.py --no-browser` if `127.0.0.1:8765` is not already up. `--with-queue` starts `queue.py` on `:8766` if the farm API is down (Mac host only). Ctrl+C stops the worker and the DVForge it started; **the farm API is deliberately left running** so other PCs keep claiming — it is not tied to any one worker's lifetime.
@@ -144,7 +144,7 @@ Pass the webhook on the worker command line (or via the `DVFORGE_WORKER_WEBHOOK`
 
 ```bash
 python3 farm/worker.py --with-app \
-  --queue "https://api.nas86.eu" --token "testingfase" \
+  --queue "https://api.nas86.eu" --token "testingfase000000000000000000000" \
   --notification-webhook "https://discord.com/api/webhooks/..."
 ```
 
@@ -229,7 +229,7 @@ On the Mac mini (not the NAS):
 
 ```bash
 cd /Users/venimk/DVForge
-export DVFORGE_FARM_TOKEN=testingfase
+export DVFORGE_FARM_TOKEN=testingfase000000000000000000000
 python3 farm/queue.py --host 0.0.0.0 --port 8766
 ```
 
