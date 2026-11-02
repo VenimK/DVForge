@@ -752,8 +752,8 @@ def _apply_android_embed(src, env, log):
     kt = os.path.join("flutter", "android", "app", "src", "main", "kotlin",
                       "com", "carriez", "flutter_hbb", "MainService.kt")
     dart = os.path.join("flutter", "lib", "models", "native_model.dart")
-    ok1 = sed(src, kt, 'FFI.startServer(configPath, "")',
-              f'FFI.startServer(configPath, "{b64}")', log)
+    ok1 = sed(src, kt, 'FFI.startServer(configPath, homePath, "")',
+            f'FFI.startServer(configPath, homePath, "{b64}")', log)
     ok2 = sed(src, dart, "customClientConfig: '',",
               f"customClientConfig: '{b64}',", log)
     if not (ok1 and ok2):
