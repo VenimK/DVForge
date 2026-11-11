@@ -344,7 +344,7 @@ def claim_job(os_name, worker_name, android_on_mac=False, host_arch=""):
         if not _can_claim(job, os_name, android_on_mac, host_arch):
             continue
         # Version gate: skip jobs whose RustDesk version this worker can't build.
-        job_ver = (job.get("version") or "1.4.9").lstrip("v")
+        job_ver = (job.get("version") or "1.5.1").lstrip("v")
         if my_versions and job_ver not in my_versions:
             continue
         assign = _job_assign(job)
@@ -425,7 +425,7 @@ def parse_body(raw, qs):
     if isinstance(data.get("config"), dict) and data.get("targets"):
         job = {
             "id": data.get("id") or "",
-            "version": data.get("version") or qs.get("version", ["1.4.9"])[0],
+            "version": data.get("version") or qs.get("version", ["1.5.1"])[0],
             "targets": list(data["targets"]),
             "dry_run": bool(data.get("dry_run", False)),
             "config": data["config"],
@@ -446,7 +446,7 @@ def parse_body(raw, qs):
     dry = qs.get("dry_run", ["0"])[0] in ("1", "true", "yes")
     job = {
         "id": "",
-        "version": qs.get("version", ["1.4.9"])[0],
+        "version": qs.get("version", ["1.5.1"])[0],
         "targets": targets,
         "dry_run": dry,
         "config": data,

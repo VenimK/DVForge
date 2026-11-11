@@ -512,7 +512,8 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as exc:
                 return self._send_json({"error": str(exc)}, 400)
             report = environment.report(targets)
-            b = orchestrator.Build(data.get("version", "1.4.9"), targets,
+            b = orchestrator.Build(data.get("version") or orchestrator.DEFAULT_VERSION,
+                                   targets,
                                    config_gen.load_config(CONFIG_PATH), WORKSPACE,
                                    dry_run=True)
             from builder.artifacts import output_dir
@@ -528,7 +529,7 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as exc:
                 return self._send_json({"error": str(exc)}, 400)
             version = data.get("version") or orchestrator.DEFAULT_VERSION
-            if version not in orchestrator.VERSION_PROFILES:
+            if not orchestrator.is_supported_version(version):
                 return self._send_json({"error": "unsupported version"}, 400)
             dry = bool(data.get("dry_run", False))
             cfg = config_gen.load_config(CONFIG_PATH)

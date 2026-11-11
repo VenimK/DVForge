@@ -28,7 +28,7 @@ def main():
     p = argparse.ArgumentParser(description="Submit a DVForge farm job")
     p.add_argument("--targets", required=True, nargs="+",
                    help="e.g. macos-arm64-dmg  or  windows-x86_64-exe windows-x86_64-msi")
-    p.add_argument("--version", default="1.4.9")
+    p.add_argument("--version", default="1.5.1")
     p.add_argument("--config", default=DEFAULT_CONFIG,
                    help="RustDesk.json to bake (default: configs/RustDesk.json)")
     p.add_argument("--dry-run", action="store_true",

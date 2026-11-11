@@ -2,7 +2,8 @@
 
 /* Official RustDesk advanced-settings keys for the Config tab catalog.
    https://rustdesk.com/docs/en/self-host/client-configuration/advanced-settings/
-   DVForge builds 1.4.9 — keys with min "1.5.0" are listed but marked unusable. */
+   Keys whose `min` exceeds the version selected in the dropdown are
+   listed but marked unusable (e.g. a 1.4.9 build ignores 1.5.0+ keys). */
 window.ADVANCED_KEYS = [
   /* ── Security ─────────────────────────────────────────── */
   { group: "Security", key: "access-mode", values: "custom, full, view", def: "custom", sample: "custom", hint: "Incoming permission preset.", owned: "Permissions" },
