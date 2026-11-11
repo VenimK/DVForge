@@ -63,7 +63,7 @@ FLUTTER_VERSION = "3.24.5"
 VERSION_PROFILES = {
     "1.4.9": {
         "vcpkg_commit": "120deac3062162151622ca4860575a33844ba10b",
-        "label": "1.4.9 (stable)",
+        "label": "1.4.9",
         "git_ref": "1.4.9",
     },
     "1.5.0": {
