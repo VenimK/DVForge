@@ -135,8 +135,10 @@ select:focus, input:focus { outline: none; border-color: var(--steel); }
     </label>
     <label>RustDesk version
       <select name="version">
-        <option value="1.5.0">1.5.0 (latest, from master)</option>
-        <option value="1.4.9">1.4.9 (stable)</option>
+        <option value="1.5.1" selected>1.5.1 (latest)</option>
+        <option value="1.5.0">1.5.0</option>
+        <option value="1.4.9">1.4.9</option>
+        <option value="master">master (dev)</option>
       </select>
     </label>
     <label>Worker
@@ -199,7 +201,7 @@ $("#f").addEventListener("submit", async e => {
     return;
   }
   const targets = f.targets.value;
-  const version = f.version.value.trim() || "1.5.0";
+  const version = f.version.value.trim() || "1.5.1";
   const assign = (f.assign && f.assign.value) ? f.assign.value : "";
   let jobUrl = "/job?targets=" + encodeURIComponent(targets) + "&version=" + encodeURIComponent(version);
   if (assign) jobUrl += "&assign=" + encodeURIComponent(assign);

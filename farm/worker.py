@@ -353,7 +353,7 @@ def wait_idle(url, timeout_sec=4 * 3600, on_tick=None):
 
 def start_build(url, job, timeout_sec=4 * 3600, on_wait=None):
     payload = {
-        "version": job.get("version") or "1.4.9",
+        "version": job.get("version") or "1.5.1",
         "targets": job.get("targets"),
         "dry_run": bool(job.get("dry_run")),
     }

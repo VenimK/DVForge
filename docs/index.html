@@ -1850,7 +1850,7 @@ footer {
 
   <div class="hero-badge" id="version-badge">
     <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M8 0a8 8 0 110 16A8 8 0 018 0zm0 2a6 6 0 100 12A6 6 0 008 2zm-.5 3h1v3.25l2.1 1.26-.5.86L7.5 8.75V5z"/></svg>
-    RustDesk <span id="rd-version">v1.4.9</span> compatible
+    RustDesk <span id="rd-version">v1.5.1</span> compatible
   </div>
 
   <h1>Build branded RustDesk clients <em>on your machine</em></h1>
@@ -2802,7 +2802,7 @@ footer {
     </div>
     <div class="faq-item">
       <div class="faq-q">Will it break when RustDesk updates?</div>
-      <div class="faq-a">DVForge is pinned to a tested RustDesk version (currently v1.4.9). When upstream releases a new version, the patches and build steps may need updating. Watch the repo or Discord for compatibility updates.</div>
+      <div class="faq-a">DVForge builds tested RustDesk releases (currently defaults to v1.5.1, with 1.5.0, 1.4.9 and master selectable; newer release tags are picked up automatically from GitHub). When upstream releases a new version, the patches and build steps may need updating. Watch the repo or Discord for compatibility updates.</div>
     </div>
   </div>
 </div>
@@ -3536,7 +3536,7 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') closeLightbo
         const ver = d.tag_name.replace(/^v/, '');
         const el = document.getElementById('rd-version');
         // Only update if it's a newer version than what's hardcoded
-        if (el && ver !== '1.4.9') {
+        if (el && ver !== '1.5.1') {
           el.textContent = 'v' + ver;
           el.title = 'Latest RustDesk release (auto-detected)';
         }

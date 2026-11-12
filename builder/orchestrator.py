@@ -26,6 +26,7 @@ import sys
 import threading
 import time
 import uuid
+import urllib.request
 import zipfile
 import platform as _platform
 
@@ -56,36 +57,144 @@ FLUTTER_VERSION = "3.24.5"
 # The UI presents these as a dropdown; the orchestrator looks up the
 # correct vcpkg commit by self.version at build time.
 # Add a new entry here when a new RustDesk release changes the vcpkg pin.
+# Release tags >= MIN_BUILD_VERSION are also discovered live from GitHub
+# (see release_versions()) so new releases appear without an edit here;
+# profiles below win over discovered tags of the same version.
 VERSION_PROFILES = {
     "1.4.9": {
         "vcpkg_commit": "120deac3062162151622ca4860575a33844ba10b",
-        "label": "1.4.9 (stable)",
+        "label": "1.4.9",
         "git_ref": "1.4.9",
     },
     "1.5.0": {
         "vcpkg_commit": "9e593bb18ea69cc5095e012465dcd675a822ed0d",
-        "label": "1.5.0 (latest, from master)",
+        "label": "1.5.0",
+        "git_ref": "1.5.0",
+    },
+    "1.5.1": {
+        "vcpkg_commit": "9e593bb18ea69cc5095e012465dcd675a822ed0d",
+        "label": "1.5.1 (latest)",
+        "git_ref": "1.5.1",
+    },
+    "master": {
+        "vcpkg_commit": "9e593bb18ea69cc5095e012465dcd675a822ed0d",
+        "label": "master (dev)",
         "git_ref": "master",
     },
 }
-# Fallback for versions not in the table — use the newest known profile.
-DEFAULT_VERSION = sorted(VERSION_PROFILES.keys())[-1]
+# Default build version: the latest stable release (not derived from the
+# keys above — "master" would sort last alphabetically).
+DEFAULT_VERSION = "1.5.1"
+# Oldest release DVForge can build; GitHub discovery ignores tags below it.
+MIN_BUILD_VERSION = (1, 4, 9)
+
+# Live release discovery from GitHub (release tags >= MIN_BUILD_VERSION).
+# Cached so offline / rate-limited runs fall back to the static profiles.
+_RELEASES_URL = "https://api.github.com/repos/rustdesk/rustdesk/releases?per_page=30"
+_RELEASES_TTL = 3600          # seconds to reuse a successful fetch
+_RELEASES_RETRY = 120         # seconds to wait after a failed fetch
+_releases_cache = {"at": 0.0, "items": (), "ok": False}
+_releases_lock = threading.Lock()
+
+
+def _parse_version(tag):
+    """'v1.5.1' -> (1, 5, 1); None when not a plain X.Y.Z release tag."""
+    m = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", (tag or "").strip())
+    return tuple(int(p) for p in m.groups()) if m else None
+
+
+def release_versions():
+    """RustDesk release tags >= MIN_BUILD_VERSION, newest first.
+
+    Each item: {"version": "1.5.3", "prerelease": True}. Results are cached
+    for an hour; failures are retried after a short delay and never raise —
+    callers just see the static list when offline.
+    """
+    now = time.time()
+    with _releases_lock:
+        age = now - _releases_cache["at"]
+        if _releases_cache["ok"]:
+            if age < _RELEASES_TTL:
+                return list(_releases_cache["items"])
+        elif age < _RELEASES_RETRY:
+            return list(_releases_cache["items"])
+        try:
+            req = urllib.request.Request(
+                _RELEASES_URL,
+                headers={"User-Agent": "DVForge",
+                         "Accept": "application/vnd.github+json"},
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.load(resp)
+            items = []
+            for rel in data if isinstance(data, list) else []:
+                if rel.get("draft"):
+                    continue
+                ver = _parse_version(rel.get("tag_name"))
+                if ver and ver >= MIN_BUILD_VERSION:
+                    items.append({
+                        "version": re.sub(r"^v", "", rel["tag_name"]),
+                        "prerelease": bool(rel.get("prerelease")),
+                    })
+            _releases_cache.update(at=now, items=tuple(items), ok=True)
+        except Exception:
+            # Keep the last good list (if any) but retry sooner than a full TTL.
+            _releases_cache["at"] = now
+            _releases_cache["ok"] = False
+        return list(_releases_cache["items"])
+
+
+def _version_sort_key(ver):
+    """Sort key: releases newest-first, branch refs (master) last."""
+    ver = ver.lstrip("v")
+    if re.fullmatch(r"\d+\.\d+\.\d+", ver):
+        return (1, tuple(int(p) for p in ver.split(".")))
+    return (0, ())
 
 
 def version_profiles():
     """Return version profiles for the UI dropdown / API.
 
-    Sorted newest-first so the dropdown shows the latest version on top.
+    Static profiles (with pinned vcpkg commits) plus release tags discovered
+    from GitHub >= MIN_BUILD_VERSION. Releases sort newest-first with branch
+    refs like master last; the default version carries "default": true.
     """
-    out = []
-    for ver in sorted(VERSION_PROFILES.keys(), reverse=True):
-        prof = VERSION_PROFILES[ver]
-        out.append({
+    entries = {}
+    for ver, prof in VERSION_PROFILES.items():
+        entries[ver] = {
             "version": ver,
             "label": prof.get("label") or ver,
             "vcpkg_commit": prof["vcpkg_commit"][:8],
-        })
-    return out
+            "default": ver == DEFAULT_VERSION,
+        }
+    fallback_pin = VERSION_PROFILES[DEFAULT_VERSION]["vcpkg_commit"][:8]
+    for rel in release_versions():
+        ver = rel["version"]
+        if ver in entries:
+            continue  # a static profile already describes this version
+        entries[ver] = {
+            "version": ver,
+            "label": ver + (" (pre)" if rel.get("prerelease") else ""),
+            "vcpkg_commit": fallback_pin,
+            "default": False,
+        }
+    return [entries[k] for k in sorted(entries, key=_version_sort_key,
+                                       reverse=True)]
+
+
+def is_supported_version(version):
+    """True for a pinned profile, a branch ref, or a buildable release tag."""
+    version = (version or "").strip().lstrip("v")
+    if version in VERSION_PROFILES:
+        return True
+    ver = _parse_version(version)
+    if not ver or ver < MIN_BUILD_VERSION:
+        return False
+    # A real GitHub release >= MIN_BUILD_VERSION (release_versions() itself
+    # only returns such tags), or a plausible tag when offline.
+    if any(r["version"] == version for r in release_versions()):
+        return True
+    return not _releases_cache["ok"]  # offline: allow, git will verify the tag
 
 # Compile caches and bulky downloads that must survive a source reset.
 # Customizations mutate tracked files, so we still git-reset; we just do
@@ -477,10 +586,12 @@ class Build:
 
         want = self.version.lstrip("v")
         git_ref = self._git_ref()
-        is_branch = git_ref != want
+        # Branch build when the ref differs from the version name (legacy
+        # profiles) or the version isn't a release tag at all ("master").
+        is_branch = git_ref != want or _parse_version(want) is None
         have = self._source_tag()
         if is_branch:
-            # Building from a branch (e.g. 1.5.0 → master): fetch and reset,
+            # Building from a branch (e.g. master): fetch and reset,
             # don't compare tags since the branch HEAD isn't a tag.
             self.log(f"  · fetching {git_ref} (branch build for {want})")
             rc = self.run(
@@ -1457,7 +1568,7 @@ class Build:
         """The git tag/branch to check out for self.version.
 
         Defaults to self.version (a tag like '1.4.9'); profiles that build
-        from a branch (e.g. 1.5.0 → master) override this with 'git_ref'.
+        from a branch (e.g. master) override this with 'git_ref'.
         """
         prof = VERSION_PROFILES.get(self.version)
         if prof and prof.get("git_ref"):

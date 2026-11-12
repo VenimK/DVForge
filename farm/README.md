@@ -170,9 +170,9 @@ Notes:
 
 ### 3e. Worker version compatibility
 
-Each RustDesk release pins its own vcpkg commit (`VERSION_PROFILES` in `builder/orchestrator.py`). The build UI presents these as a dropdown — pick 1.4.9 (stable) or 1.5.0 (latest) and the orchestrator checks out the matching vcpkg version at build time.
+Each RustDesk release pins its own vcpkg commit (`VERSION_PROFILES` in `builder/orchestrator.py`). The build UI presents these as a dropdown — pick 1.5.1 (latest), 1.5.0, 1.4.9 or master, and the orchestrator checks out the matching vcpkg version at build time. Release tags newer than the static table (≥ 1.4.9) are discovered live from the GitHub releases API and appear in the same dropdown, so a new upstream release needs no code change.
 
-When a worker starts, it queries its local DVForge app (`/api/versions`) for the list of versions it can build, and includes that list in every `/claim` ping. The queue stores it and **skips workers that don't support the job's version** — so a worker running an older DVForge clone won't claim a 1.5.0 job, fail the build, and waste a queue slot. Workers that don't report versions (older `worker.py` or app not running) are treated as compatible with all jobs, so this is fully backward-compatible.
+When a worker starts, it queries its local DVForge app (`/api/versions`) for the list of versions it can build, and includes that list in every `/claim` ping. The queue stores it and **skips workers that don't support the job's version** — so a worker running an older DVForge clone won't claim a 1.5.1 job, fail the build, and waste a queue slot. Workers that don't report versions (older `worker.py` or app not running) are treated as compatible with all jobs, so this is fully backward-compatible.
 
 `/stats` shows each worker's `versions` array so you can see at a glance which workers need a `git pull`.
 

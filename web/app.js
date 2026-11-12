@@ -332,9 +332,16 @@ function collectConfig() {
 const truthy = v => v === true || v === "on";
 
 /* ── advanced keys catalog ────────────────────────────── */
-const ADV_PIN = "1.4.9";
+const ADV_DEFAULT = "1.5.1";
 let advFilter = "all";
 let advTarget = "default";
+
+// The RustDesk version currently selected for the build — advanced keys
+// with a higher `min` are flagged as ignored by that version.
+function advPin() {
+  const el = $("#version");
+  return (el && el.value.trim()) || ADV_DEFAULT;
+}
 
 function advLines(which) {
   const el = which === "override" ? $("#override-manual") : $("#default-manual");
@@ -351,8 +358,10 @@ function advLines(which) {
 
 function advVerNewer(min) {
   if (!min) return false;
+  const pin = advPin();
+  if (!/^\d/.test(pin)) return false; // branch builds (master) are newest
   const a = String(min).split(".").map(n => parseInt(n, 10) || 0);
-  const b = ADV_PIN.split(".").map(n => parseInt(n, 10) || 0);
+  const b = pin.split(".").map(n => parseInt(n, 10) || 0);
   for (let i = 0; i < 3; i++) {
     if ((a[i] || 0) > (b[i] || 0)) return true;
     if ((a[i] || 0) < (b[i] || 0)) return false;
@@ -383,7 +392,7 @@ function insertAdvKey(item, into) {
   setAdvTarget(which);
   if (advVerNewer(item.min)) {
     advNote(item.key + " needs RustDesk " + item.min + ". This build is "
-      + ADV_PIN + " — the client will ignore it.", true);
+      + advPin() + " — the client will ignore it.", true);
   } else if (item.owned) {
     advNote(item.key + " is already set by " + item.owned
       + " above. Inserting here overwrites that value in "
@@ -475,6 +484,8 @@ function initAdvancedKeys() {
   }
   const search = $("#adv-search");
   if (search) search.addEventListener("input", renderAdvList);
+  const verSel = $("#version");
+  if (verSel) verSel.addEventListener("change", renderAdvList);
   $$("[data-adv-filter]").forEach(btn => {
     btn.addEventListener("click", () => {
       advFilter = btn.dataset.advFilter || "all";
@@ -1052,7 +1063,7 @@ async function startBuild(dry) {
   window.buildView?.reset();
   renderArtifacts([]);
   const payload = {
-    version: $("#version").value.trim() || "latest",
+    version: $("#version").value.trim() || "1.5.1",
     targets: [...state.selected],
     dry_run: dry || $("#dry-run").checked,
     auto_install: $("#auto-install").checked,
@@ -1109,11 +1120,39 @@ async function loadMatrix() {
     `${ready} ${ready === 1 ? "is" : "are"} ready to go right now.`;
 }
 
+async function loadVersions() {
+  // Refresh the version dropdown from /api/versions — static profiles plus
+  // release tags discovered from GitHub. Falls back silently to the
+  // hardcoded <option>s when the endpoint is unavailable.
+  try {
+    const r = await api("/api/versions");
+    const list = (r && r.versions) || [];
+    if (!list.length) return;
+    const sel = $("#version");
+    if (!sel) return;
+    const prev = sel.value;
+    sel.innerHTML = "";
+    for (const v of list) {
+      const o = document.createElement("option");
+      o.value = v.version;
+      o.textContent = v.label || v.version;
+      if (v.default) o.dataset.default = "1";
+      sel.appendChild(o);
+    }
+    const wanted = list.some(v => v.version === prev)
+      ? prev
+      : (list.find(v => v.default) || list[0]).version;
+    sel.value = wanted;
+    renderAdvList();
+  } catch (e) { /* offline — keep static options */ }
+}
+
 async function boot() {
   buildToggles();
   initAdvancedKeys();
   await Promise.allSettled([
     loadToolchains(),
+    loadVersions(),
     loadMatrix().catch(() => {
       $("#matrix-lede").textContent = "Toolchain check failed. Restart DVForge and re-scan.";
     }),
