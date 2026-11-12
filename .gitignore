@@ -53,3 +53,4 @@ configs/RustDesk.json
 Windows reuse is in and verified on.txt
 builder/__orchestrator.py
 .gitignore
+QWEN.md
