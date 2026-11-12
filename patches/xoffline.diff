@@ -1,8 +1,6 @@
-diff --git a/flutter/lib/common/widgets/peer_card.dart b/flutter/lib/common/widgets/peer_card.dart
-index 0a15eb45b..d776dd556 100644
 --- a/flutter/lib/common/widgets/peer_card.dart
 +++ b/flutter/lib/common/widgets/peer_card.dart
-@@ -1328,8 +1328,13 @@ Widget getOnline(double rightPadding, bool online) {
+@@ -1328,6 +1328,11 @@ Widget getOnline(double rightPadding, bool online) {
        waitDuration: const Duration(seconds: 1),
        child: Padding(
            padding: EdgeInsets.fromLTRB(0, 4, rightPadding, 4),
@@ -16,5 +14,3 @@ index 0a15eb45b..d776dd556 100644
 +                  size: 12.0, // Adjust size as needed
 +                )));
  }
- 
- Widget build_more(BuildContext context, {bool invert = false}) {
