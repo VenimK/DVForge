@@ -19,6 +19,7 @@ import platform
 import queue
 import secrets
 import shutil
+import socket
 import sys
 import threading
 import time
@@ -40,7 +41,7 @@ SIGNING_DIR = os.path.join(WORKSPACE, "signing")
 # below sees them — must run before the first prereqs scan.
 toolchains.apply_persisted_env(ROOT)
 
-HOST = "127.0.0.1"
+HOST = "0.0.0.0"
 PORT = int(os.environ.get("RDLB_PORT", "8765"))
 
 MIME = {".html": "text/html", ".css": "text/css", ".js": "application/javascript",
@@ -358,8 +359,6 @@ class Handler(BaseHTTPRequestHandler):
     def _trusted_local_request(self):
         try:
             host = urlparse("http://" + (self.headers.get("Host") or ""))
-            if host.hostname not in ("localhost", "127.0.0.1", "::1"):
-                raise ValueError("non-local Host")
             origin = self.headers.get("Origin")
             if origin:
                 parsed = urlparse(origin)
@@ -851,16 +850,28 @@ def main():
         sys.exit(1)
     os.makedirs(WORKSPACE, exist_ok=True)
     httpd = ThreadingHTTPServer((HOST, PORT), Handler)
-    url = f"http://{HOST}:{PORT}"
+    local = f"http://127.0.0.1:{PORT}"
     print("=" * 60)
     print("  DVForge")
     print("=" * 60)
-    print(f"  Serving at {url}")
+    print(f"  Serving on {HOST}:{PORT}")
+    print(f"  Local:   {local}")
+    lan = None
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect(("8.8.8.8", 80))
+        lan = probe.getsockname()[0]
+    except OSError:
+        pass
+    finally:
+        probe.close()
+    if lan:
+        print(f"  LAN:     http://{lan}:{PORT}")
     print(f"  Workspace: {WORKSPACE}")
     print("  Press Ctrl+C to stop.")
     print("=" * 60)
     if "--no-browser" not in sys.argv:
-        threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+        threading.Timer(0.8, lambda: webbrowser.open(local)).start()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
