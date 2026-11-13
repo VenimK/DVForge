@@ -3,12 +3,31 @@
 async function loadEnvironment() {
   const result = await api("/api/environment");
   state.environment = result;
-  const rows = result.requirements || [];
-  $("#environment-requirements").innerHTML = rows.map(row =>
-    `<li class="pr" data-environment-tool="${esc(row.id)}"><div class="pr-top"><span class="pr-dot ${row.present ? "ok" : "no"}"></span>` +
-    `<span class="pr-name">${esc(row.label)}</span><span class="pr-ver">${esc(row.status)}</span></div></li>`).join("");
+  // The full toolchain list is /api/prereqs (machine-wide). This endpoint is
+  // only the wizard gate for the default/primary target.
   $("#environment-next").disabled = !result.ok;
-  $("#environment-status").textContent = result.ok ? "Environment ready" : (result.problems || [result.error]).filter(Boolean).join("; ");
+  const labels = (result.targets || [])
+    .map(id => (state.targets || []).find(t => t.id === id)?.label || id);
+  if (result.ok) {
+    $("#environment-status").textContent = labels.length
+      ? `Ready for ${labels.join(", ")}.`
+      : "Environment ready.";
+  } else {
+    $("#environment-status").textContent =
+      (result.problems || [result.error]).filter(Boolean).join("; ");
+  }
+
+  // Compact left-rail headline: the wizard gate, not a second full list.
+  const summary = $("#toolchain-summary");
+  if (summary) {
+    const missing = (result.requirements || []).filter(r => !r.present).length;
+    summary.title = labels.length
+      ? `Default target: ${labels.join(", ")}`
+      : "Default build target";
+    summary.innerHTML = result.ok
+      ? `<span class="sum-ok">default ready</span>`
+      : `<span class="sum-bad">${missing} missing</span>`;
+  }
 }
 
 $("#environment-next").addEventListener("click", () => showStep("config"));
@@ -62,24 +81,23 @@ $("#prepare-environment").addEventListener("click", async () => {
       body: JSON.stringify({ targets: state.environment.targets }) });
     if (!result.ok) throw new Error(result.error || result.message || "Environment preparation failed");
     $("#install-log").hidden = false;
+    $("#install-log-title").textContent = "preparing environment…";
+    $("#install-console").textContent = "";
     const stream = new EventSource("/api/toolchains/stream");
     stream.onmessage = event => {
       try {
-        const line = JSON.parse(event.data).line;
-        installLine(line);
-        const status = line.match(/^Environment: ([a-z_]+): (installed|installing|failed)/);
-        if (status) {
-          const row = $(`[data-environment-tool="${status[1]}"] .pr-ver`);
-          if (row) row.textContent = status[2];
-        }
+        installLine(JSON.parse(event.data).line);
       } catch {}
     };
     stream.addEventListener("done", async () => {
       stream.close();
       button.disabled = false;
       const status = await api("/api/toolchains/status");
+      await loadToolchains();
+      await api("/api/prereqs?refresh=1").then(renderPrereqs);
       await loadEnvironment();
       await loadMatrix();
+      $("#install-log-title").textContent = "done.";
       if (status.result?.errors?.length) $("#environment-status").textContent = status.result.errors.map(e => e.join(": ")).join("; ");
     });
   } catch (error) {

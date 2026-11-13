@@ -66,7 +66,11 @@ function renderPrereqs(list) {
     const inst = state.installable[p.id];
     const canInstall = !ok && inst && inst.installable;
     const cls = ok ? "ok" : "no";
-    const hint = (!ok && p.hint && !canInstall) ? `<div class="pr-hint">${esc(p.hint)}</div>` : "";
+    // Missing rows should explain *why*: a wrong-but-present version (e.g. a
+    // system Flutter that isn't the pinned 3.24.5), or an install hint when
+    // there is no one-click installer.
+    const why = !ok ? (p.note || (!canInstall ? p.hint : "")) : "";
+    const hint = why ? `<div class="pr-hint">${esc(why)}</div>` : "";
 
     let right;
     if (canInstall) {
@@ -81,7 +85,11 @@ function renderPrereqs(list) {
         : "";
       right = `<span class="pr-ver" title="${esc(p.version || "")}">${ver}</span>${rm}`;
     } else {
-      right = `<span class="pr-ver">not found</span>`;
+      // Show the version we actually found (e.g. a too-new Flutter) rather
+      // than claiming "not found" for a tool that is installed but rejected.
+      right = p.version
+        ? `<span class="pr-ver" title="${esc(p.version)}">${esc(shortVer(p.version))}</span>`
+        : `<span class="pr-ver">not found</span>`;
     }
 
     return `<li class="pr ${ok ? "" : "missing"}">
@@ -155,7 +163,7 @@ async function installTools(ids) {
     $("#install-log-title").textContent = "install finished — re-scanning";
     $("#install-missing").disabled = false;
     await loadToolchains();
-    await api("/api/prereqs").then(renderPrereqs);
+    await api("/api/prereqs?refresh=1").then(renderPrereqs);
     await loadMatrix();
     await loadEnvironment();
     $("#install-log-title").textContent = "done. tools wired into this session.";
@@ -188,8 +196,9 @@ async function removeTool(id) {
     body: JSON.stringify({ id }),
   });
   await loadToolchains();
-  await api("/api/prereqs").then(renderPrereqs);
+  await api("/api/prereqs?refresh=1").then(renderPrereqs);
   await loadMatrix();
+  await loadEnvironment();
 }
 
 /* ── capability board ─────────────────────────────────── */
@@ -1164,10 +1173,11 @@ async function boot() {
   ]);
   await loadEnvironment();
 }
+$("#go-environment").addEventListener("click", () => showStep("environment"));
 $("#recheck").addEventListener("click", async () => {
   $("#prereqs").innerHTML = '<li class="muted">re-scanning…</li>';
   await loadToolchains();
-  await api("/api/prereqs").then(renderPrereqs);
+  await api("/api/prereqs?refresh=1").then(renderPrereqs);
   await loadMatrix();
   await loadEnvironment();
 });

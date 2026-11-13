@@ -1,14 +1,16 @@
+import concurrent.futures
 import json
 import os
 from pathlib import Path
 import struct
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from builder import artifacts, detect, environment, orchestrator, pub_config
+from builder import artifacts, detect, environment, orchestrator, prereqs, pub_config
 from farm import worker, queue as farm_queue
 
 LINUX = {"os": "Linux", "os_raw": "Linux", "arch": "x86_64"}
@@ -198,6 +200,74 @@ class CommunityTests(unittest.TestCase):
         with patch.object(farm_queue, "TOKEN", "x" * 32):
             self.assertFalse(handler._auth())
         handler._send.assert_called_once()
+
+    def test_flutter_version_line_is_read_after_startup_preamble(self):
+        prereqs.invalidate_flutter_probe()
+        self.addCleanup(prereqs.invalidate_flutter_probe)
+        fake = Mock(stdout=(
+            "Building flutter tool...\n"
+            "Waiting for another flutter command to release the startup lock...\n"
+            "Flutter 3.24.5 • channel stable • https://github.com/flutter/flutter.git\n"
+            "Tools • Dart 3.5.4 • DevTools 2.37.2\n"))
+        with patch.object(prereqs, "_flutter_probe_candidates",
+                          return_value=[r"C:\fake\flutter.bat"]), \
+                patch.object(prereqs.subprocess, "run", return_value=fake):
+            status = prereqs.check_flutter()
+        self.assertTrue(status["present"])
+        self.assertIn("3.24.5", status["version"])
+
+    def test_concurrent_boot_scans_share_one_flutter_probe(self):
+        prereqs.invalidate_flutter_probe()
+        self.addCleanup(prereqs.invalidate_flutter_probe)
+        calls = []
+
+        def slow_probe(*_args, **_kwargs):
+            calls.append(time.monotonic())
+            time.sleep(0.15)
+            return Mock(stdout=(
+                "Flutter 3.24.5 • channel stable\nTools • Dart 3.5.4\n"))
+
+        with patch.object(prereqs, "_flutter_probe_candidates",
+                          return_value=[r"C:\fake\flutter.bat"]), \
+                patch.object(prereqs.subprocess, "run", side_effect=slow_probe):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+                results = [f.result() for f in
+                           [pool.submit(prereqs.check_flutter) for _ in range(3)]]
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(all(r["present"] for r in results))
+
+    def test_flutter_probe_timeout_is_explained(self):
+        prereqs.invalidate_flutter_probe()
+        self.addCleanup(prereqs.invalidate_flutter_probe)
+        with patch.object(prereqs, "_flutter_probe_candidates",
+                          return_value=[r"C:\fake\flutter.bat"]), \
+                patch.object(prereqs.subprocess, "run",
+                             side_effect=TimeoutError("cold start")):
+            status = prereqs.check_flutter()
+        self.assertFalse(status["present"])
+        self.assertIn("did not answer", status["note"])
+
+    def test_flutter_probe_failure_is_not_cached_for_the_next_scan(self):
+        prereqs.invalidate_flutter_probe()
+        self.addCleanup(prereqs.invalidate_flutter_probe)
+        ok = Mock(stdout="Flutter 3.24.5 • stable\nTools • Dart 3.5.4\n")
+        with patch.object(prereqs, "_flutter_probe_candidates",
+                          return_value=[r"C:\fake\flutter.bat"]), \
+                patch.object(prereqs.subprocess, "run",
+                             side_effect=[TimeoutError("cold start"), ok]) as run:
+            first = prereqs.check_flutter()
+            second = prereqs.check_flutter()
+        self.assertFalse(first["present"])
+        self.assertTrue(second["present"])
+        self.assertEqual(2, run.call_count)
+
+    def test_flutter_pin_uses_the_parsed_version_line(self):
+        for version, expected in (("Flutter 3.24.5 • stable", True),
+                                  ("Flutter 3.47.5 • stable", False),
+                                  ("", True)):
+            status = {"present": True, "version": version}
+            with patch.dict(prereqs.CHECKS, {"flutter": lambda: dict(status)}):
+                self.assertEqual(expected, environment.check("flutter")["present"])
 
     def test_backend_does_not_build_when_dependencies_fail(self):
         import app

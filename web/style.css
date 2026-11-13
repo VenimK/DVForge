@@ -154,6 +154,23 @@ code, pre, .mono { font-family: var(--mono); }
 .local-foot code { color: var(--ink-dim); }
 .local-foot strong { color: var(--amber); font-weight: 600; }
 
+/* left-rail toolchain headline (full manager lives in the Environment tab) */
+.rig-summary {
+  font-family: var(--mono); font-size: 11.5px; color: var(--ink-dim);
+  padding: 2px 0 8px; line-height: 1.6;
+}
+.rig-summary .sum-ok  { color: var(--good); font-weight: 600; }
+.rig-summary .sum-bad { color: var(--amber); font-weight: 600; }
+
+/* Environment tab: the single toolchain manager */
+.env-toolbar { display: flex; justify-content: flex-end; gap: 6px; margin: 0 0 8px; }
+.env-prereqs {
+  grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr));
+  column-gap: 22px; margin-bottom: 14px;
+}
+.env-prereqs .pr { padding: 8px 4px; }
+.env-prereqs .pr-ver { max-width: 160px; }
+
 .rig-foot { margin-top: auto; font-size: 11px; color: var(--ink-faint); line-height: 1.5; }
 
 .mini {

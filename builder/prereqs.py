@@ -11,9 +11,12 @@ these are large system-wide toolchains a person should install deliberately.
 
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
+import threading
+import time
 
 
 PINNED = {
@@ -121,66 +124,141 @@ def check_rust_target():
     )
 
 
-def check_flutter():
-    # Prefer the portable 3.24.5 copy. Homebrew/system Flutter often sits
-    # earlier on PATH and is too old for extended_text 14.0.0 (Dart >= 3.5).
-    import re
+# Flutter's launcher takes an exclusive startup lock. Boot fires several
+# dependency scans at once (/api/toolchains, /api/matrix, /api/prereqs), and
+# each used to spawn its own `flutter --version`. On a cold SDK the first one
+# initialises the Flutter tool; the others wait on the lock, hit the hard
+# subprocess timeout, and were reported as "not installed" even though the SDK
+# was present. The next re-scan (single probe) then succeeded. Serialise the
+# probe and share the result so all concurrent scans agree.
+_FLUTTER_PROBE_COND = threading.Condition()
+_FLUTTER_PROBE_CACHE = {"key": None, "at": 0.0, "status": None}
+_FLUTTER_PROBE_RUNNING = False
+_FLUTTER_PROBE_SEQ = 0
+_FLUTTER_PROBE_LAST = None
+_FLUTTER_PROBE_TTL = 30.0
+_FLUTTER_PROBE_TIMEOUT = 30
+# The web UI aborts an API call after 60 s. Cap the total probe time across
+# the portable SDK and the PATH fallback so a hung launcher cannot exceed it.
+_FLUTTER_PROBE_BUDGET = 55.0
+
+
+def invalidate_flutter_probe():
+    """Drop the cached `flutter --version` result (call after install/remove)."""
+    with _FLUTTER_PROBE_COND:
+        _FLUTTER_PROBE_CACHE.update(key=None, at=0.0, status=None)
+
+
+def _flutter_probe_candidates():
+    """Executables to try, portable .toolchains copy first, then PATH."""
     from . import toolchains
     root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     home = toolchains.find_flutter_home(root)
-    p = None
+    candidates = []
     if home:
         cand = os.path.join(home, "bin", "flutter.bat" if _system() == "Windows"
                             else "flutter")
         if os.path.isfile(cand):
-            p = cand
-    if not p:
-        p = _which("flutter")
-    if not p:
-        return _status(False, hint=_install_hint("flutter"))
+            candidates.append(cand)
+    on_path = _which("flutter")
+    if on_path:
+        key = os.path.normcase(os.path.abspath(on_path))
+        if all(os.path.normcase(os.path.abspath(c)) != key for c in candidates):
+            candidates.append(on_path)
+    return candidates
+
+
+def _probe_flutter(exe, timeout=_FLUTTER_PROBE_TIMEOUT):
+    """Run `flutter --version`, returning a status dict or None if unusable.
+
+    Parse the whole output rather than only its first line: a cold Flutter can
+    print progress ("Building flutter tool...", "Waiting for another flutter
+    command...") before the actual version.
+    """
     try:
-        out = subprocess.check_output(
-            [p, "--version"], stderr=subprocess.STDOUT, timeout=30,
+        proc = subprocess.run(
+            [exe, "--version"], stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, timeout=timeout,
             encoding="utf-8", errors="replace",
         )
+        out = proc.stdout or ""
     except Exception:
         out = ""
-    ver = out.strip().splitlines()[0] if out.strip() else ""
-    if not ver:
-        # Toolchain copy exists but isn't runnable (noexec volume, bad
-        # extract). Fall back to whatever `flutter` is on PATH.
-        alt = _which("flutter")
-        if alt and os.path.normcase(os.path.abspath(alt)) != os.path.normcase(
-                os.path.abspath(p)):
-            p = alt
-            try:
-                out = subprocess.check_output(
-                    [p, "--version"], stderr=subprocess.STDOUT, timeout=30,
-                    encoding="utf-8", errors="replace",
-                )
-            except Exception:
-                out = ""
-            ver = out.strip().splitlines()[0] if out.strip() else ""
-        if not ver:
-            return _status(False, "", p, hint=_install_hint("flutter"))
+    fl_m = re.search(r"Flutter\s+(\d+)\.(\d+)\.(\d+)[^\r\n]*", out)
+    if not fl_m:
+        return None
+    ver = fl_m.group(0).strip()
     dart_m = re.search(r"Dart\s+(\d+)\.(\d+)\.(\d+)", out)
     dart_ver = tuple(int(x) for x in dart_m.groups()) if dart_m else None
-    fl_m = re.search(r"Flutter\s+(\d+)\.(\d+)\.(\d+)", out or ver)
-    fl_ver = tuple(int(x) for x in fl_m.groups()) if fl_m else None
+    fl_ver = tuple(int(x) for x in fl_m.groups())
     too_old = ((dart_ver is not None and dart_ver < (3, 5, 0))
-               or (dart_ver is None and fl_ver is not None and fl_ver < (3, 24, 0)))
+               or (dart_ver is None and fl_ver < (3, 24, 0)))
     if too_old:
         shown = ("Dart " + ".".join(str(x) for x in dart_ver) if dart_ver
-                 else ver or "unknown")
+                 else ver)
         return _status(
-            False, ver, p,
+            False, ver, exe,
             note=f"{shown} is too old for extended_text 14.0.0 (needs Dart >= 3.5.0).",
             hint=_install_hint("flutter"),
         )
     note = ""
-    if PINNED["flutter"] not in (out or ver):
+    if PINNED["flutter"] not in out:
         note = f"Workflows use Flutter {PINNED['flutter']}."
-    return _status(True, ver, p, note=note)
+    return _status(True, ver, exe, note=note)
+
+
+def check_flutter():
+    # Prefer the portable 3.24.5 copy. Homebrew/system Flutter often sits
+    # earlier on PATH and is too old for extended_text 14.0.0 (Dart >= 3.5).
+    candidates = _flutter_probe_candidates()
+    if not candidates:
+        return _status(False, hint=_install_hint("flutter"))
+    global _FLUTTER_PROBE_RUNNING, _FLUTTER_PROBE_SEQ, _FLUTTER_PROBE_LAST
+    key = tuple(os.path.normcase(os.path.abspath(c)) for c in candidates)
+    with _FLUTTER_PROBE_COND:
+        seq = _FLUTTER_PROBE_SEQ
+        # Concurrent boot scans wait for the one probe already in flight and
+        # share its result, instead of spawning their own.
+        while _FLUTTER_PROBE_RUNNING:
+            _FLUTTER_PROBE_COND.wait()
+            if _FLUTTER_PROBE_SEQ > seq:
+                return dict(_FLUTTER_PROBE_LAST)
+        cached = _FLUTTER_PROBE_CACHE
+        if (cached["key"] == key
+                and time.monotonic() - cached["at"] < _FLUTTER_PROBE_TTL
+                and cached["status"] is not None):
+            return dict(cached["status"])
+        _FLUTTER_PROBE_RUNNING = True
+        try:
+            status = None
+            deadline = time.monotonic() + _FLUTTER_PROBE_BUDGET
+            for exe in candidates:
+                remaining = deadline - time.monotonic()
+                if remaining <= 1:
+                    break
+                status = _probe_flutter(
+                    exe, min(_FLUTTER_PROBE_TIMEOUT, remaining))
+                if status is not None:
+                    break
+            if status is None:
+                status = _status(
+                    False, "", candidates[0],
+                    note="Flutter SDK files were found, but `flutter --version` "
+                         "did not answer (it may still be initialising). Click "
+                         "re-scan in a moment.",
+                    hint=_install_hint("flutter"),
+                )
+            _FLUTTER_PROBE_LAST = status
+            _FLUTTER_PROBE_SEQ += 1
+            # Cache successes only. A later scan (e.g. the wizard's sequential
+            # environment check) must be able to retry a transient failure.
+            if status.get("present"):
+                _FLUTTER_PROBE_CACHE.update(key=key, at=time.monotonic(),
+                                            status=status)
+        finally:
+            _FLUTTER_PROBE_RUNNING = False
+            _FLUTTER_PROBE_COND.notify_all()
+        return dict(status)
 
 
 def _find_msvc_cl():

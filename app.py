@@ -24,7 +24,7 @@ import threading
 import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from builder import detect, prereqs, config_gen, orchestrator, toolchains, signing, environment  # noqa: E402
@@ -380,7 +380,6 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(detect.host_info())
         if path == "/api/artifact":
             from builder.artifacts import download_path
-            from urllib.parse import parse_qs
             try:
                 requested = parse_qs(urlparse(self.path).query).get("path", [""])[0]
                 artifact = download_path(WORKSPACE, requested)
@@ -405,6 +404,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json({**environment.report([primary] if primary else [], host),
                                     "targets": [primary] if primary else []})
         if path == "/api/prereqs":
+            # ?refresh=1 is sent by the re-scan button: bypass the short-lived
+            # Flutter probe cache so a probe that timed out during boot gets a
+            # fresh attempt (Flutter may have finished initialising).
+            if parse_qs(urlparse(self.path).query).get("refresh", [""])[0] in ("1", "true"):
+                prereqs.invalidate_flutter_probe()
             host = detect.host_info()
             potential = [t["id"] for t in detect.TARGETS if host["os"] in t["host_os"]
                          and (t["platform"] != "linux" or t["arch"] == host["arch"])]
@@ -511,6 +515,8 @@ class Handler(BaseHTTPRequestHandler):
                 targets = detect.validate_target_ids(data.get("targets", []))
             except ValueError as exc:
                 return self._send_json({"error": str(exc)}, 400)
+            # Never reject a build from a stale boot-time probe result.
+            prereqs.invalidate_flutter_probe()
             report = environment.report(targets)
             b = orchestrator.Build(data.get("version") or orchestrator.DEFAULT_VERSION,
                                    targets,

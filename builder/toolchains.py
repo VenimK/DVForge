@@ -1853,6 +1853,14 @@ def apply_persisted_env(root):
     """
     root = os.path.abspath(root)
 
+    # A toolchain install/remove changes what `flutter` resolves to. Drop any
+    # cached detection result so the follow-up scan probes the new SDK.
+    try:
+        from . import prereqs as _prereqs
+        _prereqs.invalidate_flutter_probe()
+    except Exception:
+        pass
+
     d = _load_env(root)
     vars_ = {k: _resolve_portable(v, root) for k, v in d.get("vars", {}).items()}
     paths = [_resolve_portable(p, root) for p in d.get("path", [])]

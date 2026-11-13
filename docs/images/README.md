@@ -14,7 +14,7 @@ filenames (the README needs no edits) or swap to `.png`/`.webp` and update the
 | `architecture.svg` | The layers + build pipeline. This one is a **real diagram**, not a screenshot — keep it or edit the SVG. | Edit SVG directly |
 | `screenshot-targets.svg` | The **Targets** tab — the capability board with lit / outlined / hatched cells. | Run the app, open **Targets**, screenshot the board |
 | `screenshot-config.svg` | The **Config** tab — server/key/branding fields with the live `custom_.txt` preview visible. | Open **Config**, fill a few fields, screenshot |
-| `screenshot-toolchains.svg` | The left-rail **toolchain panel** — tools with sizes, versions, install/remove buttons. | Screenshot the left rail with a few tools installed |
+| `screenshot-toolchains.svg` | The **Environment** tab's toolchain manager — tools with sizes, versions, install/remove buttons. | Open **Environment** with a few tools installed and screenshot the list |
 | `screenshot-console.svg` | The **Build** tab mid-run — streaming log lines in the console. | Start a build (or a dry-run **Preview plan**), screenshot the console |
 
 ## Tips for good screenshots
