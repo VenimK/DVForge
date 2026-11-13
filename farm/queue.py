@@ -629,7 +629,8 @@ def one_job(jid):
 
 
 def note_worker(os_name, worker_name, android=False, busy=None,
-                webhook=None, current_job=None, versions=None, arch=None):
+                webhook=None, current_job=None, versions=None, arch=None,
+                local_build=None):
     """Remember a /claim or /progress ping. In-memory; resets if queue.py restarts."""
     name = (worker_name or "").strip()
     if not name:
@@ -650,6 +651,8 @@ def note_worker(os_name, worker_name, android=False, busy=None,
             rec["webhook"] = webhook
         if current_job is not None:
             rec["current_job"] = current_job
+        if local_build is not None:
+            rec["local_build"] = local_build
         if versions is not None:
             rec["versions"] = versions
         claiming = list(CLAIM.get(rec.get("os") or "", ()) or ())
@@ -896,6 +899,7 @@ def farm_stats():
             "online": online,
             "busy": busy if online else False,
             "versions": rec.get("versions") or [],
+            "local_build": rec.get("local_build") or "",
         }
         item.update(rate)
         workers.append(item)
@@ -1088,10 +1092,12 @@ class Handler(BaseHTTPRequestHandler):
             versions = data.get("versions") or []
             host_arch = data.get("arch") or ""
             job = claim_job(os_name, worker, android, host_arch)
-            note_worker(os_name, worker, android, busy=bool(job),
+            note_worker(os_name, worker, android,
+                        busy=bool(job) or bool(data.get("building")),
                         webhook=webhook,
                         current_job=(job.get("id") if job else None),
-                        versions=versions, arch=host_arch)
+                        versions=versions, arch=host_arch,
+                        local_build=str(data.get("local_build") or "")[:80])
             if not job:
                 return self._send(200, {"ok": True, "job": None})
             return self._send(200, {"ok": True, "job": job})

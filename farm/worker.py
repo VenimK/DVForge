@@ -176,7 +176,26 @@ def fetch_versions(url):
         pass  # older app without /api/versions — leave WORKER_VERSIONS empty
 
 
-def claim_http():
+def local_build(url):
+    """What the local DVForge is compiling right now.
+
+    A build started from the browser UI has no queue job, so the queue can only
+    learn about it from this ping.
+    """
+    try:
+        st = http_json(url.rstrip("/") + "/api/build/status", timeout=10)
+    except Exception:
+        return None
+    if not st.get("running"):
+        return None
+    cur = st.get("current") or {}
+    label = " ".join(str(x) for x in (
+        cur.get("appname") or "", cur.get("version") or "",
+        ", ".join(cur.get("targets") or [])) if x)
+    return label.strip() or None
+
+
+def claim_http(url=None):
     payload = {
         "os": HOST,
         "arch": HOST_ARCH,
@@ -186,6 +205,11 @@ def claim_http():
     }
     if WEBHOOK:
         payload["webhook"] = WEBHOOK
+    if url:
+        label = local_build(url)
+        if label:
+            payload["building"] = True
+            payload["local_build"] = label
     r = http_json(QUEUE_BASE + "/claim", data=payload,
                   headers=_qheaders(), timeout=60)
     job = (r or {}).get("job")
@@ -782,7 +806,7 @@ def loop(farm, url, once):
     idle = 0
     while True:
         try:
-            job = claim_http() if QUEUE_BASE else claim_one(d)
+            job = claim_http(url) if QUEUE_BASE else claim_one(d)
         except Exception as e:
             idle += 1
             if idle == 1 or idle % 12 == 0:

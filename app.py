@@ -62,6 +62,7 @@ class BuildSession:
         self.history = []              # replay buffer for late subscribers
         self.running = False
         self.result = None
+        self.current = None            # what is building: appname / version / targets
 
     def _emit(self, line):
         with self.lock:
@@ -88,6 +89,11 @@ class BuildSession:
                 return False, "a build is already running"
             self.history = []
             self.result = None
+            self.current = {
+                "appname": (config.get("appname") or config.get("name") or "").strip(),
+                "version": version,
+                "targets": list(target_ids or []),
+            }
             self.build = orchestrator.Build(
                 version, target_ids, config, WORKSPACE,
                 log=self._emit, dry_run=dry_run,
@@ -443,6 +449,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json({
                 "running": SESSION.running,
                 "result": SESSION.result,
+                "current": SESSION.current if SESSION.running else None,
                 "log_tail": tail[-15:],
             })
         if path == "/api/toolchains":
