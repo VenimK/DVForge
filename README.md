@@ -104,9 +104,9 @@ The finished installer lands in <code>workspace/output/</code>.
 | <img src="docs/images/screenshot-targets.svg" width="420" alt="Capability board — which targets this machine can build" /> | <img src="docs/images/screenshot-config.svg" width="420" alt="Config tab — server, key, branding, permissions" /> |
 | **The board lights only what _this_ machine can build.** | **Everything that gets baked into the client.** |
 
-| Toolchain panel | Live build console |
+| Environment / toolchain panel | Live build console |
 |:---:|:---:|
-| <img src="docs/images/screenshot-toolchains.svg" width="420" alt="Toolchain panel — detect, install, sizes" /> | <img src="docs/images/screenshot-console.svg" width="420" alt="Build console — live streaming log" /> |
+| <img src="docs/images/screenshot-toolchains.svg" width="420" alt="Environment tab — detect, install, sizes" /> | <img src="docs/images/screenshot-console.svg" width="420" alt="Build console — live streaming log" /> |
 | **Detect, one-click install, on-disk sizes, remove.** | **Every command streamed live over SSE.** |
 
 </div>
@@ -163,7 +163,7 @@ profiles, private branding, server-policy patches and credentials are not includ
   tries Polkit; without an authentication agent it opens a local terminal for sudo.
   Passwords never go through the browser or build log. The terminal fallback needs
   a logged-in Linux desktop session, not an SSH session without a display.
-- **Sidebar installer race fixed:** late installer metadata refreshes prerequisite
+- **Toolchain installer race fixed:** late installer metadata refreshes prerequisite
   rows, so per-tool installation and the bulk install button do not disappear
   depending on which API response finishes first.
 - **Optional log and filters:** all output, errors, warnings, combined diagnostics,
@@ -180,7 +180,7 @@ profiles, private branding, server-policy patches and credentials are not includ
   separate outputs by OS, version and architecture.
 - **Existing farm hardening:** stricter transport/result checks; this is not a new
   generic authenticated worker controller.
-- **AppImage auto-install:** the sidebar can prepare a rootless Podman packaging
+- **AppImage auto-install:** the Environment tab can prepare a rootless Podman packaging
   image for Linux x86_64. On Debian/Ubuntu it installs missing Podman dependencies
   through the existing approval flow, then prepares an Ubuntu 22.04 image with a
   pinned RustDesk appimage-builder revision. Only packaging runs in the container;
@@ -190,14 +190,14 @@ profiles, private branding, server-policy patches and credentials are not includ
 mocked desktop/mobile wizard tests, including delayed installer metadata. Real
 local RustDesk 1.4.9 runs produced all seven selected macOS/Android outputs; earlier
 Linux x86_64 runs produced DEB/RPM packages. The user confirmed Linux authentication
-fallback and sidebar behavior on a Debian 13 derivative. These results do not prove
+fallback and Environment-tab behavior on a Debian 13 derivative. These results do not prove
 every platform, packaging format or client runtime feature works.
 
 **Still open:** Windows runtime/display-driver acceptance, native ARM acceptance,
 DRM/unattended Wayland and generic worker scheduling. The AppImage container
 installer is included, but its real image preparation and complete AppImage build
 are **not yet acceptance-tested**. Automated tests cover installer registration,
-sidebar readiness, wrapper creation and source-only mounts. Deselect AppImage to
+toolchain readiness, wrapper creation and source-only mounts. Deselect AppImage to
 build DEB/RPM without preparing this packaging environment.
 
 See [the audit report](docs/COMMUNITY-REPORT.md),
@@ -260,7 +260,7 @@ Your installer appears in **`workspace/output/<os>/<version>/<architecture>/`**.
 
 DVForge is three cooperating layers:
 
-1. **`web/`** — HTML + CSS + vanilla JS, with five wizard steps: **Environment**, **Config**, **Targets**, **Review**, **Build**, plus a left rail for toolchains and updates.
+1. **`web/`** — HTML + CSS + vanilla JS, with five wizard steps: **Environment**, **Config**, **Targets**, **Review**, **Build**, plus a left rail for machine specs, a toolchain readiness headline, and updates.
 2. **`app.py`** — a `ThreadingHTTPServer` built entirely on the Python standard library. It serves the static GUI, exposes a small JSON API, and fans out live build/install logs over **Server-Sent Events (SSE)**. No Flask, no FastAPI, no pip.
 3. **`builder/`** — the engine. Detection, toolchain management, config generation, source customization, and build orchestration (see [Project layout](#-project-layout) for the module map).
 
@@ -357,7 +357,7 @@ Sets up WSL + Debian, then installs Flutter / Android SDK+NDK / vcpkg / Rust / J
 
 ### Native Linux
 
-Clone the repo, ensure Python 3.8+, then `./run.sh` and use the toolchain panel's **install missing** to fetch Flutter, Rust, LLVM, NDK, JDK, and vcpkg into `.toolchains/`. Produces `.deb`, `.rpm`, `.AppImage`, and Android APKs.
+Clone the repo, ensure Python 3.8+, then `./run.sh` and use the **Environment** tab's **install missing** to fetch Flutter, Rust, LLVM, NDK, JDK, and vcpkg into `.toolchains/`. Produces `.deb`, `.rpm`, `.AppImage`, and Android APKs.
 
 ---
 
@@ -382,7 +382,9 @@ The server binds to `127.0.0.1` only — it is **not** exposed to your network b
 
 ## 🖱️ Using the GUI
 
-**Left rail — This machine + Toolchains.** Shows your detected CPU/OS spec, plus every toolchain with its state, download/on-disk size, version, a per-tool **remove (✕)**, and a total local footprint. **Install missing** grabs everything installable in one go (except VS Build Tools, which needs an explicit click). **Check for updates** pulls a newer DVForge commit when you want it.
+**Left rail — This machine.** Shows your detected CPU/OS spec, a compact **Toolchain** readiness headline for the default target, and **Check for updates** (pulls a newer DVForge commit when you want it).
+
+**Environment tab — Toolchains.** The single dependency and toolchain manager. Every required tool is listed with its state, download/on-disk size, version, a per-tool **remove (✕)**, and a total local footprint. Use the per-tool **install** buttons, **install missing** (everything installable in one go, except VS Build Tools, which needs an explicit click), or **Prepare environment** for the default target. **Re-scan** refreshes all status.
 
 **Targets tab — "What can this machine build?"** A board of every RustDesk target. Cell states:
 
@@ -530,7 +532,7 @@ Everything lives in **`configs/RustDesk.json`** — edit it in the GUI (recommen
 
 ## 🧰 Toolchains reference
 
-The left rail **detects** what you have and can **download a portable copy** of most tools into `.toolchains/` (no admin). Click **install** next to a gap, or **install missing**.
+The **Environment** tab **detects** what you have and can **download a portable copy** of most tools into `.toolchains/` (no admin). Click **install** next to a gap, use **install missing**, or run **Prepare environment** for the default target.
 
 | Tool | Version (pin) | Needed for |
 |---|---|---|
@@ -803,15 +805,16 @@ Hard-won fixes from real Windows/macOS/Linux test rounds (see `HANDOFF.md` for t
 | Symptom | Cause & fix |
 |---|---|
 | `linker link.exe not found` (Windows) | Rust's Windows host is MSVC. Install **VS Build Tools (C++)** — required for *all* Windows-host builds, including Android. Board cells will say *"install first: msbuild"* until it's present. |
-| `msbuild` still shows missing after install | Detection uses `vswhere`; a fresh terminal (or re-scan) flips it green once `link.exe` is available. |
+| `msbuild` still shows missing after install | Detection uses `vswhere`; a fresh terminal (or **re-scan** in the Environment tab) flips it green once `link.exe` is available. |
 | `WinError 740` on LLVM install | The official LLVM installer requires admin. DVForge runs it **elevated via one UAC prompt** — approve it. LLVM is only needed for Windows *desktop* builds. |
-| `WinError 2` on a tool (e.g. `flutter_rust_bridge_codegen`) | A tool isn't on PATH. `run()` resolves executables via `shutil.which` and adds `~/.cargo/bin`; if a tool is genuinely missing you'll get a clear message — install it from the toolchain panel. |
+| `WinError 2` on a tool (e.g. `flutter_rust_bridge_codegen`) | A tool isn't on PATH. `run()` resolves executables via `shutil.which` and adds `~/.cargo/bin`; if a tool is genuinely missing you'll get a clear message — install it from the **Environment** tab. |
 | `'charmap' codec can't decode 0x90` | Old Unicode crash on non-cp1252 build output — fixed (all subprocess output is decoded utf-8 / `errors="replace"`). Update to latest. |
 | `rustdesk-src already exists` | Reuse is managed by the builder: source customizations must match the selected revision while compatible build caches are preserved. Do not delete the whole workspace as a routine retry step. |
-| Sidebar says "Auto install" but no button appears | Fixed a loading race between prerequisite detection and installer metadata. Update this branch, restart the server, refresh the page, or click **re-scan**. |
+| Environment tab says "Auto install" but no button appears | Fixed a loading race between prerequisite detection and installer metadata. Update this branch, restart the server, refresh the page, or click **re-scan**. |
+| Flutter shows missing on first load, but **re-scan** finds it | Boot ran several `flutter --version` probes at once; Flutter's startup lock made the overlapping ones time out and look absent. Detection now shares one serialized probe, and re-scan/build preflight always probe fresh. A note starting "Flutter SDK files were found, but…" means the SDK is present but still initialising. |
 | `sudo: a password is required` | Dependency preparation requests Polkit approval or opens a local terminal. Keep DVForge running as the normal desktop user. |
 | `No authentication agent found` | The terminal fallback needs a Linux desktop display and a terminal emulator. Start DVForge from the local desktop session rather than SSH without a display. |
-| AppImage recipe requires `apt-key` on Debian 13 | Use the sidebar AppImage **install** action or **Auto install** to prepare the rootless packaging container. Debian/Ubuntu setup may request administrator approval for Podman packages. Actual AppImage acceptance remains pending. DEB/RPM do not require this environment. |
+| AppImage recipe requires `apt-key` on Debian 13 | Use the Environment tab AppImage **install** action or **Auto install** to prepare the rootless packaging container. Debian/Ubuntu setup may request administrator approval for Podman packages. Actual AppImage acceptance remains pending. DEB/RPM do not require this environment. |
 | `flutter pub get` failed / unusable package config | Fix the preceding solver/network/SDK error. Codegen stops instead of producing dummy bindings; do not blindly delete all caches. |
 | Android `.sh` scripts fail on Windows | They need bash; DVForge auto-finds **Git Bash** (`<Git>\bin\bash.exe`). If missing, install Git for Windows. Or build Android via **WSL2**. |
 | `ConnectionAbortedError` / `WinError 10053` spam | Normal SSE disconnect when you close the browser tab — harmless, now swallowed. |

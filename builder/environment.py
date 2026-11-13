@@ -94,7 +94,9 @@ def check(tool):
                 "hint": "Install dpkg packaging tools"}
     st = dict(prereqs.CHECKS[tool]())
     st["label"] = prereqs.LABELS.get(tool, tool)
-    if tool == "flutter" and st.get("present") and "3.24.5" not in st.get("version", ""):
+    if (tool == "flutter" and st.get("present")
+            and st.get("version")
+            and "3.24.5" not in st.get("version", "")):
         st.update(present=False, note="Pinned Flutter 3.24.5 required")
     if tool == "appimage_builder":
         from . import appimage_container
@@ -114,7 +116,11 @@ def report(target_ids, host=None):
         row = {"id": tool, **check(tool)}
         row["status"] = "installed" if row["present"] else "missing"
         rows.append(row)
-    problems += [f"Missing or invalid: {r['id']}" for r in rows if not r["present"]]
+    problems += [
+        f"Missing or invalid: {r['id']}"
+        + (f" ({r['note']})" if r.get("note") else "")
+        for r in rows if not r["present"]
+    ]
     return {"ok": not problems, "host": host, "requirements": rows, "problems": problems}
 
 
@@ -168,6 +174,9 @@ def run_native_installer(command, log):
 
 
 def ensure(target_ids, root, log, auto_install=False, cancelled=lambda: False):
+    # A build must not inherit a transient probe failure from the boot-time UI
+    # scans (Flutter's startup lock can make a cold probe time out).
+    prereqs.invalidate_flutter_probe()
     before = report(target_ids)
     if before["ok"] or not auto_install:
         return before
