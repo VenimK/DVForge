@@ -41,6 +41,8 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PUBLIC = os.path.join(HERE, "public")
+REPO_ROOT = os.path.dirname(HERE)
+WEB = os.path.join(REPO_ROOT, "web")
 FARM = os.environ.get("DVFORGE_FARM", HERE)
 TOKEN = os.environ.get("DVFORGE_FARM_TOKEN", "").strip()
 INBOX = os.path.join(FARM, "inbox")
@@ -48,6 +50,12 @@ OUTBOX = os.path.join(FARM, "outbox")
 FAILED = os.path.join(FARM, "failed")
 RUNNING = os.path.join(FARM, "running")
 SAFE_ID = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
+
+# The config page reuses web/style.css and web/advanced-keys.js, and the
+# preview endpoint imports builder.config_gen. Running queue.py from a DVForge
+# checkout is enough; sys.path[0] is farm/, so add the repo root explicitly.
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
 
 # Same prefixes as worker.py — HTTP workers claim through /claim instead of NFS.
 CLAIM = {
@@ -950,6 +958,52 @@ def health_stats():
     }
 
 
+def config_panel_html():
+    """The Config panel markup, lifted verbatim from web/index.html."""
+    index = os.path.join(WEB, "index.html")
+    try:
+        with open(index, encoding="utf-8") as f:
+            html = f.read()
+    except OSError:
+        return ""
+    start = html.find("<!-- CONFIG-PANEL:START")
+    if start < 0:
+        return ""
+    start = html.find("-->", start)
+    if start < 0:
+        return ""
+    end = html.find("<!-- CONFIG-PANEL:END", start)
+    if end < 0:
+        return ""
+    return html[start + 3:end].strip()
+
+
+def config_page_html():
+    """farm/public/config.html with the local Config panel injected."""
+    panel = config_panel_html()
+    if not panel:
+        return ""
+    try:
+        with open(os.path.join(PUBLIC, "config.html"), encoding="utf-8") as f:
+            page = f.read()
+    except OSError:
+        return ""
+    return page.replace("<!-- CONFIG_PANEL -->", panel, 1)
+
+
+def config_preview(cfg):
+    """Same CUSTOM_* values the local DVForge Config tab previews."""
+    if not isinstance(cfg, dict):
+        raise ValueError("config must be an object")
+    from builder import config_gen
+    env = config_gen.build_custom_env(cfg)
+    return {
+        "env": {k: v for k, v in env.items() if k != "CUSTOM_TXT"},
+        "custom_txt": env["CUSTOM_TXT"],
+        "custom_b64": env["CUSTOM_B64"],
+    }
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         sys.stderr.write("%s %s\n" % (self.address_string(), fmt % args))
@@ -986,7 +1040,17 @@ class Handler(BaseHTTPRequestHandler):
         self._cors()
         self.end_headers()
 
-    def _send_file(self, path, ctype=None):
+    def _send_page(self, html):
+        body = html.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self._cors()
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_file(self, path, ctype=None, attachment=True):
         with open(path, "rb") as f:
             body = f.read()
         if not ctype:
@@ -994,8 +1058,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Content-Disposition",
-                         "attachment; filename=\"%s\"" % os.path.basename(path))
+        if attachment:
+            self.send_header("Content-Disposition",
+                             "attachment; filename=\"%s\"" % os.path.basename(path))
+        self.send_header("Cache-Control", "no-cache")
         self._cors()
         self.end_headers()
         self.wfile.write(body)
@@ -1007,6 +1073,24 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, health_stats())
         if path == "/stats":
             return self._send(200, farm_stats())
+        if path in ("/config", "/config.html"):
+            page = config_page_html()
+            if not page:
+                return self._send(503, {
+                    "error": "config page needs the DVForge web/ directory "
+                             "next to farm/ (run queue.py from a DVForge checkout)"})
+            return self._send_page(page)
+        if path.startswith("/config-assets/"):
+            name = unquote(path.split("/", 2)[-1])
+            assets = {
+                "style.css": os.path.join(WEB, "style.css"),
+                "advanced-keys.js": os.path.join(WEB, "advanced-keys.js"),
+                "config.js": os.path.join(PUBLIC, "config.js"),
+            }
+            target = assets.get(name)
+            if not target or not os.path.isfile(target):
+                return self._send(404, {"error": "not found"})
+            return self._send_file(target, attachment=False)
         if path in ("/status", "/status.html", "/stats.html"):
             page = os.path.join(PUBLIC, "stats.html")
             if os.path.isfile(page):
@@ -1074,11 +1158,30 @@ class Handler(BaseHTTPRequestHandler):
         return self.rfile.read(n) if n else b""
 
     def do_POST(self):
-        if not self._auth():
-            return
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
         qs = parse_qs(parsed.query)
+
+        # Preview is deliberately public: it embeds no data and writes nothing.
+        # The config page is useful to someone who has not queued a job yet.
+        if path == "/config/preview":
+            try:
+                data = json.loads(self._body().decode("utf-8") or "{}")
+            except Exception as e:
+                return self._send(400, {"error": "bad json: %s" % e})
+            try:
+                return self._send(200, config_preview(data))
+            except ValueError as e:
+                return self._send(400, {"error": str(e)})
+            except ImportError:
+                return self._send(501, {
+                    "error": "preview unavailable: run queue.py from a "
+                             "DVForge checkout so builder/ is importable"})
+            except Exception as e:
+                return self._send(500, {"error": str(e)})
+
+        if not self._auth():
+            return
 
         if path == "/claim":
             try:
