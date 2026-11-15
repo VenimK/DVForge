@@ -111,6 +111,8 @@ select:focus, input:focus { outline: none; border-color: var(--steel); }
   </div>
   <h1>Request a branded client</h1>
   <p class="lede">Upload your <code>RustDesk.json</code> and pick what to build.
+    No config yet? <a href="/config" style="color:#5e9be0">Create or edit one here</a> —
+    it runs in your browser and never leaves this machine until you queue the job.
     When a Mac or Windows worker finishes, the installer appears here. Typical wait: 5–40 minutes.</p>
 
   <form id="f">
@@ -129,7 +131,8 @@ select:focus, input:focus { outline: none; border-color: var(--steel); }
     </label>
     <label>RustDesk.json
       <div class="file">
-        Export from DVForge (Config → Save) or rdgen.
+        Export from DVForge (Config → Save) or rdgen, or
+        <a href="/config" style="color:#5e9be0">create / edit one here</a>.
         <input type="file" name="json" accept=".json,application/json" required>
       </div>
     </label>

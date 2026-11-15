@@ -201,6 +201,23 @@ class CommunityTests(unittest.TestCase):
             self.assertFalse(handler._auth())
         handler._send.assert_called_once()
 
+    def test_farm_config_page_reuses_the_local_config_panel(self):
+        page = farm_queue.config_page_html()
+        self.assertIn('id="tab-config"', page)
+        self.assertIn('data-key="serverIP"', page)
+        self.assertIn('data-key="permanentPassword"', page)
+        self.assertIn("/config-assets/style.css", page)
+        self.assertIn("/config-assets/advanced-keys.js", page)
+        self.assertIn("/config-assets/config.js", page)
+
+    def test_farm_config_preview_matches_custom_txt(self):
+        out = farm_queue.config_preview(
+            {"appname": "Acme", "serverIP": "s.example", "key": "k"})
+        custom = json.loads(out["custom_txt"])
+        self.assertEqual("Acme", custom.get("app-name"))
+        self.assertEqual("Acme", out["env"]["CUSTOM_APPNAME"])
+        self.assertNotIn("CUSTOM_TXT", out["env"])
+
     def test_flutter_version_line_is_read_after_startup_preamble(self):
         prereqs.invalidate_flutter_probe()
         self.addCleanup(prereqs.invalidate_flutter_probe)

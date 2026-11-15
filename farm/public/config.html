@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<title>DVForge — client config</title>
+<link rel="stylesheet" href="/config-assets/style.css">
+<style>
+  /* farm queue wrapper: same bench as the local app, with JSON file controls */
+  body { padding-bottom: 40px; }
+  .main { padding-top: 30px; }
+  #tab-config { display: block; }
+  #config-next, #config-validation { display: none !important; }
+  #winpfx-selfsigned, #androidks-create, #macp12-selfsigned { display: none !important; }
+
+  .json-file label {
+    display: block; margin-top: 10px;
+    font-size: 12.5px; color: var(--ink-dim);
+  }
+  .json-file input[type="text"] {
+    width: 100%; margin-top: 5px; padding: 8px 10px;
+    background: var(--bg); border: 1px solid var(--line); border-radius: var(--r-sm);
+    color: var(--ink); font-family: var(--mono); font-size: 12.5px;
+  }
+  .json-file input[type="text"]:focus { outline: none; border-color: var(--steel); }
+  .json-file input[type="file"] {
+    width: 100%; margin-top: 6px; color: var(--ink-dim); font-size: 11.5px;
+  }
+  .json-file input[type="file"]::file-selector-button {
+    margin-right: 8px; padding: 5px 9px; border: 1px solid var(--line);
+    border-radius: var(--r-sm); background: var(--panel-2); color: var(--ink);
+    font-family: var(--sans); font-size: 11.5px; cursor: pointer;
+  }
+  .json-file input[type="file"]::file-selector-button:hover {
+    border-color: var(--steel); color: var(--steel);
+  }
+  .json-actions { display: flex; gap: 8px; margin-top: 10px; }
+  .json-note {
+    font-size: 11px; color: var(--ink-faint); line-height: 1.45;
+    margin: 10px 0 8px; overflow-wrap: anywhere;
+  }
+  .json-note.is-ok { color: var(--good); }
+  .json-note.is-bad { color: var(--bad); }
+  .farm-links { display: grid; gap: 8px; padding-bottom: 8px; }
+  .farm-links a { color: var(--steel); font-size: 12.5px; text-decoration: none; }
+  .farm-links a:hover { text-decoration: underline; }
+  .farm-foot { margin-top: auto; }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- ── left rail: JSON file + farm links ── -->
+  <aside class="rig">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true"></div>
+      <div>
+        <div class="brand-name">DVForge</div>
+        <div class="brand-sub">Client Config</div>
+      </div>
+    </div>
+
+    <section class="rig-card json-file">
+      <h2 class="rig-title">JSON file</h2>
+      <label>Load a RustDesk.json
+        <input type="file" id="json-load" accept=".json,application/json">
+      </label>
+      <label>Save as
+        <input type="text" id="json-filename" value="RustDesk.json" spellcheck="false" autocomplete="off">
+      </label>
+      <div class="json-actions">
+        <button class="mini" id="json-new" type="button" title="Start a blank config">New</button>
+        <button class="mini" id="json-save" type="button" title="Download the config to this computer">Save JSON</button>
+      </div>
+      <p class="json-note" id="json-status">New config — fill in the form, then save.</p>
+    </section>
+
+    <section class="rig-card">
+      <h2 class="rig-title">Farm queue</h2>
+      <div class="farm-links">
+        <a href="/">Request a client</a>
+        <a href="/status">Farm status</a>
+        <a href="/join">Set up a worker</a>
+      </div>
+    </section>
+
+    <footer class="rig-foot farm-foot">
+      <span class="rig-foot-note">Your JSON stays in this browser. Upload it on the
+        <a href="/" style="color:var(--steel)">request page</a> when you are ready to build.</span>
+    </footer>
+  </aside>
+
+  <!-- ── main: the local Config panel, verbatim ── -->
+  <main class="main">
+<!-- CONFIG_PANEL -->
+  </main>
+</div>
+
+<script src="/config-assets/advanced-keys.js"></script>
+<script src="/config-assets/config.js"></script>
+</body>
+</html>

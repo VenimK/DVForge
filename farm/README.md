@@ -178,6 +178,20 @@ When a worker starts, it queries its local DVForge app (`/api/versions`) for the
 
 ## 4. Submit jobs (from either PC)
 
+No config file yet? Open **`/config`** on the queue (e.g.
+`https://api.nas86.eu/config`) — it is the same Config form as local DVForge,
+running entirely in your browser:
+
+- **Load** an existing `RustDesk.json` (or start from a blank form).
+- Edit server/key/password, permissions, theme, advanced keys, and branding.
+- Icon, logo and signing files are embedded in the JSON as base64 blobs, so a
+  remote worker can recreate them.
+- **Save JSON** downloads a new `RustDesk.json` to your computer. Nothing is
+  uploaded until you submit the job.
+
+The page never stores your config on the queue; the preview endpoint only
+computes `custom_.txt` from the values already in your browser.
+
 ```bash
 # Mac job — only the Mac worker will take it
 python3 farm/submit.py --targets macos-arm64-dmg
@@ -237,9 +251,10 @@ nginx on the NAS only reverse-proxies `https://api.nas86.eu` → `http://192.168
 
 Install `farm/nginx-api.nas86.eu.conf` into nginx and add a DNS A record for `api.nas86.eu`.
 
-**Anyone:** open `https://api.nas86.eu/` — pick Windows / Mac / Android, upload `RustDesk.json`, wait, download.
+**Anyone:** open `https://api.nas86.eu/` — build a config at `/config`, then pick
+Windows / Mac / Android, upload that JSON, wait, download.
 
-Save the config in DVForge first. That embeds icon, logo, and signing **files** (`iconbase64`, `logobase64`, `signMacP12Base64`, …) in the JSON so a remote worker can recreate `workspace/branding/` and `workspace/signing/`. Apple **Developer ID** / Keychain identities are not files — they must already exist on the Mac worker. Passwords still travel in the JSON.
+Save the config in DVForge (or on the queue's `/config` page) first. That embeds icon, logo, and signing **files** (`iconbase64`, `logobase64`, `signMacP12Base64`, …) in the JSON so a remote worker can recreate `workspace/branding/` and `workspace/signing/`. Apple **Developer ID** / Keychain identities are not files — they must already exist on the Mac worker. Passwords still travel in the JSON.
 
 Workers need the updated `builder/config_gen.py` (restart DVForge there) so `POST /api/config` unpacks those blobs.
 
