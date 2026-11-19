@@ -3129,7 +3129,8 @@ class Build:
         self._vcpkg_publish_triplet(root, triplet, package_dir)
 
     def _patch_android_deps_script(self, path, host_tag):
-        """1.4.9 build_android_deps.sh hardcodes linux-x86_64 and GNU readlink -f."""
+        """1.4.9 build_android_deps.sh hardcodes linux-x86_64 and GNU readlink -f.
+        1.5.3+ braces the variables (${VCPKG_ROOT}, ${SCRIPTDIR}); match both forms."""
         if self.dry_run or not os.path.isfile(path) or not host_tag:
             return
         with open(path, encoding="utf-8", errors="replace") as f:
@@ -3137,14 +3138,17 @@ class Build:
         orig = text
         if 'DVFORGE_VCPKG_INSTALL_ROOT' not in text:
             text, count = re.subn(
-                r'--x-install-root="\$VCPKG_ROOT/installed"',
-                '--x-install-root="${DVFORGE_VCPKG_INSTALL_ROOT:-$VCPKG_ROOT/installed}"',
+                r'--x-install-root="(?:\$\{VCPKG_ROOT\}|\$VCPKG_ROOT)/installed"',
+                '--x-install-root="${DVFORGE_VCPKG_INSTALL_ROOT:-${VCPKG_ROOT}/installed}"',
                 text, count=1)
             if not count:
                 raise RuntimeError("Cannot isolate Android dependencies: unknown vcpkg install command")
         # Keep arm-neon's package name and status consistent. Publish the alias in Python.
-        text = re.sub(r'if \[ -d "\$VCPKG_ROOT/installed/arm-neon-android" \]; then.*?\nfi',
-                      '# DVForge publishes arm-android without renaming package contents.',
+        # 1.4.9 closes the block with an unindented fi; 1.5.3+ nests it inside an
+        # ANDROID_ABI if (indented fi) — stop at the first fi line so the enclosing
+        # if keeps its own fi, and keep a `:` so its body is never comment-only.
+        text = re.sub(r'if \[ -d "(?:\$\{VCPKG_ROOT\}|\$VCPKG_ROOT)/installed/arm-neon-android" \]; then.*?\n[ \t]*fi',
+                      '# DVForge publishes arm-android without renaming package contents.\n\t:',
                       text, flags=re.DOTALL)
         text, n_tag = re.subn(
             r'HOST_TAG="[^"]*"', f'HOST_TAG="{host_tag}"', text, count=1)
@@ -3152,7 +3156,7 @@ class Build:
             portable = 'SCRIPTDIR="$(cd "$(dirname "$0")" && pwd)"'
             text2, n_rl = re.subn(
                 r'SCRIPTDIR="\$\(readlink -f "\$0"\)"\s*\n'
-                r'SCRIPTDIR="\$\(dirname "\$SCRIPTDIR"\)"',
+                r'SCRIPTDIR="\$\(dirname "(?:\$\{SCRIPTDIR\}|\$SCRIPTDIR)"\)"',
                 portable, text, count=1)
             if n_rl:
                 text = text2
@@ -3160,7 +3164,7 @@ class Build:
                 text = text.replace(
                     'SCRIPTDIR="$(readlink -f "$0")"', portable, 1)
                 text, _ = re.subn(
-                    r'\nSCRIPTDIR="\$\(dirname "\$SCRIPTDIR"\)"',
+                    r'\nSCRIPTDIR="\$\(dirname "(?:\$\{SCRIPTDIR\}|\$SCRIPTDIR)"\)"',
                     "\n# dirname skipped; SCRIPTDIR is already the script dir",
                     text, count=1)
         if text != orig:
