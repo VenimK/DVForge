@@ -73,7 +73,7 @@ VERSION_PROFILES = {
     },
     "1.5.1": {
         "vcpkg_commit": "9e593bb18ea69cc5095e012465dcd675a822ed0d",
-        "label": "1.5.1 (latest)",
+        "label": "1.5.1",
         "git_ref": "1.5.1",
     },
     "master": {
@@ -178,6 +178,13 @@ def version_profiles():
             "vcpkg_commit": fallback_pin,
             "default": False,
         }
+    # "(latest)" marks the newest stable release across static + discovered
+    # tags, so a new GitHub release relabels itself without an edit here.
+    latest = max((v for v in entries
+                  if _parse_version(v) and "(pre)" not in entries[v]["label"]),
+                 key=_parse_version, default=None)
+    if latest:
+        entries[latest]["label"] += " (latest)"
     return [entries[k] for k in sorted(entries, key=_version_sort_key,
                                        reverse=True)]
 

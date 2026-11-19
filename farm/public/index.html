@@ -137,8 +137,8 @@ select:focus, input:focus { outline: none; border-color: var(--steel); }
       </div>
     </label>
     <label>RustDesk version
-      <select name="version">
-        <option value="1.5.1" selected>1.5.1 (latest)</option>
+      <select name="version" id="version">
+        <option value="1.5.1" selected>1.5.1</option>
         <option value="1.5.0">1.5.0</option>
         <option value="1.4.9">1.4.9</option>
         <option value="master">master (dev)</option>
@@ -182,6 +182,30 @@ function headers() {
   if (t) h["Authorization"] = "Bearer " + t;
   return h;
 }
+
+// Fill the version dropdown from /versions (union of worker-reported
+// versions). Falls back to the static <option>s when the endpoint fails.
+(async () => {
+  try {
+    const r = await fetch("/versions");
+    const list = ((await r.json()) || {}).versions || [];
+    if (!list.length) return;
+    const sel = $("#version");
+    const prev = sel.value;
+    sel.innerHTML = "";
+    let firstRelease = "";
+    for (const v of list) {
+      const o = document.createElement("option");
+      o.value = v;
+      const isRelease = /^\d/.test(v);
+      if (isRelease && !firstRelease) firstRelease = v;
+      o.textContent = isRelease ? v + (v === firstRelease ? " (latest)" : "")
+                                : v + " (dev)";
+      sel.appendChild(o);
+    }
+    sel.value = list.includes(prev) ? prev : (firstRelease || list[0]);
+  } catch (e) { /* offline / old queue — keep static options */ }
+})();
 
 $("#f").addEventListener("submit", async e => {
   e.preventDefault();

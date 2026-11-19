@@ -809,6 +809,31 @@ def _merge_progress_workers():
             WORKERS[worker] = rec
 
 
+# Fallback list for the request form until a version-aware worker registers
+# (workers report their RustDesk versions from the local DVForge /api/versions).
+STATIC_VERSIONS = ["1.5.1", "1.5.0", "1.4.9", "master"]
+
+
+def available_versions():
+    """RustDesk versions requestable on this farm: the union of what workers
+    reported, newest release first, branch refs last; static list when no
+    worker has reported versions (e.g. an outdated worker fleet)."""
+    seen = set()
+    with _LOCK:
+        for rec in WORKERS.values():
+            seen.update(v for v in (rec.get("versions") or []) if v)
+    if not seen:
+        seen = set(STATIC_VERSIONS)
+
+    def key(v):
+        m = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", v.strip())
+        return tuple(int(p) for p in m.groups()) if m else (0, 0, 0)
+
+    releases = sorted((v for v in seen if key(v)), key=key, reverse=True)
+    branches = sorted(v for v in seen if not key(v))
+    return releases + branches
+
+
 def farm_stats():
     """Public snapshot — no job ids, no config, no secrets."""
     _merge_progress_workers()
@@ -1073,6 +1098,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, health_stats())
         if path == "/stats":
             return self._send(200, farm_stats())
+        if path == "/versions":
+            return self._send(200, {"versions": available_versions()})
         if path in ("/config", "/config.html"):
             page = config_page_html()
             if not page:
