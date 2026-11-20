@@ -2348,6 +2348,15 @@ class Build:
             reasons.append(f"exe name changed ({have} -> {want})")
         if bad_prefix:
             reasons.append(f"CMAKE_INSTALL_PREFIX={prefix} needs admin")
+        # A wiped or interrupted build can leave ephemeral half-populated:
+        # Flutter stamps it as done, so cpp_client_wrapper is never re-copied
+        # and MSBuild fails with C1083 on core_implementations.cc et al.
+        ephemeral = os.path.join(self.src_dir, "flutter", "windows",
+                                 "flutter", "ephemeral")
+        wrapper_core = os.path.join(ephemeral, "cpp_client_wrapper",
+                                    "core_implementations.cc")
+        if os.path.isdir(ephemeral) and not os.path.isfile(wrapper_core):
+            reasons.append("ephemeral incomplete (cpp_client_wrapper missing)")
         if not reasons:
             if have:
                 self.log(f"  · flutter windows cache matches BINARY_NAME={want}")
@@ -2360,8 +2369,6 @@ class Build:
         except Exception as e:
             self.log(f"  ! could not clear flutter windows cache: {e}")
         # Ephemeral plugin files were generated against the old target too.
-        ephemeral = os.path.join(self.src_dir, "flutter", "windows",
-                                 "flutter", "ephemeral")
         if os.path.isdir(ephemeral):
             try:
                 _force_rmtree(ephemeral)
