@@ -39,6 +39,41 @@ nugetmsi.txt
 .env
 farm/ratings.json
 
+# === Farm runtime state (machine-local job queue, never committed) ===
+farm/inbox/
+farm/running/
+farm/outbox/
+farm/failed/
+farm/*.lock
+
+# === Local backup / scratch copies (machine-specific) ===
+# Scratch naming in this project: `_name`, `mname`, `name2.ext`.
+# Patterns are deliberately narrow so real files (macos_lipo.py, WSL2.ps1,
+# Cargo.lock) are never caught; tracked files stay tracked either way.
+_*.*
+_*.json
+*2.py
+*2.html
+*2.cjs
+*.pyd
+Mapp.py
+builder/fasterwindowsbuilds.py
+builder/morchestrator.py
+buildertemp/
+farm/mqueue.py
+farm/mworker.py
+farm/queue2.py
+farm/public/mstats.html
+farm/1README.md
+farm/_README.md
+mREADME.md
+1README.md
+patches/m*.diff
+tests/m*.py
+.qwen/
+backups/
+/stop-farm.sh
+
 # === Keep these tracked (don't ignore) ===
 !clean.sh
 !clean.bat
