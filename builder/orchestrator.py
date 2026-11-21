@@ -2351,12 +2351,26 @@ class Build:
         # A wiped or interrupted build can leave ephemeral half-populated:
         # Flutter stamps it as done, so cpp_client_wrapper is never re-copied
         # and MSBuild fails with C1083 on core_implementations.cc et al.
+        # Issue #34: farm nodes hit this deterministically because workspace
+        # reuse keeps the half-populated ephemeral across jobs. Check every
+        # generated file MSBuild compiles, not just the first one.
         ephemeral = os.path.join(self.src_dir, "flutter", "windows",
                                  "flutter", "ephemeral")
-        wrapper_core = os.path.join(ephemeral, "cpp_client_wrapper",
-                                    "core_implementations.cc")
-        if os.path.isdir(ephemeral) and not os.path.isfile(wrapper_core):
-            reasons.append("ephemeral incomplete (cpp_client_wrapper missing)")
+        if os.path.isdir(ephemeral):
+            required = (
+                os.path.join("cpp_client_wrapper", "core_implementations.cc"),
+                os.path.join("cpp_client_wrapper", "standard_codec.cc"),
+                os.path.join("cpp_client_wrapper", "plugin_registrar.cc"),
+                os.path.join("cpp_client_wrapper", "flutter_engine.cc"),
+                os.path.join("cpp_client_wrapper", "flutter_view_controller.cc"),
+                "flutter_windows.dll",
+            )
+            missing = [name for name in required
+                       if not os.path.isfile(os.path.join(ephemeral, name))]
+            if missing:
+                reasons.append(
+                    "ephemeral incomplete ("
+                    + ", ".join(os.path.basename(m) for m in missing) + ")")
         if not reasons:
             if have:
                 self.log(f"  · flutter windows cache matches BINARY_NAME={want}")
