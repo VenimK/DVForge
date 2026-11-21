@@ -48,3 +48,5 @@ CI only builds/pushes the farm Docker image (`.github/workflows/docker-build-far
 Two machines run DVForge (macOS + a Windows farm node, `C:\DVForge`). GitHub `main` is the single source of truth: `git pull` at session start, commit+push at session end. Never hand-copy files between checkouts — that creates drift the next pull can't reconcile. `configs/RustDesk.json` holds a private customer profile on the working nodes; keep it unpushed (`git update-index --skip-worktree configs/RustDesk.json`) and use the upstream sample in the repo.
 
 Fork → feature branch → PR noting OS/targets tested. Nothing is committed/pushed automatically. Separate *measured* results from claims when touching `docs/`.
+
+Issue triage: link a user-given GitHub issue/PR to the OpenChamber session with `session.link`; when a fix for it is pushed, post an issue comment referencing the commit and asking the reporter to pull and retest.
