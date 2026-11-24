@@ -210,6 +210,21 @@ class CommunityTests(unittest.TestCase):
         self.assertIn("/config-assets/advanced-keys.js", page)
         self.assertIn("/config-assets/config.js", page)
 
+    def test_farm_config_assets_resolve_next_to_queue_in_the_image(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "web"))
+            image_root = os.path.join(tmp, "repo-missing")
+            with patch.object(farm_queue, "REPO_ROOT", image_root), \
+                    patch.object(farm_queue, "HERE", tmp), \
+                    patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("DVFORGE_WEB", None)
+                self.assertEqual(os.path.join(tmp, "web"),
+                                 farm_queue._repo_dir("web", "DVFORGE_WEB"))
+                os.makedirs(os.path.join(tmp, "override"))
+                with patch.dict(os.environ, {"DVFORGE_WEB": os.path.join(tmp, "override")}):
+                    self.assertEqual(os.path.join(tmp, "override"),
+                                     farm_queue._repo_dir("web", "DVFORGE_WEB"))
+
     def test_farm_config_preview_matches_custom_txt(self):
         out = farm_queue.config_preview(
             {"appname": "Acme", "serverIP": "s.example", "key": "k"})

@@ -1,6 +1,9 @@
 services:
   dvforge-queue:
-    build: .
+    # Build from the repo root so web/ and builder/ come along for the config page.
+    build:
+      context: ..
+      dockerfile: farm/Dockerfile
     container_name: dvforge-queue
     restart: unless-stopped
     ports:
