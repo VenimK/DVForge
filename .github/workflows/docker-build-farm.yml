@@ -37,7 +37,7 @@ jobs:
         with:
           # Root context: the queue image needs farm/, web/ and builder/.
           context: .
-          dockerfile: farm/Dockerfile
+          file: farm/Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
