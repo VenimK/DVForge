@@ -2,7 +2,11 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-COPY . .
+COPY farm/ /app/
+COPY web/ /app/web/
+COPY builder/config_gen.py /app/builder/config_gen.py
+
+RUN mkdir -p /app/farm
 
 EXPOSE 8766
 

@@ -1,0 +1,32 @@
+# The farm image builds from the repo root so it can copy farm/, web/ and
+# builder/config_gen.py. Keep the context small and free of private data.
+
+# Build outputs and toolchains
+workspace/
+.toolchains/
+backups/
+
+# Private customer profiles â€” never in an image
+configs/
+
+# Farm runtime state on the machine that built the image
+farm/inbox/
+farm/outbox/
+farm/running/
+farm/failed/
+farm/farm_data/
+farm/*.lock
+farm/ratings.json
+
+# Git / CI / editor / test cruft
+.git/
+.github/
+.pytest_cache/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.bak
+**/*.log
+.DS_Store
+.vscode/
+.idea/

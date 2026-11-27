@@ -42,7 +42,28 @@ from urllib.parse import parse_qs, unquote, urlparse
 HERE = os.path.dirname(os.path.abspath(__file__))
 PUBLIC = os.path.join(HERE, "public")
 REPO_ROOT = os.path.dirname(HERE)
-WEB = os.path.join(REPO_ROOT, "web")
+
+
+def _repo_dir(name, env_var):
+    """Find a DVForge repo directory in a checkout or in the farm image.
+
+    A checkout has web/ next to farm/; the Docker image copies web/ next to
+    queue.py instead. DVFORGE_WEB-style env vars win, then the checkout layout,
+    then the image layout.
+    """
+    candidates = []
+    override = (os.environ.get(env_var) or "").strip()
+    if override:
+        candidates.append(override)
+    candidates.append(os.path.join(REPO_ROOT, name))
+    candidates.append(os.path.join(HERE, name))
+    for path in candidates:
+        if os.path.isdir(path):
+            return path
+    return candidates[0]
+
+
+WEB = _repo_dir("web", "DVFORGE_WEB")
 FARM = os.environ.get("DVFORGE_FARM", HERE)
 TOKEN = os.environ.get("DVFORGE_FARM_TOKEN", "").strip()
 INBOX = os.path.join(FARM, "inbox")
@@ -52,8 +73,9 @@ RUNNING = os.path.join(FARM, "running")
 SAFE_ID = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
 
 # The config page reuses web/style.css and web/advanced-keys.js, and the
-# preview endpoint imports builder.config_gen. Running queue.py from a DVForge
-# checkout is enough; sys.path[0] is farm/, so add the repo root explicitly.
+# preview endpoint imports builder.config_gen. In a checkout those live under
+# the repo root (sys.path[0] is farm/, so add it); in the farm image they sit
+# next to queue.py, which Python already searches.
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
@@ -1105,7 +1127,8 @@ class Handler(BaseHTTPRequestHandler):
             if not page:
                 return self._send(503, {
                     "error": "config page needs the DVForge web/ directory "
-                             "next to farm/ (run queue.py from a DVForge checkout)"})
+                             "next to farm/ (run queue.py from a DVForge checkout, "
+                             "or build the image from the repo root)"})
             return self._send_page(page)
         if path.startswith("/config-assets/"):
             name = unquote(path.split("/", 2)[-1])
